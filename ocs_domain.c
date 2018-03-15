@@ -1,7 +1,7 @@
 /*
  *  BSD LICENSE
  *
- *  Copyright (c) 2011-2015, Broadcom.  All Rights Reserved.
+ *  Copyright (c) 2011-2018, Broadcom.  All Rights Reserved.
  *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
