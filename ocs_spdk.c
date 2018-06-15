@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -38,7 +38,7 @@
 #include "fc/fc.h"
 #include "ocs_spdk.h"
 #include "ocs_impl.h"
-#include <pciaccess.h>
+//#include <pciaccess.h>
 
 struct spdk_ocs_t *spdk_ocs_devices[MAX_OCS_DEVICES];
 

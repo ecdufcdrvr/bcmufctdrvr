@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -48,10 +48,10 @@
 #include "spdk/env.h"
 #include "spdk/string.h"
 #include "spdk/event.h"
+#include "spdk/io_channel.h"
 #include "fc/fc.h"
-#include "nvmf_fc/bcm_fc.h"
 
-#include <nvmf/nvmf_internal.h>
+#include "spdk_nvmf_xport.h"
 
 #include <rte_debug.h>
 #include <rte_config.h>
@@ -181,10 +181,12 @@ ocs_alloc_lcore(void)
 	uint32_t least_assigned = 0, i = 0;
 
 	RTE_LCORE_FOREACH_SLAVE(i) {
+#if 0 // TODO: NEW SPDK - FIX the lcore mask skip (if needed still)
 		/* If this is nvmf lcore skip */
 		if ((g_nvmf_tgt.opts.lcore_mask >> i) & 0x1) {
 			continue;
 		}
+#endif
 
 		if (!least_assigned || (g_fc_lcore[i] < least_assigned)) {
 			least_assigned = g_fc_lcore[i];
@@ -208,24 +210,26 @@ ocs_release_lcore(uint32_t lcore)
 	g_fc_lcore[lcore]--;
 }
 
-void
+int
 ocs_spdk_fc_poller(void *arg)
 {
 	hal_eq_t *hal_eq = arg;
 	ocs_hal_t *hal	= hal_eq->hal;
 
 	ocs_hal_process(hal, hal_eq->instance, OCS_OS_MAX_ISR_TIME_MSEC);
+
+	return 0;
 }
 
 void
 ocs_spdk_poller_stop(ocs_t *ocs)
 {
 	uint32_t i, index = ocs_instance(ocs);
-	uint32_t pollers_required = ocs->hal.config.n_eq - (NVMF_FC_MAX_IO_QUEUES + 1);
+	uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
 
 	if (ocs != NULL) {
 		for (i = 0; i < pollers_required; i++) {
-			spdk_poller_unregister(&g_fc_port_poller[index][i].spdk_poller, NULL);
+			spdk_poller_unregister(&g_fc_port_poller[index][i].spdk_poller);
 			ocs_release_lcore(g_fc_port_poller[index][i].lcore);
 		}
 		ocs_log_debug(ocs, "Destroying poller threads on port : %d\n", index);
@@ -236,16 +240,14 @@ static void
 ocs_delay_poller_start(void *arg1, void *arg2)
 {
 	struct ocs_spdk_fc_poller *poller = arg1;
-	hal_eq_t *eq = arg2;
-
-	spdk_poller_register(&poller->spdk_poller, ocs_spdk_fc_poller, eq, poller->lcore, 0);
+	poller->spdk_poller = spdk_poller_register(ocs_spdk_fc_poller, arg2, 0);
 }
 
 static int
 ocs_create_pollers(ocs_t *ocs)
 {
 	uint32_t index = 0, i, lcore_id;
-	uint32_t pollers_required = ocs->hal.config.n_eq - (NVMF_FC_MAX_IO_QUEUES + 1);
+	uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
 	struct spdk_event *event = NULL;
 
 	for (i = 0; i < pollers_required; i++) {
@@ -258,10 +260,9 @@ ocs_create_pollers(ocs_t *ocs)
 			ocs_instance(ocs), lcore_id);
 
 		g_fc_port_poller[ocs_instance(ocs)][index].lcore = lcore_id;
-
-		event = spdk_event_allocate(spdk_env_get_master_lcore(),
-				ocs_delay_poller_start,
-				(void *)&g_fc_port_poller[ocs_instance(ocs)][index], ocs->hal.hal_eq[index]);
+		event = spdk_event_allocate(lcore_id, ocs_delay_poller_start,
+	 				    (void *)&g_fc_port_poller[ocs_instance(ocs)][index],
+					    ocs->hal.hal_eq[index]);
 		spdk_event_call(event);
 
 		index++;
@@ -329,13 +330,13 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		ocs->enable_ini = hba_port->initiator;
 		ocs->enable_tgt = hba_port->target;
 		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, NVMF_FC_MAX_IO_QUEUES);
+			MRQ_TOPOLOGY, OCS_NVME_FC_MAX_IO_QUEUES);
 	} else {
 		// use default
 		ocs->enable_ini = initiator;
 		ocs->enable_tgt = target;
 		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, NVMF_FC_MAX_IO_QUEUES);
+			MRQ_TOPOLOGY, OCS_NVME_FC_MAX_IO_QUEUES);
 	}
 
 	// For now always enable.
@@ -443,7 +444,7 @@ ocsu_device_add(struct spdk_pci_addr *pci_addr)
 	ocs_t *ocs;
 	struct ocs_spdk_device 	*dev;
 	struct spdk_ocs_t 	*spdk_ocs;
-	struct spdk_pci_device 	*pci_dev;
+	struct spdk_pci_device 	*pci_dev = NULL;
 	uint16_t 		vendor_id, device_id;
 
 	if (!pci_addr) {
@@ -469,7 +470,8 @@ ocsu_device_add(struct spdk_pci_addr *pci_addr)
 		goto error1;
 	}
 
-	pci_dev = spdk_pci_get_device(pci_addr);
+	/* TODO: No equivalent call in 18.04. For now disable this. */
+	// pci_dev = spdk_pci_get_device(pci_addr);
 	if (!pci_dev) {
 		ocs_log_err(ocs, "%s: PCI device not found.\n", __func__)
 		goto error1;

@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2016-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -100,8 +100,8 @@ void spdk_fc_ini_init(
 	spdk_fc_ini_bdev_list_update_cb cb)
 {
 #ifdef DEBUG
-	extern struct spdk_trace_flag SPDK_TRACE_FC_BDEV;
-	SPDK_TRACE_FC_BDEV.enabled = true;
+	extern struct spdk_trace_flag SPDK_LOG_FC_BDEV;
+	SPDK_LOG_FC_BDEV.enabled = true;
 #endif
 
 	if (g_fc_ini_init_done == false) {
@@ -133,22 +133,22 @@ int spdk_fc_ini_writev(
 		return SPDK_FC_INI_ERROR_NOT_INIT;
 
 	if (len == 0) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "zero data length\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "zero data length\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if ((bdev == NULL) || (iov == NULL) || (iovcnt == 0)) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "invalid parameters (null)\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "invalid parameters (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if (bdev->is_ready == false) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "bdev is_ready is false\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "bdev is_ready is false\n");
 		return SPDK_FC_INI_ERROR_DEVICE_NOT_READY;
 	}
 
 	if (cb == NULL) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"callback parameter invalid (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
@@ -187,22 +187,22 @@ int spdk_fc_ini_readv(
 		return SPDK_FC_INI_ERROR_NOT_INIT;
 
 	if (len == 0) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "zero data length\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "zero data length\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if ((bdev == NULL) || (iov == NULL) || (iovcnt == 0)) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "invalid parameters (null)\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "invalid parameters (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if (bdev->is_ready == false) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "bdev is_ready is false\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "bdev is_ready is false\n");
 		return SPDK_FC_INI_ERROR_DEVICE_NOT_READY;
 	}
 
 	if (cb == NULL) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"callback parameter invalid (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
@@ -243,19 +243,19 @@ int spdk_fc_ini_scsi_pass_thru(
 		return SPDK_FC_INI_ERROR_NOT_INIT;
 
 	if ((bdev == NULL) || (scsi_cdb == NULL)) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "invalid parameter (null)\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "invalid parameter (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if (cb == NULL) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"callback parameter invalid (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	req = spdk_fc_ini_blkreq_get();
 	if (!req) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"spdk_fc_ini_blkreq_get allocation failed\n");
 		return SPDK_FC_INI_ERROR_NO_MEM;
 	}
@@ -315,13 +315,13 @@ spdk_fc_ini_scsi_passthru_completion(void *arg1, void *arg2)
 	if (info->cmd_result.host_result != SPDK_FC_INI_ERROR_TIMEOUT) {
 		if (req->gencnt != info->bdev->gencnt) {
 			info->cmd_result.host_result = SPDK_FC_INI_ERROR_GENCNT;
-			SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+			SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 				"gencnt mismatch, req->gencnt = %x, bdev->gencnt = %x\n",
 				req->gencnt, info->bdev->gencnt);
 		}
 
 		if (cb) {
-			SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+			SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 				"scsi pass-thru callback to client\n");
 			cb(info);
 		}
@@ -345,18 +345,18 @@ spdk_fc_ini_reset(
 		return SPDK_FC_INI_ERROR_NOT_INIT;
 
 	if (bdev == NULL) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"invalid parameter (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 
 	if (cb == NULL) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"callback parameter invalid (null)\n");
 		return SPDK_FC_INI_ERROR_INVALID;
 	}
 	if (bdev->is_ready == false) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "bdev is_ready is false\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "bdev is_ready is false\n");
 		return SPDK_FC_INI_ERROR_DEVICE_NOT_READY;
 	}
 
@@ -369,7 +369,7 @@ spdk_fc_ini_reset(
 
 	req = spdk_fc_ini_blkreq_get();
 	if (!req) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"spdk_fc_ini_blkreq_get allocation failed\n");
 		return SPDK_FC_INI_ERROR_NO_MEM;
 	}
@@ -416,7 +416,7 @@ spdk_fc_ini_reset_completion(void *arg1, void *arg2)
 	}
 
 	if (cb) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"reset callback to client\n");
 		cb(info); /* call the user completion function */
 	}
@@ -441,7 +441,7 @@ issue_test_unit_ready(struct spdk_fc_ini_bdev *bdev,
 
 	req = spdk_fc_ini_blkreq_get();
 	if (!req) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"spdk_fc_ini_blkreq_get allocation failed\n");
 		return SPDK_FC_INI_ERROR_NO_MEM;
 	}
@@ -467,7 +467,7 @@ issue_test_unit_ready(struct spdk_fc_ini_bdev *bdev,
 
 	rc = ocs_ml_fc_queue_cmd(req);
 	if (rc) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV,
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV,
 			"ocs_ml_fc_queue_cmd ERROR, rc = %d\n", rc);
 		req->cb_func = NULL;
 		spdk_event_call(req->done_event);
@@ -491,19 +491,19 @@ test_unit_ready_completion(void *arg1, void *arg2)
 		(((info->cmd_result.scsi_resp[2] & 0x0f) == NO_SENSE))) {
 		info->bdev->gencnt = req->gencnt;
 		info->bdev->is_ready = true;
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "TUR (FLUSH) SUCCEEDED\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "TUR (FLUSH) SUCCEEDED\n");
 	} else if ((info->cmd_result.scsi_resp[2] & 0x0f) == NOT_READY) {
 		info->cmd_result.host_result = SPDK_FC_INI_ERROR_DEVICE_NOT_READY;
 		info->bdev->is_ready = false;
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "TUR (FLUSH) DEVICE_NOT_READY\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "TUR (FLUSH) DEVICE_NOT_READY\n");
 	} else if ((info->cmd_result.scsi_resp[2] & 0x0f) == ILLEGAL_REQUEST) {
 		info->cmd_result.host_result = SPDK_FC_INI_ERROR_ILLEGAL_REQUEST;
 		info->bdev->is_ready = false;
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "TUR (FLUSH) ILLEGAL_REQUEST\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "TUR (FLUSH) ILLEGAL_REQUEST\n");
 	}
 
 	if (cb) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "TUR (FLUSH) callback to client\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "TUR (FLUSH) callback to client\n");
 		cb(info);
 	}
 
@@ -532,7 +532,7 @@ spdk_fc_ini_blkreq_alloc(void)
 void
 spdk_fc_ini_blkreq_free(void)
 {
-	SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "\n");
+	SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "\n");
 
 	if (blkreq_mempool) {
 		rte_mempool_free(blkreq_mempool);
@@ -547,10 +547,10 @@ ocs_blk_req_t* spdk_fc_ini_blkreq_get(void)
 
 	rc = rte_mempool_get(blkreq_mempool, (void **)&req);
 	if (rc) {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "ERROR  - getting mempool block\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "ERROR  - getting mempool block\n");
 		return NULL;
 	} else {
-		SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "req = %p\n", (void *)req);
+		SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "req = %p\n", (void *)req);
 		return req;
 	}
 }
@@ -558,10 +558,10 @@ ocs_blk_req_t* spdk_fc_ini_blkreq_get(void)
 static
 void spdk_fc_ini_blkreq_put(ocs_blk_req_t *req)
 {
-	SPDK_TRACELOG(SPDK_TRACE_FC_BDEV, "req = %p\n", (void *)req);
+	SPDK_DEBUGLOG(SPDK_LOG_FC_BDEV, "req = %p\n", (void *)req);
 	rte_mempool_put(blkreq_mempool, req);
 }
 
-SPDK_LOG_REGISTER_TRACE_FLAG("fc_ini_bdev", SPDK_TRACE_FC_BDEV)
+SPDK_LOG_REGISTER_COMPONENT("fc_ini_bdev", SPDK_LOG_FC_BDEV)
 
 

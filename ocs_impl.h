@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -42,6 +42,7 @@
 #include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_version.h>
+#include <rte_bus_pci.h>
 #include <stdbool.h>
 
 #include "spdk/env.h"
@@ -71,7 +72,7 @@ static inline void *
 ocs_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_addr)
 {
 	void *buf = rte_zmalloc(tag, size, align);
-	*phys_addr = rte_malloc_virt2phy(buf);
+	*phys_addr = spdk_vtophys(buf);
 	return buf;
 }
 
@@ -208,9 +209,9 @@ ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev
 	g_ocs_pci_enum_ctx.user_enum_cb = enum_cb;
 	g_ocs_pci_enum_ctx.user_enum_ctx = enum_ctx;
 
-	rte_eal_pci_register(&ocs_rte_driver);
-	rc = rte_eal_pci_probe();
-	rte_eal_pci_unregister(&ocs_rte_driver);
+	rte_pci_register(&ocs_rte_driver);
+	rc = rte_bus_probe();
+	rte_pci_unregister(&ocs_rte_driver);
 
 	return rc;
 }

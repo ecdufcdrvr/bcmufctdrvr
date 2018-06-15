@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -42,6 +42,7 @@
 #include "ocs_impl.h"
 #include "spdk/env.h"
 #include "spdk/event.h"
+#include "spdk/io_channel.h"
 
 /* @brief Select DMA buffer allocation method
  */
@@ -789,14 +790,17 @@ ocs_sem_init(ocs_sem_t *sem, int val, const char *name, ...)
 	return sem_init(&sem->sem, 0, val);
 }
 
-void ocs_spdk_timer_cb(void *arg)
+int
+ocs_spdk_timer_cb(void *arg)
 {
 	ocs_timer_t *timer = arg;
 
-	spdk_poller_unregister(&timer->timer, NULL);
+	spdk_poller_unregister(&timer->timer);
 	timer->timer = NULL;
 
 	timer->timer_cb(timer->timer_cb_arg);
+	
+	return 0;
 }
 
 int32_t
@@ -810,8 +814,8 @@ ocs_setup_timer(ocs_os_handle_t os, ocs_timer_t *timer,
 	timer->timer_cb_arg = data;
 	timer->timer = NULL;
 
-	spdk_poller_register(&timer->timer, ocs_spdk_timer_cb, timer,
-			rte_lcore_id(), (uint64_t)timeout_ms);
+	timer->timer = spdk_poller_register(ocs_spdk_timer_cb, (void *) timer,
+					    (uint64_t)timeout_ms);
 
 	return 0;
 }
@@ -821,11 +825,11 @@ ocs_mod_timer(ocs_timer_t *timer, uint32_t timeout_ms)
 {
 	if (timer->timer_cb) { // Means previously initialised.
 		if (timer->timer) { // Currently running
-			spdk_poller_unregister(&timer->timer, NULL);
+			spdk_poller_unregister(&timer->timer);
 			timer->timer = NULL;
 		}
-		spdk_poller_register(&timer->timer, ocs_spdk_timer_cb, timer,
-			rte_lcore_id(), (uint64_t)timeout_ms);
+		timer->timer = spdk_poller_register(ocs_spdk_timer_cb, (void *) timer,
+						    (uint64_t)timeout_ms);
 		return 0;
 	}
 
@@ -847,7 +851,7 @@ int32_t
 ocs_del_timer(ocs_timer_t *timer)
 {
 	if (timer->timer) {
-		spdk_poller_unregister(&timer->timer, NULL);
+		spdk_poller_unregister(&timer->timer);
 	}
 	timer->timer 	= NULL;
 	timer->timer_cb = NULL;

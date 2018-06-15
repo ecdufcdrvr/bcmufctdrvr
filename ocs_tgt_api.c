@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -45,6 +45,7 @@
 #include "ocs_els.h"
 #include "ocs_fabric.h"
 #include "fc_subsystem.h"
+#include "spdk/scsi_spec.h"
 
 bool
 spdk_fc_api_subsystem_init(void)
@@ -369,8 +370,9 @@ spdk_fc_api_add_lun_map(struct spdk_fc_lun_map *lun_map)
 	ocs_memcpy(new_lun_map, lun_map, sizeof(struct spdk_fc_lun_map));
 	snprintf(name, sizeof(name), "LunMapping%d", lun_map->id);
 
-	new_lun_map->scsi_dev = spdk_scsi_dev_construct(name, p_lun_names,
-			new_lun_map->lun_ids, new_lun_map->num_luns);	
+	new_lun_map->scsi_dev = spdk_scsi_dev_construct(name, (const char **)p_lun_names,
+			new_lun_map->lun_ids, new_lun_map->num_luns,
+			SPDK_SPC_PROTOCOL_IDENTIFIER_FC, NULL, NULL);	
 	if (!new_lun_map->scsi_dev) {
 		ocs_log_err(NULL, "SCSI dev creation failed\n");
 		goto fail;

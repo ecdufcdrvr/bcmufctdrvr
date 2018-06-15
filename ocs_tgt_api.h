@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -108,6 +108,7 @@ struct spdk_fc_hba_port {
 	TAILQ_ENTRY(spdk_fc_hba_port) tailq;
 };
 
+#define SPDK_SCSI_LUN_MAX_NAME_LENGTH 16
 
 struct spdk_fc_lun_map {
 	int id;
@@ -283,8 +284,5 @@ spdk_fc_api_subsystem_init(void);
 
 bool
 spdk_fc_api_subsystem_exit(void);
-
-struct spdk_nvmf_bcm_fc_master_ops;
-void spdk_nvmf_fc_register_ops(struct spdk_nvmf_bcm_fc_master_ops *);
 
 #endif // __SPDK_FC_TGT_API_H__

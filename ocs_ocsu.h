@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -47,7 +47,7 @@ extern int32_t ocsu_terminate_event_threads(ocs_t *ocs);
 extern int32_t ocsu_wait_event(ocs_t *ocs, uint32_t num_interrupts);
 extern int32_t ocsu_wait_event_list(ocs_t *devlist[], uint8_t *pending, uint32_t devcount);
 extern int32_t ocsu_process_events(ocs_t *ocs);
-extern void ocs_spdk_fc_poller(void *arg);
+extern int ocs_spdk_fc_poller(void *arg);
 extern void ocs_spdk_poller_stop(ocs_t *ocs);
 extern bool ocsu_device_remove(struct spdk_pci_addr *pci_addr);
 extern bool ocsu_device_add(struct spdk_pci_addr *pci_addr);

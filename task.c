@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -38,13 +38,22 @@
 #include "fc/task.h"
 
 static void
-spdk_fc_task_free(struct spdk_scsi_task *task)
+spdk_fc_task_free(struct spdk_scsi_task *scsi_task)
 {
+	struct spdk_fc_task *task = (struct spdk_fc_task *)scsi_task;
+
+	if (task->parent) {
+		spdk_scsi_task_put(&task->parent->scsi);
+		task->parent = NULL;	
+	}
+
+	*task->owner_task_ctr -= 1;
 	rte_mempool_put(g_spdk_fc.task_pool, (void *)task);
 }
 
 struct spdk_fc_task *
-spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent)
+spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent,
+		spdk_scsi_task_cpl cpl_fn, void *cpl_args)
 {
 	struct spdk_fc_task *task;
 	int rc;
@@ -56,9 +65,23 @@ spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent)
 	}
 
 	memset(task, 0, sizeof(*task));
-	spdk_scsi_task_construct((struct spdk_scsi_task *)task, owner_task_ctr,
-			(struct spdk_scsi_task *)parent);
-	task->scsi.free_fn = spdk_fc_task_free;
+	*owner_task_ctr += 1;
+	task->owner_task_ctr = owner_task_ctr;
+	task->cpl_args	= cpl_args;
+
+	spdk_scsi_task_construct((struct spdk_scsi_task *)task, cpl_fn,
+			spdk_fc_task_free);
+	if (parent) {
+		parent->scsi.ref++;
+		task->parent	= parent;
+		task->tag	= parent->tag;
+		task->scsi.dxfer_dir    = parent->scsi.dxfer_dir;
+		task->scsi.transfer_len = parent->scsi.transfer_len;
+		task->scsi.lun = parent->scsi.lun;
+		task->scsi.cdb = parent->scsi.cdb;
+		task->scsi.target_port = parent->scsi.target_port;
+		task->scsi.initiator_port = parent->scsi.initiator_port;	
+	}
 
 	return task;
 }

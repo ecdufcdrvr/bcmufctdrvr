@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -1026,7 +1026,7 @@ ocs_hal_queue_next_wq(ocs_hal_t *hal, ocs_hal_io_t *io)
 		wq = hal->hal_wq[0];
 	}
 
-#if defined(OCS_NETAPP)
+#if defined(OCS_NVME_FC)
 	wq = hal->hal_wq[0];
 #endif
 

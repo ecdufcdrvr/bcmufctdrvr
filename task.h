@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -39,6 +39,11 @@
 
 struct spdk_fc_task {
         struct spdk_scsi_task   scsi;
+	struct spdk_fc_task *parent;
+	uint32_t *owner_task_ctr;
+	void *cpl_args;
+	uint32_t tag;
+	uint32_t bytes_completed;
 	TAILQ_ENTRY(spdk_fc_task) fc_link;
 	TAILQ_HEAD(fc_subtask_list, spdk_fc_task) fc_subtask_list;
 	struct spdk_mobj *mobj;	
@@ -50,16 +55,8 @@ spdk_fc_task_put(struct spdk_fc_task *task)
         spdk_scsi_task_put(&task->scsi);
 }
 
-static inline struct spdk_fc_task *
-spdk_fc_task_get_primary(struct spdk_fc_task *task)
-{
-        struct spdk_scsi_task *scsi_task;
-        struct spdk_scsi_task *scsi_primary_task;
-
-        scsi_task = &task->scsi;
-        scsi_primary_task = spdk_scsi_task_get_primary(scsi_task);
-        return (struct spdk_fc_task *)scsi_primary_task;
-}
 struct spdk_fc_task *
-spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent);
+spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent,
+                spdk_scsi_task_cpl cpl_fn, void *cpl_args);
+
 #endif

@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -38,24 +38,19 @@
 #include "ocs_device.h"
 #include "ocs_spdk_nvmet.h"
 #include "ocs_tgt_api.h"
-#include "nvmf_fc/fc_adm_api.h"
+#include "spdk_nvmf_xport.h"
 
-static struct spdk_nvmf_bcm_fc_master_ops *g_nvmf_fc_ops = NULL;
+/* this will be set by spdk_fc_subsystem_init() */
+uint32_t ocs_spdk_master_core = 0;
 
 struct nvme_api_ctx {
-	spdk_err_t rc;
+	int rc;
 	sem_t sem;
 };
 
-void
-spdk_nvmf_fc_register_ops(struct spdk_nvmf_bcm_fc_master_ops *ops)
-{
-	g_nvmf_fc_ops = ops;
-}
-
 static void
 ocs_nvme_api_call_done(uint8_t port_handle, spdk_fc_event_t event_type,
-		void *in, spdk_err_t err)
+		void *in, int err)
 {
 	struct nvme_api_ctx *ctx = in;
 
@@ -63,21 +58,17 @@ ocs_nvme_api_call_done(uint8_t port_handle, spdk_fc_event_t event_type,
 	sem_post(&ctx->sem);
 }
 
-static spdk_err_t
+static int
 ocs_nvme_api_call_sync(spdk_fc_event_t event_type, void *args, void **cb_args)
 {
 	struct nvme_api_ctx ctx;
 
-	if (!g_nvmf_fc_ops) {
-		return SPDK_ERR_INTERNAL;
-	}
-
 	memset(&ctx, 0, sizeof(struct nvme_api_ctx));
 	sem_init(&ctx.sem, 1, 0);
 
-	if (spdk_env_get_current_core() == spdk_env_get_master_lcore()) {
+	if (spdk_env_get_current_core() == ocs_spdk_master_core) {
 		/* Might be app is stoping. Just return success */
-		ctx.rc = SPDK_SUCCESS;
+		ctx.rc = 0;
 		goto done;	
 	} else {
 		/* Set the default status */
@@ -86,7 +77,7 @@ ocs_nvme_api_call_sync(spdk_fc_event_t event_type, void *args, void **cb_args)
 
 	*cb_args = &ctx;
 
-	if (g_nvmf_fc_ops->enqueue_event(event_type, args, ocs_nvme_api_call_done)) {
+	if (spdk_nvmf_fc_master_enqueue_event(event_type, args, ocs_nvme_api_call_done)) {
 		goto done;
 	}
 
@@ -113,7 +104,7 @@ ocs_fill_nvme_sli_queue(ocs_t *ocs,
 }
 
 static void
-ocs_free_nvme_buffers(bcm_buffer_desc_t *buffers)
+ocs_free_nvme_buffers(struct spdk_nvmf_fc_buffer_desc *buffers)
 {
 	if (!buffers) {
 		return;
@@ -130,15 +121,15 @@ ocs_free_nvme_buffers(bcm_buffer_desc_t *buffers)
 	spdk_free(buffers);
 }
 
-static bcm_buffer_desc_t *
+static struct spdk_nvmf_fc_buffer_desc *
 ocs_alloc_nvme_buffers(int size, int num_entries)
 {
 	int i;
 	void *virt;
 	uint64_t phys;
-	bcm_buffer_desc_t *buffers = NULL, *buffer;
+	struct spdk_nvmf_fc_buffer_desc *buffers = NULL, *buffer;
 
-	buffers = spdk_calloc(num_entries, sizeof(bcm_buffer_desc_t));
+	buffers = spdk_calloc(num_entries, sizeof(struct spdk_nvmf_fc_buffer_desc));
 	if (!buffers) {
 		goto error;
 	}
@@ -169,28 +160,28 @@ ocs_hw_port_cleanup(ocs_t *ocs)
 {
 	if (ocs && ocs->tgt_ocs.args) {
 		int i;
-		spdk_nvmf_bcm_fc_hw_port_init_args_t *args = ocs->tgt_ocs.args;
+		struct bcm_nvmf_hw_queues* hwq;
 
-		ocs_free_nvme_buffers(args->ls_queue.wq.buffer);
-		ocs_free_nvme_buffers(args->ls_queue.rq_hdr.buffer);
-		ocs_free_nvme_buffers(args->ls_queue.rq_payload.buffer);
+ 		hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->ls_queue);
+		ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+		ocs_free_nvme_buffers(hwq->rq_payload.buffer);
 
-		for (i = 0; i < NVMF_FC_MAX_IO_QUEUES; i ++) {
-			ocs_free_nvme_buffers(args->io_queues[i].wq.buffer);
-			ocs_free_nvme_buffers(args->io_queues[i].rq_hdr.buffer);
-			ocs_free_nvme_buffers(args->io_queues[i].rq_payload.buffer);
+		for (i = 0; i < OCS_NVME_FC_MAX_IO_QUEUES; i ++) {
+			hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->io_queues[i]); 
+			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
 		}
 
-		free(args);
+		free(ocs->tgt_ocs.args);
 		ocs->tgt_ocs.args = NULL;
 	}
 }
 
 static void
 ocs_cb_hw_port_create(uint8_t port_handle, spdk_fc_event_t event_type,
-		void *ctx, spdk_err_t err)
+		void *ctx, int err)
 {
-	spdk_nvmf_bcm_fc_hw_port_init_args_t *args = ctx;
+	spdk_nvmf_fc_hw_port_init_args_t *args = ctx;
 	ocs_t *ocs = NULL;
 
 	if (err) {
@@ -207,7 +198,6 @@ ocs_cb_hw_port_create(uint8_t port_handle, spdk_fc_event_t event_type,
 }
 
 /* 
- * This is code is based on netapp queue topology assumptions
  * RQ0 = SCSI + ELS
  * RQ1 = NVME LS
  * RQ2 - RQN = NVME IOs.
@@ -215,18 +205,18 @@ ocs_cb_hw_port_create(uint8_t port_handle, spdk_fc_event_t event_type,
 int
 ocs_nvme_hw_port_create(ocs_t *ocs)
 {
-	int i;
+	uint32_t i;
 	ocs_hal_t *hal = &ocs->hal;
-	spdk_nvmf_bcm_fc_hw_port_init_args_t *args;
-	spdk_err_t rc;
+	spdk_nvmf_fc_hw_port_init_args_t *args;
+	int rc;
+	struct bcm_nvmf_hw_queues* hwq;
+	spdk_nvmf_fc_lld_hwqp_t io_queues_start;
 
 	ocs->tgt_ocs.args = NULL;
 
-	if (!g_nvmf_fc_ops) {
-		return 0;
-	}
-
-	args = ocs_malloc(NULL, sizeof(spdk_nvmf_bcm_fc_hw_port_init_args_t), OCS_M_ZERO);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_hw_port_init_args) +
+			  ((sizeof(struct bcm_nvmf_hw_queues) + sizeof(spdk_nvmf_fc_lld_hwqp_t)) *
+			  (OCS_NVME_FC_MAX_IO_QUEUES + 1)), OCS_M_ZERO);
 	if (!args) {
 		goto error;
 	}
@@ -239,83 +229,94 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	args->cb_ctx = args;
 	args->fcp_rq_id = hal->hal_rq[0]->hdr->id; 
 
-	/* Fill NVME LS event queues. */
+	/* assign LS Q */
+	args->ls_queue = (spdk_nvmf_fc_lld_hwqp_t)args + sizeof(struct spdk_nvmf_fc_hw_port_init_args);
+	hwq = (struct bcm_nvmf_hw_queues *)(args->ls_queue);
+
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[1]->queue,
-			&args->ls_queue.eq.q);
+			&hwq->eq.q);
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_wq[1]->cq->queue,
-			&args->ls_queue.cq_wq.q);
+			&hwq->cq_wq.q);
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[1]->cq->queue,
-			&args->ls_queue.cq_rq.q);
+			&hwq->cq_rq.q);
 
 	/* LS WQ */
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_wq[1]->queue,
-			&args->ls_queue.wq.q);
+			&hwq->wq.q);
 
 	/* LS RQ Hdr */
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[1]->hdr,
-			&args->ls_queue.rq_hdr.q);
-	args->ls_queue.rq_hdr.buffer =
-		ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_HDR,
-				args->ls_queue.rq_hdr.q.max_entries);
-	if (!args->ls_queue.rq_hdr.buffer) {
+				&hwq->rq_hdr.q);
+	hwq->rq_hdr.buffer = ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_HDR,
+						    hwq->rq_hdr.q.max_entries);
+	if (!hwq->rq_hdr.buffer) {
 		goto error;
 	}
-	args->ls_queue.rq_hdr.num_buffers = args->ls_queue.rq_hdr.q.max_entries;
-
+	hwq->rq_hdr.num_buffers = hwq->rq_hdr.q.max_entries;
 
 	/* LS RQ Payload */
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[1]->data,
-			&args->ls_queue.rq_payload.q);
-	args->ls_queue.rq_payload.buffer =
+			&hwq->rq_payload.q);
+	hwq->rq_payload.buffer =
 		ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_PAYLOAD,
-				args->ls_queue.rq_payload.q.max_entries);
-	if (!args->ls_queue.rq_payload.buffer) {
+				hwq->rq_payload.q.max_entries);
+	if (!hwq->rq_payload.buffer) {
 		goto error;
 	}
-	args->ls_queue.rq_payload.num_buffers =
-		args->ls_queue.rq_payload.q.max_entries;
+	hwq->rq_payload.num_buffers =
+		hwq->rq_payload.q.max_entries;
+	args->ls_queue_size = hwq->rq_payload.num_buffers;
 
-	for (i = 0; i < NVMF_FC_MAX_IO_QUEUES; i ++) {
+	/* assign the io queues */
+	args->io_queues = args->ls_queue + sizeof(struct bcm_nvmf_hw_queues);
+	io_queues_start = (spdk_nvmf_fc_lld_hwqp_t) args->io_queues +
+			  (OCS_NVME_FC_MAX_IO_QUEUES * sizeof(void *));
+	for (i = 0; i < OCS_NVME_FC_MAX_IO_QUEUES; i++) {
+		args->io_queues[i] = io_queues_start + (i * sizeof(struct bcm_nvmf_hw_queues));
+		hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
+	
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[i + 2]->queue,
-				&args->io_queues[i].eq.q);
+				&hwq->eq.q);
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_wq[i + 2]->cq->queue,
-				&args->io_queues[i].cq_wq.q);
+				&hwq->cq_wq.q);
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[i + 2]->cq->queue,
-				&args->io_queues[i].cq_rq.q);
+				&hwq->cq_rq.q);
 
 		/* IO WQ */
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_wq[i + 2]->queue,
-				&args->io_queues[i].wq.q);
+				&hwq->wq.q);
 
 		/* IO RQ Hdr */
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[i + 2]->hdr,
-				&args->io_queues[i].rq_hdr.q);
-		args->io_queues[i].rq_hdr.buffer =
+				&hwq->rq_hdr.q);
+		hwq->rq_hdr.buffer =
 			ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_HDR,
-					args->io_queues[i].rq_hdr.q.max_entries);
-		if (!args->io_queues[i].rq_hdr.buffer) {
+					hwq->rq_hdr.q.max_entries);
+		if (!hwq->rq_hdr.buffer) {
 			goto error;
 		}
-		args->io_queues[i].rq_hdr.num_buffers =
-			args->io_queues[i].rq_hdr.q.max_entries;
-
+		hwq->rq_hdr.num_buffers =
+			hwq->rq_hdr.q.max_entries;
 
 		/* IO RQ Payload */
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[i + 2]->data,
-				&args->io_queues[i].rq_payload.q);
-		args->io_queues[i].rq_payload.buffer =
+				&hwq->rq_payload.q);
+		hwq->rq_payload.buffer =
 			ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_PAYLOAD,
-					args->io_queues[i].rq_payload.q.max_entries);
-		if (!args->io_queues[i].rq_payload.buffer) {
+					hwq->rq_payload.q.max_entries);
+		if (!hwq->rq_payload.buffer) {
 			goto error;
 		}
-		args->io_queues[i].rq_payload.num_buffers =
-			args->io_queues[i].rq_payload.q.max_entries;
+		hwq->rq_payload.num_buffers =
+			hwq->rq_payload.q.max_entries;
 
-		args->io_queue_cnt ++;
+		args->io_queue_cnt++;
 	}
 
-	rc = g_nvmf_fc_ops->enqueue_event(SPDK_FC_HW_PORT_INIT, args,
+	/* set args io queue size */
+	args->io_queue_size = hwq->rq_payload.num_buffers;
+
+	rc = spdk_nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_INIT, args,
 			ocs_cb_hw_port_create);
 	if (rc) {
 		goto error;
@@ -324,26 +325,27 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	return 0; /* Queued */
 error:
 	if (args) {
-		ocs_free_nvme_buffers(args->ls_queue.rq_hdr.buffer);
-		ocs_free_nvme_buffers(args->ls_queue.rq_payload.buffer);
+ 		hwq = (struct bcm_nvmf_hw_queues *)(args->ls_queue);
+		ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+		ocs_free_nvme_buffers(hwq->rq_payload.buffer);
 
-		for (i = 0; i < NVMF_FC_MAX_IO_QUEUES; i ++) {
-			ocs_free_nvme_buffers(args->io_queues[i].rq_hdr.buffer);
-			ocs_free_nvme_buffers(args->io_queues[i].rq_payload.buffer);
+		for (i = 0; i < args->io_queue_cnt; i ++) {
+			hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
+			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
 		}
 		free(args);
 	}
 	return -1;
-
 }
 
 int
 ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	spdk_nvmf_bcm_fc_hw_port_online_args_t args;
+	spdk_nvmf_fc_hw_port_online_args_t args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_hw_port_online_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_port_online_args_t));
 	args.port_handle = ocs->instance_index;
 
 	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_ONLINE, &args, &args.cb_ctx)) {
@@ -358,9 +360,9 @@ ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 int
 ocs_nvme_process_hw_port_offline(ocs_t *ocs)
 {
-	spdk_nvmf_bcm_fc_hw_port_offline_args_t args;
+	spdk_nvmf_fc_hw_port_offline_args_t args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_hw_port_offline_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_port_offline_args_t));
 	args.port_handle = ocs->instance_index;
 
 	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_OFFLINE, &args, &args.cb_ctx)) {
@@ -376,9 +378,9 @@ int
 ocs_nvme_nport_create(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	spdk_nvmf_bcm_fc_nport_create_args_t args;
+	spdk_nvmf_fc_nport_create_args_t args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_nport_create_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_nport_create_args_t));
 
 	/* We register physical port as nport. Real nports not supported yet. */
 	args.nport_handle	= 0;
@@ -400,9 +402,9 @@ ocs_nvme_nport_create(ocs_sport_t *sport)
 int
 ocs_nvme_nport_delete(ocs_t *ocs)
 {
-	spdk_nvmf_bcm_fc_nport_delete_args_t args;
+	spdk_nvmf_fc_nport_delete_args_t args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_nport_delete_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_nport_delete_args_t));
 
 	args.port_handle	= ocs->instance_index;
 	args.nport_handle	= 0;
@@ -419,7 +421,7 @@ ocs_nvme_nport_delete(ocs_t *ocs)
 
 static void
 ocs_cb_abts_cb(uint8_t port_handle, spdk_fc_event_t event_type,
-	void *args, spdk_err_t err)
+	void *args, int err)
 {
 	free(args);
 }
@@ -427,14 +429,10 @@ ocs_cb_abts_cb(uint8_t port_handle, spdk_fc_event_t event_type,
 int
 ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi)
 {
-	spdk_nvmf_bcm_fc_abts_args_t *args;
-	spdk_err_t rc;
+	spdk_nvmf_fc_abts_args_t *args;
+	int rc;
 
-	if (!g_nvmf_fc_ops) {
-		return -1;
-	}
-
-	args = ocs_malloc(NULL, sizeof(spdk_nvmf_bcm_fc_abts_args_t), OCS_M_ZERO);
+	args = ocs_malloc(NULL, sizeof(spdk_nvmf_fc_abts_args_t), OCS_M_ZERO);
 	if (!args) {
 		goto err;
 	}
@@ -446,7 +444,7 @@ ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi)
 	args->rpi = rpi;
 	args->cb_ctx = args;
 
-	rc = g_nvmf_fc_ops->enqueue_event(SPDK_FC_ABTS_RECV, args,
+	rc = spdk_nvmf_fc_master_enqueue_event(SPDK_FC_ABTS_RECV, args,
 			ocs_cb_abts_cb);
 	if (rc) {
 		goto err;
@@ -475,13 +473,13 @@ ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	spdk_nvmf_bcm_fc_hw_i_t_add_args_t args;
+	spdk_nvmf_fc_hw_i_t_add_args_t args;
 
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_hw_i_t_add_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_add_args_t));
 
 	args.port_handle	= node->ocs->instance_index;
 	args.nport_handle	= node->sport->instance_index;
@@ -511,13 +509,13 @@ ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	spdk_nvmf_bcm_fc_hw_i_t_delete_args_t args;
+	spdk_nvmf_fc_hw_i_t_delete_args_t args;
 
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_hw_i_t_delete_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_delete_args_t));
 
 	args.port_handle  = node->ocs->instance_index;
 	args.nport_handle = node->sport->instance_index;
@@ -543,9 +541,9 @@ int
 ocs_nvme_node_lost(ocs_node_t *node)
 {
 	ocs_t *ocs = node->ocs;
-	spdk_nvmf_bcm_fc_hw_i_t_delete_args_t args;
+	spdk_nvmf_fc_hw_i_t_delete_args_t args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_bcm_fc_hw_i_t_delete_args_t));
+	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_delete_args_t));
 
 	args.port_handle	= node->ocs->instance_index;
 	args.nport_handle	= node->sport->instance_index;

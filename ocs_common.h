@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -311,7 +311,7 @@ struct ocs_node_s {
 
 	ocs_t *ocs;				/**< pointer back to ocs structure */
 	uint32_t instance_index;		/**< unique instance index value */
-	char display_name[OCS_DISPLAY_NAME_LENGTH]; /**< Node display name */
+	char display_name[2 * OCS_DISPLAY_NAME_LENGTH]; /**< Node display name */
 	ocs_sport_t *sport;
 	uint32_t hold_frames:1;			/**< hold incoming frames if true */
 	ocs_rlock_t lock;			/**< node wide lock */

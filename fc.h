@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -41,6 +41,7 @@
 
 #include "spdk/bdev.h"
 #include "spdk/assert.h"
+#include "spdk/scsi.h"
 
 #define SPDK_FC_BUILD_ETC "/usr/local/etc/spdk"
 #define SPDK_FC_DEFAULT_CONFIG SPDK_FC_BUILD_ETC "/fc.conf"
@@ -62,9 +63,9 @@ int ocsu_init(void);
 extern uint64_t g_flush_timeout;
 void spdk_fc_shutdown(void);
 void 
-process_task_completion(void *arg1, void *arg2);
+process_task_completion(struct spdk_scsi_task *scsi_task);
 void
-process_task_mgmt_completion(void *arg1, void *arg2);
+process_task_mgmt_completion(struct spdk_scsi_task *scsi_task);
 
 #define BIT_2 (1<<2)
 #endif

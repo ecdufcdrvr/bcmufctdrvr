@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -403,12 +403,15 @@ extern uint64_t ocs_get_tsc(void);
  */
 #define ocs_memset(mem, c, len) memset(mem, c, len)
 
+#if 0 // TODO: NEW SPDK - These #defines (except for LOG_TEST) are in /usr/include/sys/syslog.h
 #define LOG_CRIT        0
 #define LOG_ERR         1
 #define LOG_WARN        2
 #define LOG_INFO        3
 #define LOG_TEST	4
 #define LOG_DEBUG       5
+#endif
+#define LOG_TEST        LOG_WARNING
 
 extern const char *ocs_display_name(void *os);
 extern uint32_t ocs_instance(void *os);
@@ -419,7 +422,7 @@ extern void _ocs_log(void *os, const char *fmt, ...) __attribute__((format(print
 
 #define ocs_log_crit(os, fmt, ...)	ocs_log(os, LOG_CRIT, "CRIT: " fmt, ##__VA_ARGS__);
 #define ocs_log_err(os, fmt, ...)	ocs_log(os, LOG_ERR, "ERR: " fmt, ##__VA_ARGS__);
-#define ocs_log_warn(os, fmt, ...)	ocs_log(os, LOG_WARN, "WARN: " fmt, ##__VA_ARGS__);
+#define ocs_log_warn(os, fmt, ...)	ocs_log(os, LOG_WARNING, "WARN: " fmt, ##__VA_ARGS__);
 #define ocs_log_info(os, fmt, ...)	ocs_log(os, LOG_INFO, fmt, ##__VA_ARGS__);
 #define ocs_log_test(os, fmt, ...)	ocs_log(os, LOG_TEST, "TEST: " fmt, ##__VA_ARGS__);
 #define ocs_log_debug(os, fmt, ...)	ocs_log(os, LOG_DEBUG, "DEBUG: " fmt, ##__VA_ARGS__);
@@ -1012,7 +1015,7 @@ typedef struct {
 	struct spdk_poller *timer;
 } ocs_timer_t;
 
-void ocs_spdk_timer_cb(void *arg);
+int ocs_spdk_timer_cb(void *arg);
 
 /**
  * @ingroup os

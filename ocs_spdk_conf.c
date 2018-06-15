@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -34,6 +34,7 @@
 #include "ocs_spdk_conf.h"
 #include "spdk/log.h"
 #include "spdk/scsi.h"
+#include "spdk/scsi_spec.h"
 #include "spdk/conf.h"
 #include "spdk/env.h"
 #include "ocs_node.h"
@@ -277,7 +278,8 @@ spdk_fc_cf_init_lun_maps(void)
 		
 			/* Create a SCSI device */
 			lun_map->scsi_dev = spdk_scsi_dev_construct(spdk_conf_section_get_name(sp),
-					p_lun_names, lun_map->lun_ids, lun_map->num_luns);
+					(const char **)p_lun_names, lun_map->lun_ids, lun_map->num_luns,
+					SPDK_SPC_PROTOCOL_IDENTIFIER_FC, NULL, NULL);
 			if (!lun_map->scsi_dev) {
 				SPDK_ERRLOG("Unable to create SCSI dev for lunmapping%d.\n", lun_map->id);
 				goto error;
@@ -687,7 +689,7 @@ spdk_fc_cf_add_lun_to_lun_map(void *arg1, void *arg2)
 		goto done;
 	}
 
-	scsilun = spdk_scsi_lun_construct(lun->name, bdev);
+	scsilun = spdk_scsi_lun_construct(bdev, NULL, NULL);
 	if (scsilun == NULL) {
 		SPDK_ERRLOG("lun construct failed. %s\n", lun->name);
 		goto done;

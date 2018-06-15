@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -59,7 +59,7 @@
 				pwwn[0]); \
 	} while(0)
 
-struct spdk_nvmf_bcm_fc_hw_port_init_args;
+struct spdk_nvmf_fc_hw_port_init_args;
 
 /**
  * @brief target private ocs structure
@@ -81,7 +81,7 @@ typedef struct {
 	int32_t	watermark_min;			/**< lower limit for watermark */
 	int32_t	watermark_max;			/**< upper limit for watermark */
 
-	struct spdk_nvmf_bcm_fc_hw_port_init_args *args;
+	struct spdk_nvmf_fc_hw_port_init_args *args;
 	
 } ocs_scsi_tgt_t;
 
@@ -109,7 +109,7 @@ typedef struct {
  */
 
 typedef struct {
-	struct spdk_scsi_port initiator_port;
+	struct spdk_scsi_port *initiator_port;
 	struct spdk_scsi_dev *scsi_dev;
 	int core_id;
 	bool dirty;

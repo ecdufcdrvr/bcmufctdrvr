@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -53,7 +53,7 @@
 #include "ocs_hal.h"
 #include "ocs_hal_queues.h"
 #include "spdk_fc_ini_discovery.h"
-#include "nvmf_fc/bcm_fc.h"
+#include "spdk_nvmf_xport.h"
 
 #define OCS_HAL_MQ_DEPTH	128
 #define OCS_HAL_READ_FCF_SIZE	4096
@@ -1930,8 +1930,9 @@ ocs_hal_set(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t value)
 	case OCS_HAL_AUTO_XFER_RDY_APP_TAG_VALUE:
 		hal->config.auto_xfer_rdy_app_tag_value = value;
 		break;
-        case OCS_ESOC:
-                hal->config.esoc = value;
+	case OCS_ESOC:
+		hal->config.esoc = value;
+		break;
 	case OCS_HAL_HIGH_LOGIN_MODE:
 		rc = sli_set_hlm(&hal->sli, value);
 		break;
@@ -11628,8 +11629,8 @@ ocs_hal_rx_allocate(ocs_hal_t *hal)
 
 	rqindex = 0;
 
-#if defined(OCS_NETAPP)
-	for (i = 0; i < (hal->hal_rq_count - (NVMF_FC_MAX_IO_QUEUES + 1)); i++) {
+#if defined(OCS_NVME_FC)
+	for (i = 0; i < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); i++) {
 #else
 	for (i = 0; i < hal->hal_rq_count; i++) {
 #endif
@@ -11682,8 +11683,8 @@ ocs_hal_rx_post(ocs_hal_t *hal)
 	 * In RQ pair mode, we MUST post the header and payload buffer at the
 	 * same time.
 	 */
-#if defined(OCS_NETAPP)
-	for (rq_idx = 0, idx = 0; rq_idx < (hal->hal_rq_count - (NVMF_FC_MAX_IO_QUEUES + 1)); rq_idx++) {
+#if defined(OCS_NVME_FC)
+	for (rq_idx = 0, idx = 0; rq_idx < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); rq_idx++) {
 #else
 	for (rq_idx = 0, idx = 0; rq_idx < hal->hal_rq_count; rq_idx++) {
 #endif
@@ -11728,8 +11729,8 @@ ocs_hal_rx_free(ocs_hal_t *hal)
 	}
 
 	/* Free hal_rq buffers */
-#if defined(OCS_NETAPP)
-	for (i = 0; i < (hal->hal_rq_count - (NVMF_FC_MAX_IO_QUEUES + 1)); i++) {
+#if defined(OCS_NVME_FC)
+	for (i = 0; i < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); i++) {
 #else
 	for (i = 0; i < hal->hal_rq_count; i++) {
 #endif

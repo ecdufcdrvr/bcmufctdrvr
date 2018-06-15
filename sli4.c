@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -3701,7 +3701,7 @@ sli_get_config(sli4_t *sli4)
 			sli4->config.extent[SLI_RSRC_FCOE_RPI].base[0] = read_config->rpi_base;
 			sli4->config.extent[SLI_RSRC_FCOE_RPI].size = read_config->rpi_count;
 
-#if defined(OCS_NETAPP)
+#if defined(OCS_NVME_FC)
 			sli4->config.extent[SLI_RSRC_FCOE_XRI].base[0] = read_config->xri_base;
 			sli4->config.extent[SLI_RSRC_FCOE_XRI].size = read_config->xri_count / 2;
 			printf("SLI4 Xri base = %d cnt  = %d\n", read_config->xri_base, read_config->xri_count);

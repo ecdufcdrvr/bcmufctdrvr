@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2016-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -68,6 +68,7 @@
 #include <spdk/endian.h>
 #include <spdk_internal/log.h>
 #include <spdk/event.h>
+#include <spdk/io_channel.h>
 
 #include "ocs.h"
 #include "ocs_os.h"
@@ -129,7 +130,7 @@ static void spdk_fc_ini_di_process_dwqe(spdk_fc_ini_di_wqe_t *dwqe);
 static void spdk_fc_ini_di_process_next_dwqe(spdk_fc_ini_di_port_t *port);
 static void spdk_fc_ini_di_complete_dwqe(spdk_fc_ini_di_wqe_t *dwqe);
 static void spdk_fc_ini_di_start_process_dwq(void *arg1, void *arg2);
-static void spdk_fc_ini_di_command_recovery_startup(void *arg);
+static int spdk_fc_ini_di_command_recovery_startup(void *arg);
 static void spdk_fc_ini_queue_on_recovery_q(
 	spdk_fc_ini_di_cmd_recovery_q_t *rq,
 	spdk_fc_ini_di_wqe_t *dwqe);
@@ -162,8 +163,8 @@ uint64_t spdk_fc_ini_di_tgt_node_wwpn(ocs_node_t *node)
 {
 	fc_plogi_payload_t *sp = (fc_plogi_payload_t *)node->service_params;
 #ifdef DEBUG_TEST_DI_NOTIFICATIONS
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, 
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, 
 		"display_name[0] = %d\n", node->display_name[0]);
 	if (node->display_name[0] > 0 &&  node->display_name[0] <= 10) {
 		uint64_t wwpn = 	
@@ -272,7 +273,7 @@ spdk_fc_ini_di_mp_ctor(struct rte_mempool *mp,
 	m->buf = (void *)((unsigned long)((uint8_t *)m->buf + 512) & ~511UL);
 	off = (uint64_t)(uint8_t *)m->buf - (uint64_t)(uint8_t *)m;
 
-	m->phys_addr = rte_mempool_virt2phy(mp, m) + off;
+	m->phys_addr = spdk_vtophys(m) + off;
 }
 
 static
@@ -313,8 +314,8 @@ void spdk_fc_ini_di_queue_dwqe(spdk_fc_ini_di_wqe_t *dwqe)
 	bool start_q = false;
 	spdk_fc_ini_di_port_t *port = dwqe->ini_port;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY,
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY,
 		"queueing work request for port: %lx tgt: %lx\n", port->wwpn,
 		dwqe->ini_target ? dwqe->ini_target->wwpn : 0);
 	SPDK_FC_INI_DI_LIST_LOCK(port, discovery_work_q);
@@ -330,8 +331,8 @@ void spdk_fc_ini_di_queue_dwqe(spdk_fc_ini_di_wqe_t *dwqe)
 			port, 0);
 
 		spdk_event_call(ev);
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "create spdk event to process dwq\n");
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "create spdk event to process dwq\n");
 	}
 }
 
@@ -387,16 +388,16 @@ void spdk_fc_ini_di_new_target(ocs_node_t *node)
 				new_tgt->wwpn = spdk_fc_ini_di_tgt_node_wwpn(node);
 				SPDK_FC_INI_DI_LIST_INIT(new_tgt, bdev_list);
 				SPDK_FC_INI_DI_LIST_INSERT(port, target_list, new_tgt, link);
-				SPDK_TRACELOG(
-					SPDK_TRACE_FC_DISCOVERY,
+				SPDK_DEBUGLOG(
+					SPDK_LOG_FC_DISCOVERY,
 					"new target - port: %lx (%s), tgt: %lx (%s)\n",
 					port->wwpn, port->ini_ocs_port->display_name,
 					new_tgt->wwpn, new_tgt->target_node->display_name);
 			}
 		} else { /* it's an existing target - driver reported as new */
 			spdk_fc_ini_di_bdev_t* di_bdev;
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY,
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY,
 				"new tgt event for existing tgt - port: %lx, tgt: %lx\n",
 				port->wwpn, new_tgt->wwpn);
 			/* update existing target and it's bdev's with new node ptr */
@@ -462,8 +463,8 @@ void spdk_fc_ini_di_start_process_dwq(void *arg1, void *arg2)
 	spdk_fc_ini_di_port_t *port =
 		(spdk_fc_ini_di_port_t *)arg1;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY,
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY,
 		"port %lx\n",
 		 spdk_fc_ini_di_port_node_wwpn(port->ini_ocs_port));
 
@@ -475,8 +476,8 @@ void spdk_fc_ini_di_complete_dwqe(spdk_fc_ini_di_wqe_t *dwqe)
 {   /* free the previous dwqe and process the next one */
 	spdk_fc_ini_di_port_t *port = dwqe->ini_port;
 	
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "port %lx scsi_retry_in_progress:%s\n",
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "port %lx scsi_retry_in_progress:%s\n",
 		port->wwpn, dwqe->scsi_retry_in_progress ? "true" : "false");
 
 	if (dwqe->cmd_buf)
@@ -501,8 +502,8 @@ void spdk_fc_ini_di_process_next_dwqe(spdk_fc_ini_di_port_t *port)
 	else
 	{
 		SPDK_FC_INI_DI_LIST_UNLOCK(port, discovery_work_q);
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "no more dwqe's\n");
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "no more dwqe's\n");
 	}
 }
 
@@ -510,8 +511,8 @@ static
 void spdk_fc_ini_di_process_dwqe(spdk_fc_ini_di_wqe_t *dwqe)
 {   /* process a discovery work queue entry */
 	if (dwqe) {
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "port %lx, type=%d\n",
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "port %lx, type=%d\n",
 			DI_DWQE_PORT_WWPN(dwqe), dwqe->event_type);
 		switch (dwqe->event_type) {
 		case INI_NODE_EVENT_TYPE_NEW_TARGET:
@@ -538,7 +539,7 @@ void spdk_fc_ini_di_process_dwqe(spdk_fc_ini_di_wqe_t *dwqe)
 		}
 	} else {
 		/* dwqe is NULL */
-		SPDK_TRACELOG(SPDK_TRACE_FC_DISCOVERY, "dwq empty\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_DISCOVERY, "dwq empty\n");
 	}
 }
 
@@ -698,8 +699,8 @@ void spdk_fc_ini_di_report_luns_complete(
 	dwqe = (spdk_fc_ini_di_wqe_t *)cci->cb_data;
 	dwqe->num_reported_luns = 0;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "port %lx, target %lx\n",
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "port %lx, target %lx\n",
 		DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe));
 
 
@@ -745,8 +746,8 @@ void spdk_fc_ini_di_report_luns_complete(
 				DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe));
 			spdk_fc_ini_di_complete_dwqe(dwqe);
 		} else {   /* start processing luns */
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "num_luns=%d\n",
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "num_luns=%d\n",
 				dwqe->num_reported_luns);
 			dwqe->curr_lun_index = 0;
 			spdk_fc_ini_di_process_next_lun(dwqe);
@@ -780,7 +781,7 @@ void spdk_fc_ini_di_process_next_lun(spdk_fc_ini_di_wqe_t *dwqe)
 	dwqe->curr_lun_index++;
 	if (dwqe->curr_lun_index > dwqe->num_reported_luns) {
 		/* done with this target, start the next one */
-		SPDK_TRACELOG(SPDK_TRACE_FC_DISCOVERY, "no more luns\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_DISCOVERY, "no more luns\n");
 		spdk_fc_ini_di_complete_dwqe(dwqe);
 	} else { /* send inquiry command to next LUN */
 		int rc;
@@ -788,8 +789,8 @@ void spdk_fc_ini_di_process_next_lun(spdk_fc_ini_di_wqe_t *dwqe)
 		uint8_t scsi_cdb[6];
 		struct spdk_fc_ini_bdev *tmp_bdev = NULL;
 
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "port %lx, target %lx, lun %016lx\n",
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "port %lx, target %lx, lun %016lx\n",
 			DI_DWQE_PORT_WWPN(dwqe), DI_DWQE_TGT_WWPN(dwqe),
 			*((uint64_t*)&dwqe->report_luns_buf[dwqe->curr_lun_index * 8]));
 
@@ -809,7 +810,7 @@ void spdk_fc_ini_di_process_next_lun(spdk_fc_ini_di_wqe_t *dwqe)
 		scsi_cdb[0] = SCSI_INQUIRY;
 		scsi_cdb[4] = 0xff; /* 255 max. return length */
 
-		SPDK_TRACELOG(SPDK_TRACE_FC_DISCOVERY, "sending inquiry\n");
+		SPDK_DEBUGLOG(SPDK_LOG_FC_DISCOVERY, "sending inquiry\n");
 		rc = spdk_fc_ini_scsi_pass_thru(tmp_bdev, scsi_cdb,
 			(uint32_t)sizeof(scsi_cdb), iov, 1,
 			0xff, SPDK_SCSI_DIR_FROM_DEV,
@@ -834,8 +835,8 @@ void spdk_fc_ini_di_inquiry_complete(struct spdk_fc_ini_cmd_complete_info *cci)
 
 	dwqe = (spdk_fc_ini_di_wqe_t *)cci->cb_data;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY,
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY,
 		"port %lx, target %lx, lun %lx, (hr=%d, tr=%d, size=%ld)\n",
 		DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe),
 		cci->bdev->fc_dev.lun_no,
@@ -899,8 +900,8 @@ void spdk_fc_ini_di_process_inquiry(uint64_t lun_no,
 		spdk_fc_ini_di_send_read_capacity(lun_no, dwqe);
 	} else {
 		/* not a disk, see if lun with same number in lun_list and remove it */
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY,
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY,
 			"non-disk lun: port %lx, target %lx, lun %lx, type=%d\n",
 			DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe),
 			lun_no, inq_buf[0]);
@@ -940,8 +941,8 @@ void spdk_fc_ini_di_send_read_capacity(uint64_t lun_no,
 
 	DI_RETURN_IF_NOT_RUNNING;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "port %lx, target %lx, lun %lx\n",
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "port %lx, target %lx, lun %lx\n",
 		DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe), lun_no);
 
 	iov[0].iov_base	= (void *)dwqe->cmd_buf->phys_addr;
@@ -984,8 +985,8 @@ void spdk_fc_ini_di_read_capacity_complete(
 
 	dwqe = (spdk_fc_ini_di_wqe_t *)cci->cb_data;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "port %lx, target %lx, lun %lx\n",
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "port %lx, target %lx, lun %lx\n",
 		DI_DWQE_PORT_WWPN(dwqe),  DI_DWQE_TGT_WWPN(dwqe),
 		cci->bdev->fc_dev.lun_no);
 
@@ -1036,7 +1037,7 @@ void spdk_fc_ini_di_read_capacity_complete(
 				spdk_fc_ini_bdev_update_t update_list[1];
 				update_list[0].update_mask = update_mask;
 				update_list[0].bdev = &bdev->bdev;
-				SPDK_TRACELOG(SPDK_TRACE_FC_DISCOVERY,
+				SPDK_DEBUGLOG(SPDK_LOG_FC_DISCOVERY,
 					"doing dev_list_update_callback to client\n");
 				g_spdk_fc_ini_di_dev_list_update_cb(1, update_list);
 			}
@@ -1058,8 +1059,8 @@ static void spdk_fc_ini_queue_on_recovery_q(
 {
 	bool start_q = false;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY,
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY,
 		"queueing work request on recovery queue for port: %lx\n",
 		DI_DWQE_PORT_WWPN(dwqe));
 
@@ -1069,43 +1070,52 @@ static void spdk_fc_ini_queue_on_recovery_q(
 	SPDK_FC_INI_DI_LIST_UNLOCK(rq, cmd_recovery_work_q);
 
 	if (start_q) {
-		spdk_poller_register(&g_cmd_recovery_timer, spdk_fc_ini_di_command_recovery_startup,
-				rq, rte_lcore_id(), SPDK_FC_INI_DI_RECOVERY_TIMER_INTERVAL);
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "reset recovery q timer\n");
+		g_cmd_recovery_timer = spdk_poller_register(spdk_fc_ini_di_command_recovery_startup,
+							    (void *) rq,
+							    SPDK_FC_INI_DI_RECOVERY_TIMER_INTERVAL);
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "reset recovery q timer\n");
 	}
 }
 
-static void
+static int
 spdk_fc_ini_di_command_recovery_startup(void *arg)
 {
 	spdk_fc_ini_di_cmd_recovery_q_t *rq =
 		(spdk_fc_ini_di_cmd_recovery_q_t*)arg;
 
 	/* Unregister poller */
-	spdk_poller_unregister(&g_cmd_recovery_timer, NULL);
+	spdk_poller_unregister(&g_cmd_recovery_timer);
 		
-	DI_RETURN_IF_NOT_RUNNING;
+	if (!g_spdk_fc_ini_di_running) {
+		return 0;
+	}
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");		
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");		
 		
 	if (rq)
 	{
 		spdk_fc_ini_di_wqe_t *dwqe;
 
 		SPDK_FC_INI_DI_LIST_LOCK(rq, cmd_recovery_work_q);
-		DI_RETURN_IF_NOT_RUNNING;
+		if (!g_spdk_fc_ini_di_running) {
+			return 0;
+		}
 		dwqe = SPDK_FC_INI_DI_LIST_FIRST(rq, cmd_recovery_work_q);
 		while (dwqe) {
 			SPDK_FC_INI_DI_LIST_NL_REMOVE(rq, cmd_recovery_work_q, dwqe,
 				link);
 			spdk_fc_ini_di_queue_dwqe(dwqe); /* queue on port's work q */
-			DI_RETURN_IF_NOT_RUNNING;
+			if (!g_spdk_fc_ini_di_running) {
+				return 0;
+			}
 			dwqe = SPDK_FC_INI_DI_LIST_FIRST(rq, cmd_recovery_work_q);
 		}
 		SPDK_FC_INI_DI_LIST_UNLOCK(rq, cmd_recovery_work_q);
 	}
+
+	return 0;
 }
 
 
@@ -1122,12 +1132,12 @@ void spdk_fc_ini_di_init(spdk_fc_ini_bdev_list_update_cb cb)
 {
 #ifdef DEBUG
 	/* set discovery trace logging */
-	extern struct spdk_trace_flag SPDK_TRACE_FC_DISCOVERY;
-	SPDK_TRACE_FC_DISCOVERY.enabled = true;
+	extern struct spdk_trace_flag SPDK_LOG_FC_DISCOVERY;
+	SPDK_LOG_FC_DISCOVERY.enabled = true;
 #endif
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "Initializing FC LUN Discovery\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "Initializing FC LUN Discovery\n");
 
 	/* LUN discovery initialization */
 	if (!g_spdk_fc_ini_di_running) {
@@ -1153,8 +1163,8 @@ void spdk_fc_ini_di_init(spdk_fc_ini_bdev_list_update_cb cb)
 			spdk_fc_ini_di_cmd_recovery_q_t *rq = 
 				&g_spdk_fc_ini_di_cmd_recovery_q;
 
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "%d ports\n", num_ports);
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "%d ports\n", num_ports);
 
 			SPDK_FC_INI_DI_LIST_INIT(rq, cmd_recovery_work_q);
 
@@ -1197,35 +1207,35 @@ void spdk_fc_ini_di_update_devs_notify(
 	if (g_spdk_fc_ini_di_running) {
 		switch (event_type) {
 		case INI_NODE_EVENT_TYPE_NEW_TARGET:
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "event_type=NEW TARGET\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "event_type=NEW TARGET\n");
 			spdk_fc_ini_di_new_target((ocs_node_t *)update_node);
 			break;
 
 		case INI_NODE_EVENT_TYPE_TARGET_DOWN:
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "event_type=TARGET DOWN\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "event_type=TARGET DOWN\n");
 			spdk_fc_ini_di_target_update((ocs_node_t *)update_node,
 				event_type);
 			break;
 
 		case INI_NODE_EVENT_TYPE_TARGET_UP:
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "event_type=TARGET UP\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "event_type=TARGET UP\n");
 			spdk_fc_ini_di_target_update((ocs_node_t *)update_node,
 				event_type);
 			break;
 
 		case INI_NODE_EVENT_TYPE_TGT_LUNS:
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "event_type=TARGET LUN CHANGE\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "event_type=TARGET LUN CHANGE\n");
 			spdk_fc_ini_di_target_update((ocs_node_t *)update_node,
 				event_type);
 			break;
 
 		case INI_NODE_EVENT_TYPE_PORT_DOWN:
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "event_type=PORT DOWN\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "event_type=PORT DOWN\n");
 			spdk_fc_ini_di_port_down((ocs_t *)update_node);
 			break;
 	
@@ -1240,8 +1250,8 @@ void spdk_fc_ini_di_update_devs_notify(
 
 int spdk_fc_ini_di_shutdown(void)
 {
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	/* clean up discovery for shutdown */
 	if (g_spdk_fc_ini_di_running && g_fc_ini_num_ports > 0) {
@@ -1250,8 +1260,8 @@ int spdk_fc_ini_di_shutdown(void)
 
 		g_spdk_fc_ini_di_running = false;
 
-		SPDK_TRACELOG(
-			SPDK_TRACE_FC_DISCOVERY, "clean port recovery work queue\n");
+		SPDK_DEBUGLOG(
+			SPDK_LOG_FC_DISCOVERY, "clean port recovery work queue\n");
 		/* no need to lock queues because we turned off running flag */
 		spdk_fc_ini_di_wqe_t *dwqe = SPDK_FC_INI_DI_LIST_FIRST(rq, 
 			cmd_recovery_work_q);
@@ -1266,8 +1276,8 @@ int spdk_fc_ini_di_shutdown(void)
 			spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[pind];
 			spdk_fc_ini_di_wqe_t *dwqe = SPDK_FC_INI_DI_LIST_FIRST(port, 
 				discovery_work_q);
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "clean port work queue\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "clean port work queue\n");
 			while (dwqe) {
 				SPDK_FC_INI_DI_LIST_NL_REMOVE(port, discovery_work_q, dwqe, link);
 				free(dwqe);
@@ -1275,8 +1285,8 @@ int spdk_fc_ini_di_shutdown(void)
 			}
 
 
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "clean port's targets\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "clean port's targets\n");
 			tgt = SPDK_FC_INI_DI_LIST_FIRST(port, target_list);
 			while (tgt) {
 				spdk_fc_ini_di_bdev_t *di_bdev = SPDK_FC_INI_DI_LIST_FIRST(
@@ -1291,8 +1301,8 @@ int spdk_fc_ini_di_shutdown(void)
 				tgt = SPDK_FC_INI_DI_LIST_FIRST(port, target_list);
 			}
 
-			SPDK_TRACELOG(
-				SPDK_TRACE_FC_DISCOVERY, "free port's mempool\n");
+			SPDK_DEBUGLOG(
+				SPDK_LOG_FC_DISCOVERY, "free port's mempool\n");
 			rte_mempool_free(port->mp);
 		}
 
@@ -1300,12 +1310,12 @@ int spdk_fc_ini_di_shutdown(void)
 	}
 
 	spdk_fc_ini_blkreq_free(); // free the block layer mempool
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "done\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "done\n");
 	return 0;
 }
 
-SPDK_LOG_REGISTER_TRACE_FLAG("fc_ini_discovery", SPDK_TRACE_FC_DISCOVERY)
+SPDK_LOG_REGISTER_COMPONENT("fc_ini_discovery", SPDK_LOG_FC_DISCOVERY)
 
 /* Debug Testing - Push Driver Events through discovery code */
 #ifdef DEBUG_TEST_DI_NOTIFICATIONS
@@ -1331,8 +1341,8 @@ spdk_fc_ini_di_dbg_tst_new_tgt(void)
 {
 	spdk_fc_ini_di_target_t *tgt;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	if (g_fc_ini_num_ports > 0 && dbg_wwpn_byte6 <= 10) {
 		spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[0];
@@ -1352,8 +1362,8 @@ spdk_fc_ini_di_dbg_tst_tgt_down(void)
 {
 	spdk_fc_ini_di_target_t *tgt;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	if (g_fc_ini_num_ports > 0) {
 		spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[0];
@@ -1370,8 +1380,8 @@ spdk_fc_ini_di_dbg_tst_tgt_up(void)
 {
 	spdk_fc_ini_di_target_t *tgt;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	if (g_fc_ini_num_ports > 0) {
 		spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[0];
@@ -1387,8 +1397,8 @@ spdk_fc_ini_di_dbg_tst_tgt_luns(void)
 {
 	spdk_fc_ini_di_target_t *tgt;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	if (g_fc_ini_num_ports > 0) {
 		spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[0];
@@ -1405,8 +1415,8 @@ spdk_fc_ini_di_dbg_tst_tgt_port_down(void)
 {
 	spdk_fc_ini_di_target_t *tgt;
 
-	SPDK_TRACELOG(
-		SPDK_TRACE_FC_DISCOVERY, "\n");
+	SPDK_DEBUGLOG(
+		SPDK_LOG_FC_DISCOVERY, "\n");
 
 	if (g_fc_ini_num_ports > 0) {
 		spdk_fc_ini_di_port_t *port = &g_fc_ini_port_list[0];

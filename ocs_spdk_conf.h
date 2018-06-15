@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -38,6 +38,8 @@
 #include "ocs_os.h"
 #include "ocs_tgt_api.h"
 #include "spdk/conf.h"
+
+#define SPDK_FC_LARGE_RBUF_MAX_SIZE (64 * 1024)
 
 struct spdk_fc_igs_list {
 	TAILQ_HEAD(, spdk_fc_ig) head;

@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -586,7 +586,7 @@ ocs_process_abts(ocs_io_t *io, fc_header_t *hdr)
 		node_printf(node, "Abort request: ox_id [%04x], IO not found (exists=%d)\n",
 			    ox_id, (abortio != NULL));
 
-#if defined(OCS_NETAPP)
+#if defined(OCS_NVME_FC)
 		ocs_nvme_process_abts(ocs, ox_id, rx_id, node->rnode.indicator);
 #else
 		/* Send a BA_ACC */

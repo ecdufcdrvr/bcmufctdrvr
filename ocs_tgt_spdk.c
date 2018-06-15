@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -89,22 +89,23 @@ parse_wwn(char *wwn_in, uint64_t *wwn_out)
 	}
 }
 
+
+
 static void
-spdk_fc_queue_task(ocs_io_t *io, struct spdk_fc_task *task)
+spdk_fc_queue_mgmt_task(struct spdk_scsi_dev *dev, struct spdk_fc_task *task,
+		enum spdk_scsi_task_func function)
 {
-	if (task->scsi.type == SPDK_SCSI_TASK_TYPE_MANAGE) {
-		task->scsi.cb_event = spdk_event_allocate(io->node->tgt_node.core_id,
-				process_task_mgmt_completion, io, task);
-		spdk_scsi_dev_queue_mgmt_task(io->node->tgt_node.scsi_dev, &task->scsi);
+	spdk_scsi_dev_queue_mgmt_task(dev, &task->scsi, function);
+}
+
+static void
+spdk_fc_queue_task(struct spdk_scsi_dev *dev, struct spdk_fc_task *task)
+{
+	if (task->scsi.lun == NULL) {
+		spdk_scsi_task_process_null_lun(&task->scsi);
+		process_task_completion(&task->scsi);
 	} else {
-		if (task->scsi.lun == NULL) {
-			spdk_scsi_task_process_null_lun(&task->scsi);
-			process_task_completion(io, task);
-		} else {
-			task->scsi.cb_event = spdk_event_allocate(io->node->tgt_node.core_id,
-					process_task_completion, io, task);
-			spdk_scsi_dev_queue_task(io->node->tgt_node.scsi_dev, &task->scsi);
-		}
+		spdk_scsi_dev_queue_task(dev, &task->scsi);
 	}
 }
 
@@ -199,10 +200,11 @@ static int32_t
 scsi_write_notify_spdk(ocs_io_t *io)
 {
 	struct spdk_fc_task *primary = io->tgt_io.primary, *subtask, *tmp;
+	struct spdk_scsi_dev *dev = io->node->tgt_node.scsi_dev;
 
-	spdk_fc_queue_task(io, primary);
+	spdk_fc_queue_task(dev, primary);
 	TAILQ_FOREACH_SAFE(subtask, &primary->fc_subtask_list, fc_link, tmp) {
-		spdk_fc_queue_task(io, subtask);
+		spdk_fc_queue_task(dev, subtask);
 	}
 
 	return 0;
@@ -407,29 +409,33 @@ ocs_process_write_none_completion(ocs_io_t *io, struct spdk_fc_task *primary) {
 }
 
 void
-process_task_completion(void *arg1, void *arg2)
+process_task_completion(struct spdk_scsi_task *scsi_task)
 {
-	ocs_io_t *io 		  = arg1;
-	struct spdk_fc_task *task = arg2;
+	struct spdk_fc_task *task = (struct spdk_fc_task *)scsi_task;
+	ocs_io_t *io = task->cpl_args;
 	struct spdk_fc_task *primary;
 
 	ocs_assert(io);
 	ocs_assert(task);
+	
+	if (task->parent) {
+		primary = task->parent;
+	} else {
+		primary = task;
+	}
 
-	primary = spdk_fc_task_get_primary(task);
-	primary->scsi.bytes_completed += task->scsi.length;
+	primary->bytes_completed += task->scsi.length;
 
-	if (task->scsi.parent != NULL && task->scsi.status != SPDK_SCSI_STATUS_GOOD) {
+	if (task->parent != NULL && task->scsi.status != SPDK_SCSI_STATUS_GOOD) {
 		memcpy(primary->scsi.sense_data, task->scsi.sense_data,
 				task->scsi.sense_data_len);
 		primary->scsi.sense_data_len = task->scsi.sense_data_len;
 		primary->scsi.status = task->scsi.status;
 	}
 
-	if (primary->scsi.bytes_completed != primary->scsi.transfer_len) {
+	if (primary->bytes_completed != primary->scsi.transfer_len) {
 		return;
 	}
-
 
 	if (primary->scsi.dxfer_dir == SPDK_SCSI_DIR_FROM_DEV) {
 		ocs_process_read_completion(io, primary);
@@ -441,11 +447,11 @@ process_task_completion(void *arg1, void *arg2)
 }
 
 void
-process_task_mgmt_completion(void *arg1, void *arg2)
+process_task_mgmt_completion(struct spdk_scsi_task *scsi_task)
 {
 	uint8_t rspcode;
-	ocs_io_t *io 		  = arg1;
-	struct spdk_fc_task *task = arg2;
+	struct spdk_fc_task *task = (struct spdk_fc_task *)scsi_task;
+	ocs_io_t *io = task->cpl_args;
 
 	ocs_assert(io);
 	ocs_assert(task);
@@ -664,8 +670,7 @@ ocs_scsi_new_initiator(ocs_node_t *node)
 	}
 
 	OCS_SPDK_BUILD_NODE_NAME;
-	spdk_scsi_port_construct(&node->tgt_node.initiator_port,
-			node->instance_index, 0, pname);
+	node->tgt_node.initiator_port = spdk_scsi_port_create(node->instance_index, 0, pname);
 	rc = 0;
 done:
 	ocs_unlock(&g_spdk_config_lock);
@@ -726,7 +731,8 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 		goto bad_cmd;
 	} 
 
-	task  = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, NULL);
+	task  = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, NULL,
+			process_task_completion, io);
 	if (!task) {
 		goto busy;
 	}
@@ -734,19 +740,16 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 	io->tgt_io.primary = task;
 
 	task->mobj = NULL;
-	task->scsi.parent = NULL;
-	task->scsi.type	  = SPDK_SCSI_TASK_TYPE_CMD;
+	task->parent = NULL;
+	task->scsi.lun	  = spdk_scsi_dev_get_lun(dev, lun);
 	task->scsi.cdb 	  = io->tgt_io.cdb;
-	task->scsi.id 	  = io->tag;
-	task->scsi.transfer_len	= io->exp_xfer_len;
-	task->scsi.initiator_port = &(node->tgt_node.initiator_port);
+	task->scsi.transfer_len	  = io->exp_xfer_len;
+	task->scsi.initiator_port = node->tgt_node.initiator_port;
 	task->scsi.target_port    = spdk_scsi_dev_find_port_by_id(dev, node->sport->tgt_id);
-	task->scsi.initiator_port->dev = task->scsi.target_port->dev = dev;
 
-	if (lun < (uint32_t)dev->maxlun && lun < SPDK_SCSI_DEV_MAX_LUN) {
-		task->scsi.lun = dev->lun[lun];
-	} else {
-		task->scsi.lun = NULL;
+	if (task->scsi.lun == NULL) {
+		spdk_scsi_task_process_null_lun(&task->scsi);
+		return spdk_fc_queue_task(dev, task);
 	}
 
 	if (flags & OCS_SCSI_CMD_DIR_OUT) { // READ
@@ -755,19 +758,20 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 		struct spdk_fc_task *subtask;
 
 		TAILQ_INIT(&task->fc_subtask_list);
-		task->scsi.dxfer_dir 	= SPDK_SCSI_DIR_FROM_DEV;
-		task->scsi.iovs[0].iov_base = NULL;
-		task->scsi.offset 	= 0;
-		task->scsi.length 	= MIN(SPDK_BDEV_LARGE_RBUF_MAX_SIZE,
-						task->scsi.transfer_len);
+		task->scsi.dxfer_dir 		= SPDK_SCSI_DIR_FROM_DEV;
+		task->scsi.iovs[0].iov_base 	= NULL;
+		task->scsi.offset 		= 0;
+		task->scsi.length 		= MIN(SPDK_FC_LARGE_RBUF_MAX_SIZE,
+							task->scsi.transfer_len);
 
-		spdk_fc_queue_task(io, task);
+		spdk_fc_queue_task(dev, task);
 
 		remaining_size = task->scsi.transfer_len - task->scsi.length;
 		offset += task->scsi.length;
 		
 		while (remaining_size > 0) {
-			subtask = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, task);
+			subtask = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, task,
+					process_task_completion, io);
 			if (!subtask) {
 				goto busy;
 			}
@@ -775,12 +779,12 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 			subtask->scsi.iovs[0].iov_base	= NULL;
 			subtask->mobj 		= NULL;
 			subtask->scsi.offset 	= offset;
-			subtask->scsi.length 	= MIN(SPDK_BDEV_LARGE_RBUF_MAX_SIZE,
+			subtask->scsi.length 	= MIN(SPDK_FC_LARGE_RBUF_MAX_SIZE,
 					remaining_size);
 
 			TAILQ_INSERT_TAIL(&task->fc_subtask_list, subtask, fc_link);
 
-			spdk_fc_queue_task(io, subtask);
+			spdk_fc_queue_task(dev, subtask);
 
 			remaining_size -= subtask->scsi.length;
 			offset += subtask->scsi.length;
@@ -796,7 +800,7 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 		task->scsi.dxfer_dir	= SPDK_SCSI_DIR_TO_DEV;
 		task->scsi.offset	= 0;
 		task->scsi.iovs[0].iov_base	= NULL;
-		task->scsi.length	= MIN(SPDK_BDEV_LARGE_RBUF_MAX_SIZE,
+		task->scsi.length	= MIN(SPDK_FC_LARGE_RBUF_MAX_SIZE,
 						task->scsi.transfer_len);
 
 		/* Allocate write buffer for task. */	
@@ -813,7 +817,8 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 		offset += task->scsi.length;
 
 		while (remaining_size > 0) {
-			subtask = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, task);
+			subtask = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, task,
+					process_task_completion, io);
 			if (!subtask) {
 				goto busy;
 			}
@@ -828,7 +833,7 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 			}
 
 			subtask->scsi.offset	= offset;
-			subtask->scsi.length	= MIN(SPDK_BDEV_LARGE_RBUF_MAX_SIZE,
+			subtask->scsi.length	= MIN(SPDK_FC_LARGE_RBUF_MAX_SIZE,
 					remaining_size);
 			subtask->scsi.iovs[0].iov_base = subtask->mobj->buf;
 			subtask->scsi.iovs[0].iov_len  = subtask->scsi.length;
@@ -850,7 +855,7 @@ ocs_scsi_recv_cmd_process(void *arg1, void *arg2)
 		if (task->scsi.transfer_len > 0) {
 			goto bad_cmd;
 		}
-		spdk_fc_queue_task(io, task);
+		spdk_fc_queue_task(dev, task);
 	}
 
 	return;
@@ -907,6 +912,7 @@ ocs_scsi_recv_tmf_process(void *arg1, void *arg2)
 	struct spdk_scsi_dev *dev = tmfio->node->tgt_node.scsi_dev;
 	uint32_t lun = tmfio->tgt_io.lun;
 	ocs_scsi_tmf_cmd_e cmd = tmfio->tgt_io.cmd;
+	enum spdk_scsi_task_func function;
 
 	if (!dev) {
 		ocs_log_err(ocs, "%s: No scsi dev.\n", __func__);
@@ -916,7 +922,8 @@ ocs_scsi_recv_tmf_process(void *arg1, void *arg2)
 	/* No watermark checks for task management */
 	ocs_atomic_add_return(&ocs->tgt_ocs.ios_in_use, 1);
 
-	task  = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, NULL);
+	task = spdk_fc_task_get(&node->tgt_node.pending_task_cnt, NULL, 
+			process_task_mgmt_completion, tmfio);
 	if (!task) {
 		ocs_log_err(ocs, "%s: No FC task available.\n", __func__);
 		goto fail;
@@ -924,16 +931,10 @@ ocs_scsi_recv_tmf_process(void *arg1, void *arg2)
 
 	tmfio->tgt_io.primary = task;
 
-	task->scsi.type	= SPDK_SCSI_TASK_TYPE_MANAGE;
-	task->scsi.id	= tmfio->tag;
-	task->scsi.initiator_port = &node->tgt_node.initiator_port;
+	task->scsi.initiator_port = node->tgt_node.initiator_port;
 	task->scsi.target_port    = spdk_scsi_dev_find_port_by_id(dev, node->sport->tgt_id);
-	task->scsi.initiator_port->dev 	= dev;
-	task->scsi.target_port->dev	= dev;
-
-	if (lun < (uint32_t)dev->maxlun && lun < SPDK_SCSI_DEV_MAX_LUN) {
-		task->scsi.lun = dev->lun[lun];
-	} else {
+	task->scsi.lun 		  = spdk_scsi_dev_get_lun(dev, lun);
+	if (!task->scsi.lun) {
 		ocs_scsi_send_tmf_resp(tmfio, OCS_SCSI_TMF_INCORRECT_LOGICAL_UNIT_NUMBER,
 			NULL, scsi_io_free_cb, NULL);
 		return;
@@ -941,14 +942,14 @@ ocs_scsi_recv_tmf_process(void *arg1, void *arg2)
 
 	switch (cmd) {
 		case OCS_SCSI_TMF_ABORT_TASK:
-			task->scsi.function = SPDK_SCSI_TASK_FUNC_ABORT_TASK;
+			function = SPDK_SCSI_TASK_FUNC_ABORT_TASK;
 			task->scsi.abort_id = tmfio->tgt_io.abort_tag;
 			break;
 		case OCS_SCSI_TMF_ABORT_TASK_SET:
-			task->scsi.function = SPDK_SCSI_TASK_FUNC_ABORT_TASK_SET;
+			function = SPDK_SCSI_TASK_FUNC_ABORT_TASK_SET;
 			break;
 		case OCS_SCSI_TMF_LOGICAL_UNIT_RESET:
-			task->scsi.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+			function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
 			break;
 		case OCS_SCSI_TMF_CLEAR_ACA:
 		case OCS_SCSI_TMF_CLEAR_TASK_SET:
@@ -957,7 +958,7 @@ ocs_scsi_recv_tmf_process(void *arg1, void *arg2)
 			goto fail;
 	}
 
-	spdk_fc_queue_task(tmfio, task);
+	spdk_fc_queue_mgmt_task(dev, task, function);
 
 	return;
 

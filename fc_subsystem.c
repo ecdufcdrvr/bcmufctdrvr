@@ -2,7 +2,7 @@
  *  BSD LICENSE
  *
  *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
@@ -44,6 +44,8 @@
 
 #define DEFAULT_TASK_POOL_SIZE 16384
 
+extern uint32_t ocs_spdk_master_core;
+
 extern int spdk_fc_ini_di_shutdown(void);
 extern void spdk_fc_free_all_pools(void);
 struct spdk_fc_globals g_spdk_fc;
@@ -60,7 +62,7 @@ spdk_mobj_ctor(struct rte_mempool *mp, __attribute__((unused))void *arg,
 	m->buf = (void *)((unsigned long)((uint8_t *)m->buf + 512) & ~511UL);
 	off = (uint64_t)(uint8_t *)m->buf - (uint64_t)(uint8_t *)m;
 
-	m->phys_addr = rte_mempool_virt2phy(mp, m) + off;
+	m->phys_addr = spdk_vtophys(m) + off;
 }
 
 
@@ -68,7 +70,7 @@ static int
 spdk_fc_initialize_all_pools(void)
 {
 	struct spdk_fc_globals *fc = &g_spdk_fc;
-	int mobj_size = SPDK_BDEV_LARGE_RBUF_MAX_SIZE + sizeof(struct spdk_mobj) + 512;
+	int mobj_size = SPDK_FC_LARGE_RBUF_MAX_SIZE + sizeof(struct spdk_mobj) + 512;
 
 
 	/* create scsi_task pool */
@@ -142,6 +144,9 @@ int
 spdk_fc_subsystem_init(void)
 {
 	int 	 rc;
+
+	/* save master core value */
+	ocs_spdk_master_core = spdk_env_get_current_core();
 
 	rc = spdk_fc_app_read_parameters();
 	if (rc < 0) {
