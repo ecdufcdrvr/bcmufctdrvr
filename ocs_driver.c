@@ -39,7 +39,7 @@
 #include "ocs_gendump.h"
 #include "ocs_ocsu.h"
 
-#include "fc/fc.h"
+#include "fc.h"
 
 #include "spdk/log.h"
 

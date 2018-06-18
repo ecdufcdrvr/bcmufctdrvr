@@ -34,7 +34,7 @@
 #ifndef SPDK_FC_TASK_H
 #define SPDK_FC_TASK_H
 
-#include "fc/fc.h"
+#include "fc.h"
 #include "spdk/scsi.h"
 
 struct spdk_fc_task {

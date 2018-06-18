@@ -49,7 +49,7 @@
 #include "spdk/string.h"
 #include "spdk/event.h"
 #include "spdk/io_channel.h"
-#include "fc/fc.h"
+#include "fc.h"
 
 #include "spdk_nvmf_xport.h"
 

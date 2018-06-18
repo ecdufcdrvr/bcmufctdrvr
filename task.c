@@ -35,7 +35,7 @@
 #include <rte_mempool.h>
 
 #include "spdk/log.h"
-#include "fc/task.h"
+#include "task.h"
 
 static void
 spdk_fc_task_free(struct spdk_scsi_task *scsi_task)
