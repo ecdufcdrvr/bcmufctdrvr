@@ -35,7 +35,7 @@
 #include "ocs_pci.h"
 #include "ocs.h"
 #include "ocs_ocsu.h"
-#include "fc/fc.h"
+#include "fc.h"
 #include "ocs_spdk.h"
 #include "ocs_impl.h"
 //#include <pciaccess.h>
