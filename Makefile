@@ -36,8 +36,7 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
 DEFINES         = -DOCS_USPACE_SPDK -DOCS_NVME_FC
 
-CFLAGS += $(ENV_CFLAGS) -I$(SPDK_ROOT_DIR)/lib -I$(SPDK_ROOT_DIR)/lib/scsi 
-CFLAGS += -I$(SPDK_ROOT_DIR)/lib/nvmf
+CFLAGS += $(ENV_CFLAGS) -I$(SPDK_ROOT_DIR)/lib/scsi -I$(SPDK_ROOT_DIR)/lib/nvmf
 CFLAGS += $(DPDK_INC) $(DEFINES)
 
 C_SRCS     =  \

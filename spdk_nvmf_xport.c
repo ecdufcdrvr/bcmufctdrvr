@@ -43,7 +43,6 @@
 #include "spdk/trace.h"
 #include "spdk_internal/log.h"
 #include "spdk_nvmf_xport.h"
-#include "nvmf/nvmf_fc_internal.h"
 #include "ocs_tgt_api.h"
 
 /*

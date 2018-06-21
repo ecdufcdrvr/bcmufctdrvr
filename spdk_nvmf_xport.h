@@ -31,9 +31,9 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "nvmf/nvmf_internal.h"
-#include "nvmf/nvmf_fc_internal.h"
-#include "nvmf/fc_adm_api.h"
+#include "nvmf_internal.h"
+#include "nvmf_fc_internal.h"
+#include "fc_adm_api.h"
 
 /* maximum number of IO queues for NVME over FC */
 #define OCS_NVME_FC_MAX_IO_QUEUES  16
