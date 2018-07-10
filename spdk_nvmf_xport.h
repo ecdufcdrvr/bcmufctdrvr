@@ -32,7 +32,7 @@
  */
 
 #include "nvmf_internal.h"
-#include "nvmf_fc_internal.h"
+#include "nvmf_fc.h"
 #include "fc_adm_api.h"
 
 /* maximum number of IO queues for NVME over FC */

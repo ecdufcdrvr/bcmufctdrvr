@@ -72,7 +72,7 @@ ocs_nvme_api_call_sync(spdk_fc_event_t event_type, void *args, void **cb_args)
 		goto done;	
 	} else {
 		/* Set the default status */
-		ctx.rc = SPDK_ERR_INTERNAL;
+		ctx.rc = 1;
 	}
 
 	*cb_args = &ctx;
@@ -129,7 +129,7 @@ ocs_alloc_nvme_buffers(int size, int num_entries)
 	uint64_t phys;
 	struct spdk_nvmf_fc_buffer_desc *buffers = NULL, *buffer;
 
-	buffers = spdk_calloc(num_entries, sizeof(struct spdk_nvmf_fc_buffer_desc));
+	buffers = calloc(num_entries, sizeof(struct spdk_nvmf_fc_buffer_desc));
 	if (!buffers) {
 		goto error;
 	}

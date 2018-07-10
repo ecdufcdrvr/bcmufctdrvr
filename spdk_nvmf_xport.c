@@ -1299,7 +1299,7 @@ nvmf_fc_create_reqtag_pool(struct spdk_nvmf_fc_hwqp *hwqp)
 	}
 
 	/* Create ring objects */
-	wq->reqtag_objs = spdk_calloc(MAX_REQTAG_POOL_SIZE, sizeof(fc_reqtag_t));
+	wq->reqtag_objs = calloc(MAX_REQTAG_POOL_SIZE, sizeof(fc_reqtag_t));
 	if (!wq->reqtag_objs) {
 		SPDK_ERRLOG("create fc reqtag ring objects failed\n");
 		goto error;
@@ -2328,8 +2328,8 @@ nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 		poller_args->tag = (uint64_t)marker->tag_higher << 32 | marker->tag_lower;
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Process Marker compl for tag = %lx\n", 
 			      poller_args->tag);
-		spdk_nvmf_fc_poller_api(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,
-					    poller_args);
+		spdk_nvmf_fc_poller_api_func(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,
+					     poller_args);
 	}
 }
 
@@ -2874,7 +2874,7 @@ nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 	struct spdk_nvmf_fc_caller_ctx *ctx = NULL;
 	int rc = -1;
 
-	ctx = spdk_calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
+	ctx = calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
 	if (!ctx) {
 		goto done;
 	}
@@ -2926,7 +2926,7 @@ nvmf_fc_xmt_bls_rsp(struct spdk_nvmf_fc_hwqp *hwqp,
 		goto done;
 	}
 
-	ctx = spdk_calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
+	ctx = calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
 	if (!ctx) {
 		goto done;
 	}
@@ -2999,7 +2999,7 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 		goto done;
 	}
 
-	ctx = spdk_calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
+	ctx = calloc(1, sizeof(struct spdk_nvmf_fc_caller_ctx));
 	if (!ctx) {
 		goto done;
 	}
