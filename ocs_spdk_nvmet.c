@@ -49,7 +49,7 @@ struct nvme_api_ctx {
 };
 
 static void
-ocs_nvme_api_call_done(uint8_t port_handle, spdk_fc_event_t event_type,
+ocs_nvme_api_call_done(uint8_t port_handle, enum spdk_fc_event event_type,
 		void *in, int err)
 {
 	struct nvme_api_ctx *ctx = in;
@@ -59,7 +59,7 @@ ocs_nvme_api_call_done(uint8_t port_handle, spdk_fc_event_t event_type,
 }
 
 static int
-ocs_nvme_api_call_sync(spdk_fc_event_t event_type, void *args, void **cb_args)
+ocs_nvme_api_call_sync(enum spdk_fc_event event_type, void *args, void **cb_args)
 {
 	struct nvme_api_ctx ctx;
 
@@ -178,10 +178,10 @@ ocs_hw_port_cleanup(ocs_t *ocs)
 }
 
 static void
-ocs_cb_hw_port_create(uint8_t port_handle, spdk_fc_event_t event_type,
+ocs_cb_hw_port_create(uint8_t port_handle, enum spdk_fc_event event_type,
 		void *ctx, int err)
 {
-	spdk_nvmf_fc_hw_port_init_args_t *args = ctx;
+	struct spdk_nvmf_fc_hw_port_init_args *args = ctx;
 	ocs_t *ocs = NULL;
 
 	if (err) {
@@ -207,7 +207,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 {
 	uint32_t i;
 	ocs_hal_t *hal = &ocs->hal;
-	spdk_nvmf_fc_hw_port_init_args_t *args;
+	struct spdk_nvmf_fc_hw_port_init_args *args;
 	int rc;
 	struct bcm_nvmf_hw_queues* hwq;
 	spdk_nvmf_fc_lld_hwqp_t io_queues_start;
@@ -343,9 +343,9 @@ int
 ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	spdk_nvmf_fc_hw_port_online_args_t args;
+	struct spdk_nvmf_fc_hw_port_online_args args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_port_online_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_port_online_args));
 	args.port_handle = ocs->instance_index;
 
 	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_ONLINE, &args, &args.cb_ctx)) {
@@ -360,9 +360,9 @@ ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 int
 ocs_nvme_process_hw_port_offline(ocs_t *ocs)
 {
-	spdk_nvmf_fc_hw_port_offline_args_t args;
+	struct spdk_nvmf_fc_hw_port_offline_args args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_port_offline_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_port_offline_args));
 	args.port_handle = ocs->instance_index;
 
 	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_OFFLINE, &args, &args.cb_ctx)) {
@@ -378,9 +378,9 @@ int
 ocs_nvme_nport_create(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	spdk_nvmf_fc_nport_create_args_t args;
+	struct spdk_nvmf_fc_nport_create_args args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_nport_create_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_nport_create_args));
 
 	/* We register physical port as nport. Real nports not supported yet. */
 	args.nport_handle	= 0;
@@ -402,9 +402,9 @@ ocs_nvme_nport_create(ocs_sport_t *sport)
 int
 ocs_nvme_nport_delete(ocs_t *ocs)
 {
-	spdk_nvmf_fc_nport_delete_args_t args;
+	struct spdk_nvmf_fc_nport_delete_args args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_nport_delete_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_nport_delete_args));
 
 	args.port_handle	= ocs->instance_index;
 	args.nport_handle	= 0;
@@ -420,7 +420,7 @@ ocs_nvme_nport_delete(ocs_t *ocs)
 }
 
 static void
-ocs_cb_abts_cb(uint8_t port_handle, spdk_fc_event_t event_type,
+ocs_cb_abts_cb(uint8_t port_handle, enum spdk_fc_event event_type,
 	void *args, int err)
 {
 	free(args);
@@ -429,10 +429,10 @@ ocs_cb_abts_cb(uint8_t port_handle, spdk_fc_event_t event_type,
 int
 ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi)
 {
-	spdk_nvmf_fc_abts_args_t *args;
+	struct spdk_nvmf_fc_abts_args *args;
 	int rc;
 
-	args = ocs_malloc(NULL, sizeof(spdk_nvmf_fc_abts_args_t), OCS_M_ZERO);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_abts_args), OCS_M_ZERO);
 	if (!args) {
 		goto err;
 	}
@@ -473,13 +473,13 @@ ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	spdk_nvmf_fc_hw_i_t_add_args_t args;
+	struct spdk_nvmf_fc_hw_i_t_add_args args;
 
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_add_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_add_args));
 
 	args.port_handle	= node->ocs->instance_index;
 	args.nport_handle	= node->sport->instance_index;
@@ -509,13 +509,13 @@ ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	spdk_nvmf_fc_hw_i_t_delete_args_t args;
+	struct spdk_nvmf_fc_hw_i_t_delete_args args;
 
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_delete_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_delete_args));
 
 	args.port_handle  = node->ocs->instance_index;
 	args.nport_handle = node->sport->instance_index;
@@ -541,9 +541,9 @@ int
 ocs_nvme_node_lost(ocs_node_t *node)
 {
 	ocs_t *ocs = node->ocs;
-	spdk_nvmf_fc_hw_i_t_delete_args_t args;
+	struct spdk_nvmf_fc_hw_i_t_delete_args args;
 
-	memset(&args, 0, sizeof(spdk_nvmf_fc_hw_i_t_delete_args_t));
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_delete_args));
 
 	args.port_handle	= node->ocs->instance_index;
 	args.nport_handle	= node->sport->instance_index;
