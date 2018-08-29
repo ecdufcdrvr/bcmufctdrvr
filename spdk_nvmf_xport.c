@@ -3061,8 +3061,13 @@ done:
 	return rc;
 }
 
+static bool
+nvmf_fc_q_sync_available(void) {
+	return true;
+}
+
 static int
-nvmf_fc_issue_marker(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t skip_rq)
+nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t skip_rq)
 {
 	uint8_t wqe[128] = { 0 };
 	bcm_marker_wqe_t *marker = (bcm_marker_wqe_t *)wqe;
@@ -3357,7 +3362,8 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.issue_abort = nvmf_fc_issue_abort,
 	.xmt_bls_rsp = nvmf_fc_xmt_bls_rsp,
 	.xmt_srsr_req = nvmf_fc_xmt_srsr_req,
-	.issue_q_marker = nvmf_fc_issue_marker,
+	.q_sync_available = nvmf_fc_q_sync_available,
+	.issue_q_sync = nvmf_fc_issue_q_sync,
 	.assign_conn_to_hwqp = nvmf_fc_assign_conn_to_hwqp,
 	.get_hwqp_from_conn_id = nvmf_fc_get_hwqp_from_conn_id,
 	.release_conn = nvmf_fc_release_conn,
