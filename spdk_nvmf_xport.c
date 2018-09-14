@@ -2325,6 +2325,7 @@ nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 	if (poller_args) {
 		poller_args->hwqp = hwqp;
 		poller_args->tag = (uint64_t)marker->tag_higher << 32 | marker->tag_lower;
+		poller_args->cb_info.cb_thread = spdk_get_thread();
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Process Marker compl for tag = %lx\n", 
 			      poller_args->tag);
 		spdk_nvmf_fc_poller_api_func(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,

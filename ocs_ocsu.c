@@ -177,16 +177,17 @@ attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ocs_t *spdk
 static uint32_t
 ocs_alloc_lcore(void)
 {
+	return spdk_env_get_last_core();
+
+#if 0 // TODO: NEW SPDK - FIX the lcore mask skip (if needed still)
 	uint32_t least_assgined_lcore = 0;
 	uint32_t least_assigned = 0, i = 0;
 
 	RTE_LCORE_FOREACH_SLAVE(i) {
-#if 0 // TODO: NEW SPDK - FIX the lcore mask skip (if needed still)
 		/* If this is nvmf lcore skip */
 		if ((g_nvmf_tgt.opts.lcore_mask >> i) & 0x1) {
 			continue;
 		}
-#endif
 
 		if (!least_assigned || (g_fc_lcore[i] < least_assigned)) {
 			least_assigned = g_fc_lcore[i];
@@ -202,6 +203,7 @@ ocs_alloc_lcore(void)
 	g_fc_lcore[least_assgined_lcore]++;
 
 	return least_assgined_lcore;
+#endif
 }
 
 static void
