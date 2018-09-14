@@ -83,7 +83,7 @@ typedef char * charp;
 	P(int,		logdest,		1,	"logging destination (default is 0)\n" \
 							"bit[0] = system log (default is 1)\n" \
 							"bit[1] = ram log (default is 0)") \
-	P(int,		loglevel,		3,	"logging level 0=CRIT, 1=ERR, 2=WARN, 3=INFO, 4=TEST, 5=DEBUG") \
+	P(int,		loglevel,		7,	"logging level 0=CRIT, 1=ERR, 2=WARN, 3=INFO, 4=TEST, 5=DEBUG") \
 	P(int,		ramlog_size,		1*1024*1024,	"size of ram logging buffer (default is 1M)") \
 	P(int,		ddump_saved_size,	0,	"size of saved ddump (default is 0)") \
 	P(int,		uspacemask,		0,	"bit[0] 0:thread per port(default), 1:poll from single thread\n" \

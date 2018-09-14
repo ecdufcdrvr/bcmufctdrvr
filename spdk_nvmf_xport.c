@@ -44,6 +44,7 @@
 #include "spdk_internal/log.h"
 #include "spdk_nvmf_xport.h"
 #include "ocs_tgt_api.h"
+#include "spdk/barrier.h"
 
 /*
  * Broadcom FC SLI-4 definitions
@@ -1310,7 +1311,7 @@ nvmf_fc_create_reqtag_pool(struct spdk_nvmf_fc_hwqp *hwqp)
 		obj = wq->reqtag_objs + i;
 
 		obj->index = i;
-		if (spdk_ring_enqueue(wq->reqtag_ring, (void **)&obj, 1)) {
+		if (spdk_ring_enqueue(wq->reqtag_ring, (void **)&obj, 1) != 1) {
 			SPDK_ERRLOG("fc reqtag ring enqueue objects failed %d\n", i);
 			goto error;
 		}
@@ -1338,7 +1339,7 @@ nvmf_fc_get_reqtag(struct spdk_nvmf_fc_hwqp *hwqp)
 	struct fc_wrkq *wq = &BCM_HWQP(hwqp)->wq;
 	fc_reqtag_t *tag;
 
-	if (spdk_ring_dequeue(wq->reqtag_ring, (void **)&tag, 1)) {
+	if (!spdk_ring_dequeue(wq->reqtag_ring, (void **)&tag, 1)) {
 		return NULL;
 	}
 
@@ -1367,9 +1368,13 @@ nvmf_fc_release_reqtag(struct spdk_nvmf_fc_hwqp *hwqp, fc_reqtag_t *tag)
 
 	rc = spdk_ring_enqueue(wq->reqtag_ring, (void**)&tag, 1);
 
-	wq->p_reqtags[tag->index] = NULL;
-	tag->cb = NULL;
-	tag->cb_args = NULL;
+	if (rc == 1) {
+		wq->p_reqtags[tag->index] = NULL;
+		tag->cb = NULL;
+		tag->cb_args = NULL;
+	}
+	// Driver & library interpretation of return code is different
+	rc ^= 1;
 
 	return rc;
 }
@@ -1411,6 +1416,7 @@ nvmf_fc_bcm_notify_queue(bcm_sli_queue_t *q, bool arm_queue, uint16_t num_entrie
 		break;
 	}
 
+	spdk_wmb();
 	reg->doorbell = entry.doorbell;
 }
 
@@ -2096,15 +2102,8 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 		spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_WRITE_BDEV);
 
-#if 0 // TODO: FIX the request_exec function being void
-		switch(spdk_nvmf_request_exec(&fc_req->req) {
-		case SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE:
-		case SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS:
-			break;
-		default:
-			goto io_done;
-		}
-#endif
+		spdk_nvmf_request_exec(&fc_req->req);
+
 		return;
 	}
 	/* Read Tranfer done */
