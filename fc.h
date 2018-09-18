@@ -59,6 +59,7 @@ struct spdk_fc_globals {
 };
 extern struct spdk_fc_globals g_spdk_fc;
 void ocs_spdk_exit(void);
+void ocs_spdk_start_pollers(void);
 int ocsu_init(void);
 extern uint64_t g_flush_timeout;
 void spdk_fc_shutdown(void);

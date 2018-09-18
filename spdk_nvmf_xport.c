@@ -44,6 +44,7 @@
 #include "spdk_internal/log.h"
 #include "spdk_nvmf_xport.h"
 #include "ocs_tgt_api.h"
+#include "fc.h"
 #include "spdk/barrier.h"
 
 /*
@@ -1871,6 +1872,12 @@ nvmf_fc_lld_fini(void)
 	spdk_fc_api_subsystem_exit();
 }
 
+static void
+nvmf_fc_lld_start(void)
+{
+	ocs_spdk_start_pollers();
+}
+
 static int
 nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp)
 {
@@ -3350,6 +3357,7 @@ nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.lld_init = nvmf_fc_lld_init,
 	.lld_fini = nvmf_fc_lld_fini,
+	.lld_start = nvmf_fc_lld_start,
 	.init_q = nvmf_fc_init_q,
 	.reinit_q = nvmf_fc_reinit_q,
 	.init_q_buffers = nvmf_fc_init_rqpair_buffers,

@@ -387,17 +387,8 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		ocs_log_err(ocs, "%s: ocs_device_attach failed: %d\n", __func__, rc);
 		goto error2;
 	}
-
-	rc = ocs_create_pollers(ocs);
-	if (rc) {
-		ocs_log_err(ocs, "%s: ocs_device_attach failed: unable to start pollers\n",
-				__func__);
-		goto error3;
-	}
-
 	return ocs;
-error3:
-	ocs_device_detach(ocs);
+
 error2:
 	ocs_dma_teardown(ocs);
 error1:
@@ -567,6 +558,23 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 
 	ocs_device_free(ocs);
 	return true;
+}
+
+void
+ocs_spdk_start_pollers(void)
+{
+	uint32_t i;
+	int rc = 0;
+	ocs_t *ocs;
+
+	for_each_ocs(i, ocs) {
+		if (!ocs)
+			continue;
+		rc = ocs_create_pollers(ocs);
+		if (rc) {
+			ocs_log_err(ocs, "%d: unable to start pollers\n", ocs->instance_index);
+		}
+	}
 }
 
 void
