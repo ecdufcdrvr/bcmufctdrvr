@@ -1325,7 +1325,7 @@ nvmf_fc_create_reqtag_pool(struct spdk_nvmf_fc_hwqp *hwqp)
 	return 0;
 error:
 	if (wq->reqtag_objs) {
-		spdk_free(wq->reqtag_objs);
+		free(wq->reqtag_objs);
 	}
 
 	if (wq->reqtag_ring) {
@@ -2023,7 +2023,7 @@ nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 		carg->cb(hwqp, status, carg->cb_args);
 	}
 
-	spdk_free(carg);
+	free(carg);
 }
 
 static void
@@ -2042,7 +2042,7 @@ nvmf_fc_bls_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 		carg->cb(hwqp, status, carg->cb_args);
 	}
 
-	spdk_free(carg);
+	free(carg);
 }
 
 static void
@@ -2062,7 +2062,7 @@ nvmf_fc_srsr_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 		carg->cb(hwqp, status, carg->cb_args);
 	}
 
-	spdk_free(carg);
+	free(carg);
 }
 
 static void
@@ -2906,7 +2906,7 @@ nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)abort, true, nvmf_fc_abort_cmpl_cb, ctx);
 done:
 	if (rc && ctx) {
-		spdk_free(ctx);
+		free(ctx);
 	}
 
 	if (!rc) {
@@ -2963,7 +2963,7 @@ nvmf_fc_xmt_bls_rsp(struct spdk_nvmf_fc_hwqp *hwqp,
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)bls, true, nvmf_fc_bls_cmpl_cb, ctx);
 done:
 	if (rc && ctx) {
-		spdk_free(ctx);
+		free(ctx);
 	}
 
 	if (rc && xri) {
@@ -3054,7 +3054,7 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 			      ctx);
 done:
 	if (rc && ctx) {
-		spdk_free(ctx);
+		free(ctx);
 	}
 
 	if (rc && xri) {
