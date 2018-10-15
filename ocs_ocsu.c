@@ -223,18 +223,43 @@ ocs_spdk_fc_poller(void *arg)
 	return 0;
 }
 
+static void
+_ocs_poller_stop(void *arg1, void *arg2)
+{
+	struct ocs_spdk_fc_poller *fc_poller = arg1;
+
+	spdk_poller_unregister(&fc_poller->spdk_poller);
+	ocs_release_lcore(fc_poller->lcore);
+	sem_post((sem_t *) arg2);
+}
+
+static void
+ocs_poller_stop(struct ocs_spdk_fc_poller *fc_poller)
+{
+	struct spdk_event *event = NULL;
+	sem_t sem;
+
+	sem_init(&sem, 1, 0);
+	event = spdk_event_allocate(fc_poller->lcore, _ocs_poller_stop,
+				    (void *)fc_poller, (void *)&sem);
+	if (event) {
+		spdk_event_call(event);
+		sem_wait(&sem);
+	}
+	sem_destroy(&sem);
+}
+
 void
 ocs_spdk_poller_stop(ocs_t *ocs)
 {
-	uint32_t i, index = ocs_instance(ocs);
-	uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
-
 	if (ocs != NULL) {
-		for (i = 0; i < pollers_required; i++) {
-			spdk_poller_unregister(&g_fc_port_poller[index][i].spdk_poller);
-			ocs_release_lcore(g_fc_port_poller[index][i].lcore);
-		}
+		uint32_t i, index = ocs_instance(ocs);
+		uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
+
 		ocs_log_debug(ocs, "Destroying poller threads on port : %d\n", index);
+		for (i = 0; i < pollers_required; i++) {
+			ocs_poller_stop(&g_fc_port_poller[index][i]);
+		}
 	}
 }
 
