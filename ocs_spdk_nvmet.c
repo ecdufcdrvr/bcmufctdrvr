@@ -211,6 +211,16 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	int rc;
 	struct bcm_nvmf_hw_queues* hwq;
 	spdk_nvmf_fc_lld_hwqp_t io_queues_start;
+	struct fc_xri_list *xri_list;
+
+	xri_list = spdk_nvmf_fc_create_xri_list(*(ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].base) +
+						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size,
+						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size);
+	
+	if (!xri_list) {
+		ocs_log_err(ocs, "HW port create failed to create nvmf xri list.\n");
+		return -1;
+	}
 
 	ocs->tgt_ocs.args = NULL;
 
@@ -222,16 +232,15 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	}
 
 	args->port_handle = ocs->instance_index;
-	args->xri_base =
-		*(ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].base) +
-		ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size;
-	args->xri_count = ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size;
 	args->cb_ctx = args;
 	args->fcp_rq_id = hal->hal_rq[0]->hdr->id; 
 
 	/* assign LS Q */
 	args->ls_queue = (spdk_nvmf_fc_lld_hwqp_t)args + sizeof(struct spdk_nvmf_fc_hw_port_init_args);
 	hwq = (struct bcm_nvmf_hw_queues *)(args->ls_queue);
+
+	/* assign XRI list to queue (shared by all queues on port */
+	hwq->xri_list = xri_list;
 
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[1]->queue,
 			&hwq->eq.q);
@@ -275,6 +284,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 		args->io_queues[i] = io_queues_start + (i * sizeof(struct bcm_nvmf_hw_queues));
 		hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
 	
+		/* assign XRI list to queue (shared by all queues on port */
+		hwq->xri_list = xri_list;
+
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[i + 2]->queue,
 				&hwq->eq.q);
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_wq[i + 2]->cq->queue,
@@ -329,7 +341,7 @@ error:
 		ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
 		ocs_free_nvme_buffers(hwq->rq_payload.buffer);
 
-		for (i = 0; i < args->io_queue_cnt; i ++) {
+		for (i = 0; i < args->io_queue_cnt; i++) {
 			hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
 			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
 			ocs_free_nvme_buffers(hwq->rq_payload.buffer);

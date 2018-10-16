@@ -31,7 +31,6 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "nvmf_internal.h"
 #include "nvmf_fc.h"
 #include <spdk/fc_adm_api.h>
 
@@ -94,6 +93,15 @@ typedef struct fc_rcvq {
 	uint32_t rq_map[MAX_RQ_ENTRIES];
 } fc_rcvq_t;
 
+struct fc_xri_list {
+	uint32_t xri_base;
+	uint32_t xri_count;
+	struct spdk_nvmf_fc_xri *xri_list;
+	struct spdk_ring   *xri_ring;
+	TAILQ_HEAD(, spdk_nvmf_fc_xri) pending_xri_list;
+	TAILQ_ENTRY(fc_xri_list) link;
+};
+
 /*
  * Hardware queues structure.
  * Structure passed from master thread to poller thread.
@@ -102,8 +110,11 @@ struct bcm_nvmf_hw_queues {
 	struct fc_eventq eq;
 	struct fc_eventq cq_wq;
 	struct fc_eventq cq_rq;
-	struct fc_wrkq   wq;
-	struct fc_rcvq   rq_hdr;
-	struct fc_rcvq   rq_payload;
+	struct fc_wrkq wq;
+	struct fc_rcvq rq_hdr;
+	struct fc_rcvq rq_payload;
+	struct fc_xri_list *xri_list;
 };
 
+/* functions to create XRI lists (for each port) */
+struct fc_xri_list* spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count);
