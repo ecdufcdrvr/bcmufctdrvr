@@ -1294,11 +1294,15 @@ static void
 nvmf_fc_xri_list_cleanup(void)
 {
 	struct fc_xri_list *xri_list, *tmp;
-	void *xri[10000];
 
 	TAILQ_FOREACH_SAFE(xri_list, &g_nvmf_fc_xri_list, link, tmp) {
 		TAILQ_REMOVE(&g_nvmf_fc_xri_list, xri_list, link);
-		while (spdk_ring_dequeue(xri_list->xri_ring, xri, 10000));
+		while (1) {
+			void *xri[10000];
+			if (spdk_ring_dequeue(xri_list->xri_ring, xri, 10000) < 10000) {
+				break;
+			}
+		}
                 spdk_ring_free(xri_list->xri_ring);
 		free(xri_list);
 	}

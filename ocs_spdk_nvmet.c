@@ -118,7 +118,7 @@ ocs_free_nvme_buffers(struct spdk_nvmf_fc_buffer_desc *buffers)
 		spdk_dma_free(buffers->virt);
 	}
 
-	spdk_free(buffers);
+	free(buffers);
 }
 
 static struct spdk_nvmf_fc_buffer_desc *
@@ -135,6 +135,7 @@ ocs_alloc_nvme_buffers(int size, int num_entries)
 	}
 
 	virt = spdk_dma_zmalloc((size * num_entries), 4096, &phys);
+
 	if (!virt) {
 		goto error;
 	}
@@ -150,7 +151,7 @@ ocs_alloc_nvme_buffers(int size, int num_entries)
 	return buffers;
 error:
 	if (buffers) {
-		spdk_free(buffers);
+		free(buffers);
 	}
 	return NULL;
 }
@@ -338,13 +339,21 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 error:
 	if (args) {
  		hwq = (struct bcm_nvmf_hw_queues *)(args->ls_queue);
-		ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
-		ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+		if (hwq->rq_hdr.buffer) {
+			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+		}
+		if (hwq->rq_payload.buffer) {
+			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+		}
 
 		for (i = 0; i < args->io_queue_cnt; i++) {
 			hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
-			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
-			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+			if (hwq->rq_hdr.buffer) {
+				ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+			}
+			if (hwq->rq_payload.buffer) {
+				ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+			}
 		}
 		free(args);
 	}
