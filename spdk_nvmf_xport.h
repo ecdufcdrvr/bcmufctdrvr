@@ -96,9 +96,9 @@ typedef struct fc_rcvq {
 struct fc_xri_list {
 	uint32_t xri_base;
 	uint32_t xri_count;
-	struct spdk_nvmf_fc_xri *xri_list;
+	struct spdk_nvmf_fc_xchg *xri_list;
 	struct spdk_ring   *xri_ring;
-	TAILQ_HEAD(, spdk_nvmf_fc_xri) pending_xri_list;
+	TAILQ_HEAD(, spdk_nvmf_fc_xchg) pending_xri_list;
 	TAILQ_ENTRY(fc_xri_list) link;
 };
 

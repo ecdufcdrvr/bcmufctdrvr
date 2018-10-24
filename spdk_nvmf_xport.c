@@ -1241,7 +1241,7 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
 {
 	struct fc_xri_list *xri_list = calloc(1, sizeof(struct fc_xri_list));
 	uint32_t poweroftwo = 1, i;
-	struct spdk_nvmf_fc_xri *ring_xri_ptr = NULL;
+	struct spdk_nvmf_fc_xchg *ring_xri_ptr = NULL;
 	void *ring_xri_vptr[1];
 	int rc = 0;
 
@@ -1256,7 +1256,7 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
                 poweroftwo *= 2;
 	}
 
-	xri_list->xri_list = ring_xri_ptr = calloc(xri_count, sizeof(struct spdk_nvmf_fc_xri));
+	xri_list->xri_list = ring_xri_ptr = calloc(xri_count, sizeof(struct spdk_nvmf_fc_xchg));
 	if (!xri_list->xri_list) {
 		free(xri_list);
 		return NULL;
@@ -1271,7 +1271,7 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
 	}
 
         for (i = 0; i < xri_count; i++) {
-                ring_xri_ptr->xri = xri_base + i;
+                ring_xri_ptr->xchg_id = xri_base + i;
                 ring_xri_vptr[0] = ring_xri_ptr;
                 rc = spdk_ring_enqueue(xri_list->xri_ring, ring_xri_vptr, 1);
                 if (rc == 0) {
@@ -2063,7 +2063,7 @@ nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	struct spdk_nvmf_fc_caller_ctx *carg = arg;
 
 	SPDK_NOTICELOG("IO Aborted(XRI:0x%x, Status=%d)\n",
-		       ((struct spdk_nvmf_fc_xri *)(carg->ctx))->xri, status);
+		       ((struct spdk_nvmf_fc_xchg *)(carg->ctx))->xchg_id, status);
 
 	if (carg->cb) {
 		carg->cb(hwqp, status, carg->cb_args);
@@ -2074,7 +2074,7 @@ nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 static int
 nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
-		    struct spdk_nvmf_fc_xri *xri, bool send_abts,
+		    struct spdk_nvmf_fc_xchg *xri, bool send_abts,
 		    spdk_nvmf_fc_caller_cb cb, void *cb_args)
 {
 	uint8_t wqe[128] = { 0 };
@@ -2097,7 +2097,7 @@ nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 	abort->qosd = true;
 	abort->cq_id = UINT16_MAX;
 	abort->cmd_type = BCM_CMD_ABORT_WQE;
-	abort->t_tag = xri->xri;
+	abort->t_tag = xri->xchg_id;
 
 	if (send_abts) {
 		/* Increment abts sent count */
@@ -2112,15 +2112,15 @@ done:
 
 	if (!rc) {
 		xri->is_active = false;
-		SPDK_NOTICELOG("Abort WQE posted for XRI = %d\n", xri->xri);
+		SPDK_NOTICELOG("Abort WQE posted for XRI = %d\n", xri->xchg_id);
 	}
 	return rc;
 }
 
-static struct spdk_nvmf_fc_xri *
+static struct spdk_nvmf_fc_xchg *
 nvmf_fc_get_xri(struct spdk_nvmf_fc_hwqp *hwqp)
 {
-	struct spdk_nvmf_fc_xri *xri[1];
+	struct spdk_nvmf_fc_xchg *xri[1];
 
 	/* Get the physical port from the hwqp and dequeue an XRI from the
 	 * corresponding ring. Send this back.
@@ -2134,7 +2134,7 @@ nvmf_fc_get_xri(struct spdk_nvmf_fc_hwqp *hwqp)
 }
 
 static int
-nvmf_fc_put_xri(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xri *xri)
+nvmf_fc_put_xri(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 {
 	void *xxri[1];
 	xxri[0] = xri;
@@ -2143,9 +2143,9 @@ nvmf_fc_put_xri(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xri *xri)
 
 static inline void
 nvmf_fc_nvmf_add_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp,
-			     struct spdk_nvmf_fc_xri *xri)
+			     struct spdk_nvmf_fc_xchg *xri)
 {
-	struct spdk_nvmf_fc_xri *tmp;
+	struct spdk_nvmf_fc_xchg *tmp;
 
 	/* Check if its already exists. */
 	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->xri_list->pending_xri_list), link) {
@@ -2161,7 +2161,7 @@ nvmf_fc_nvmf_add_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp,
 
 static void
 nvmf_fc_release_xri(struct spdk_nvmf_fc_hwqp *hwqp,
-		    struct spdk_nvmf_fc_xri *xri, bool xb, bool abts)
+		    struct spdk_nvmf_fc_xchg *xri, bool xb, bool abts)
 {
 	if (xb && xri->is_active && !spdk_nvmf_fc_is_port_dead(hwqp)) {
 		/* Post an abort to clean XRI state */
@@ -2178,10 +2178,10 @@ nvmf_fc_release_xri(struct spdk_nvmf_fc_hwqp *hwqp,
 static void
 nvmf_fc_nvmf_del_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp, uint32_t xri)
 {
-	struct spdk_nvmf_fc_xri *tmp;
+	struct spdk_nvmf_fc_xchg *tmp;
 
 	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->xri_list->pending_xri_list), link) {
-		if (tmp->xri == xri) {
+		if (tmp->xchg_id == xri) {
 			nvmf_fc_put_xri(hwqp, tmp);
 			TAILQ_REMOVE(&(BCM_HWQP(hwqp)->xri_list->pending_xri_list), tmp, link);
 			return;
@@ -2213,7 +2213,7 @@ nvmf_fc_bls_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	struct spdk_nvmf_fc_hwqp *hwqp = ctx;
 	cqe_t *cqe_entry 	= (cqe_t *)cqe;
 	struct spdk_nvmf_fc_caller_ctx *carg 	= arg;
-	struct spdk_nvmf_fc_xri *xri = carg->ctx;
+	struct spdk_nvmf_fc_xchg *xri = carg->ctx;
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "BLS WQE Compl(%d) \n", status);
 
@@ -2232,7 +2232,7 @@ nvmf_fc_srsr_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	struct spdk_nvmf_fc_hwqp *hwqp = ctx;
 	cqe_t *cqe_entry 	= (cqe_t *)cqe;
 	struct spdk_nvmf_fc_caller_ctx *carg 	= arg;
-	struct spdk_nvmf_fc_xri *xri = carg->ctx;
+	struct spdk_nvmf_fc_xchg *xri = carg->ctx;
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "SRSR WQE Compl(%d) \n", status);
 
@@ -2253,7 +2253,7 @@ nvmf_fc_ls_rsp_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	struct spdk_nvmf_fc_hwqp *hwqp = ctx;
 	cqe_t *cqe_entry = (cqe_t *)cqe;
 
-	nvmf_fc_release_xri(hwqp, ls_rqst->xri, cqe_entry->u.generic.xb,
+	nvmf_fc_release_xri(hwqp, ls_rqst->xchg, cqe_entry->u.generic.xb,
 				     nvmf_fc_abts_required(cqe));
 
 	/* Release RQ buffer */
@@ -2310,11 +2310,11 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_SUCCESS);
 
 io_done:
-	if (fc_req->xri) {
-		nvmf_fc_release_xri(fc_req->hwqp, fc_req->xri,
+	if (fc_req->xchg) {
+		nvmf_fc_release_xri(fc_req->hwqp, fc_req->xchg,
 					 cqe_entry->u.generic.xb,
 					 nvmf_fc_abts_required(cqe));
-		fc_req->xri = NULL;
+		fc_req->xchg = NULL;
 	}
 
 	if (fc_req->is_aborted) {
@@ -2476,7 +2476,7 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	}
 
 	trecv->relative_offset = 0;
-	trecv->xri_tag = fc_req->xri->xri;
+	trecv->xri_tag = fc_req->xchg->xchg_id;
 	trecv->context_tag = fc_req->rpi;
 	trecv->pu = true;
 	trecv->ar = false;
@@ -2497,7 +2497,7 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trecv, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xri->is_active = true;
+		fc_req->xchg->is_active = true;
 	}
 
 	return rc;
@@ -2788,7 +2788,7 @@ nvmf_fc_xmt_ls_rsp(struct spdk_nvmf_fc_nport *tgtport,
 	xmit->ct 	= BCM_ELS_REQUEST64_CONTEXT_RPI;
 	xmit->iod 	= BCM_ELS_REQUEST64_DIR_WRITE;
 
-	xmit->xri_tag	 = ls_rqst->xri->xri;
+	xmit->xri_tag	 = ls_rqst->xchg->xchg_id;
 	xmit->remote_xid  = ls_rqst->oxid;
 	xmit->context_tag = ls_rqst->rpi;
 
@@ -2799,7 +2799,7 @@ nvmf_fc_xmt_ls_rsp(struct spdk_nvmf_fc_nport *tgtport,
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)xmit, true, nvmf_fc_ls_rsp_cmpl_cb, ls_rqst);
 	if (!rc) {
-		ls_rqst->xri->is_active = true;
+		ls_rqst->xchg->is_active = true;
 	}
 
 	return rc;
@@ -2851,7 +2851,7 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	}
 
 	tsend->relative_offset = 0;
-	tsend->xri_tag = fc_req->xri->xri;
+	tsend->xri_tag = fc_req->xchg->xchg_id;
 	tsend->rpi = fc_req->rpi;
 	tsend->pu = true;
 
@@ -2876,7 +2876,7 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)tsend, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xri->is_active = true;
+		fc_req->xchg->is_active = true;
 	}
 
 	return rc;
@@ -2950,7 +2950,7 @@ nvmf_fc_send_frame(struct spdk_nvmf_fc_hwqp *hwqp,
 		memcpy(&sf->inline_rsp, payload, plen);
 	}
 
-	sf->xri_tag	 = hwqp->send_frame_xri;
+	sf->xri_tag	 = hwqp->send_frame_xchg->xchg_id;
 	sf->command	 = BCM_WQE_SEND_FRAME;
 	sf->sof		 = 0x2e; /* SOFI3 */
 	sf->eof		 = 0x42; /* EOFT */
@@ -3030,13 +3030,13 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 		memcpy(&trsp->inline_rsp, ersp_buf, ersp_len);
 	}
 
-	if (fc_req->xri->is_active) {
+	if (fc_req->xchg->is_active) {
 		trsp->xc = true;
 	}
 
 	trsp->command = BCM_WQE_FCP_TRSP64;
 	trsp->class = BCM_ELS_REQUEST64_CLASS_3;
-	trsp->xri_tag = fc_req->xri->xri;
+	trsp->xri_tag = fc_req->xchg->xchg_id;
 	trsp->remote_xid  = fc_req->oxid;
 	trsp->rpi = fc_req->rpi;
 	trsp->len_loc = 0x1;
@@ -3046,7 +3046,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trsp, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xri->is_active = true;
+		fc_req->xchg->is_active = true;
 	}
 
 	return rc;
@@ -3062,7 +3062,7 @@ nvmf_fc_xmt_bls_rsp(struct spdk_nvmf_fc_hwqp *hwqp,
 	bcm_xmit_bls_rsp_wqe_t *bls = (bcm_xmit_bls_rsp_wqe_t *)wqe;
 	int rc = -1;
 	struct spdk_nvmf_fc_caller_ctx *ctx = NULL;
-	struct spdk_nvmf_fc_xri *xri = NULL;
+	struct spdk_nvmf_fc_xchg *xri = NULL;
 
 	xri = nvmf_fc_get_xri(hwqp);
 	if (!xri) {
@@ -3089,7 +3089,7 @@ nvmf_fc_xmt_bls_rsp(struct spdk_nvmf_fc_hwqp *hwqp,
 	bls->rx_id       = rx_id;
 	bls->ct          = BCM_ELS_REQUEST64_CONTEXT_RPI;
 	bls->context_tag = rpi;
-	bls->xri_tag     = xri->xri;
+	bls->xri_tag     = xri->xchg_id;
 	bls->class       = BCM_ELS_REQUEST64_CLASS_3;
 	bls->command     = BCM_WQE_XMIT_BLS_RSP;
 	bls->qosd        = true;
@@ -3122,7 +3122,7 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 	int rc = -1;
 	bcm_gen_request64_wqe_t *gen = (bcm_gen_request64_wqe_t *)wqe;
 	struct spdk_nvmf_fc_caller_ctx *ctx = NULL;
-	struct spdk_nvmf_fc_xri *xri = NULL;
+	struct spdk_nvmf_fc_xchg *xri = NULL;
 	bcm_sge_t *sge = NULL;
 
 	if (!srsr) {
@@ -3175,7 +3175,7 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 	gen->df_ctl	 = 0;
 	gen->type	 = FCNVME_TYPE_NVMF_DATA;
 	gen->r_ctl	 = FCNVME_R_CTL_LS_REQUEST;
-	gen->xri_tag	 = xri->xri;
+	gen->xri_tag	 = xri->xchg_id;
 	gen->ct		 = BCM_ELS_REQUEST64_CONTEXT_RPI;
 	gen->context_tag = srsr->rpi;
 	gen->class	 = BCM_ELS_REQUEST64_CLASS_3;
@@ -3491,13 +3491,13 @@ nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 }
 
 static void
-nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xri_info *info)
+nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg_info *info)
 {
 	struct bcm_nvmf_hw_queues *hwq = BCM_HWQP(hwqp);
 
-	info->xri_base = hwq->xri_list->xri_base;
-	info->xri_total_count = hwq->xri_list->xri_count;
-	info->xri_avail_count = spdk_ring_count(hwq->xri_list->xri_ring);
+	info->xchg_base = hwq->xri_list->xri_base;
+	info->xchg_total_count = hwq->xri_list->xri_count;
+	info->xchg_avail_count = spdk_ring_count(hwq->xri_list->xri_ring);
 }
 
 struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
@@ -3507,9 +3507,9 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.init_q = nvmf_fc_init_q,
 	.reinit_q = nvmf_fc_reinit_q,
 	.init_q_buffers = nvmf_fc_init_rqpair_buffers,
-	.get_xri = nvmf_fc_get_xri,
- 	.put_xri = nvmf_fc_put_xri,
-	.release_xri = nvmf_fc_release_xri,
+	.get_xchg = nvmf_fc_get_xri,
+ 	.put_xchg = nvmf_fc_put_xri,
+	.release_xchg = nvmf_fc_release_xri,
 	.poll_queue = nvmf_fc_process_queue,
 	.recv_data = nvmf_fc_recv_data,
 	.send_data = nvmf_fc_send_data,
@@ -3525,7 +3525,7 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.get_hwqp_from_conn_id = nvmf_fc_get_hwqp_from_conn_id,
 	.release_conn = nvmf_fc_release_conn,
 	.dump_all_queues = nvmf_fc_dump_all_queues,
-	.get_xri_info = nvmf_fc_get_xri_info
+	.get_xchg_info = nvmf_fc_get_xri_info
 };
 
 SPDK_LOG_REGISTER_COMPONENT("nvmf_fc_lld", SPDK_LOG_NVMF_FC_LLD)
