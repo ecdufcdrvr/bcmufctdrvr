@@ -2074,7 +2074,7 @@ nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 static int
 nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
-		    struct spdk_nvmf_fc_xchg *xri, bool send_abts,
+		    struct spdk_nvmf_fc_xchg *xri,
 		    spdk_nvmf_fc_caller_cb cb, void *cb_args)
 {
 	uint8_t wqe[128] = { 0 };
@@ -2091,7 +2091,7 @@ nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 	ctx->cb_args = cb_args;
 
 	abort->criteria = BCM_ABORT_CRITERIA_XRI_TAG;
-	abort->ia = send_abts ? 0 : 1;
+	abort->ia = xri->send_abts ? 0 : 1;
 	abort->ir = 1; /* Supress ABTS retries. */
 	abort->command = BCM_WQE_ABORT;
 	abort->qosd = true;
@@ -2099,7 +2099,7 @@ nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 	abort->cmd_type = BCM_CMD_ABORT_WQE;
 	abort->t_tag = xri->xchg_id;
 
-	if (send_abts) {
+	if (xri->send_abts) {
 		/* Increment abts sent count */
 		hwqp->counters.num_abts_sent++;
 	}
@@ -2111,7 +2111,8 @@ done:
 	}
 
 	if (!rc) {
-		xri->is_active = false;
+		xri->active = false;
+		xri->send_abts = false;
 		SPDK_NOTICELOG("Abort WQE posted for XRI = %d\n", xri->xchg_id);
 	}
 	return rc;
@@ -2129,7 +2130,10 @@ nvmf_fc_get_xri(struct spdk_nvmf_fc_hwqp *hwqp)
 		return NULL;
 	}
 
-	xri[0]->is_active = false;
+	xri[0]->active	= false;
+	xri[0]->aborted = false;
+	xri[0]->send_abts = false;
+
 	return xri[0];
 }
 
@@ -2160,17 +2164,18 @@ nvmf_fc_nvmf_add_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp,
 
 
 static void
-nvmf_fc_release_xri(struct spdk_nvmf_fc_hwqp *hwqp,
-		    struct spdk_nvmf_fc_xchg *xri, bool xb, bool abts)
+nvmf_fc_cleanup_xri(struct spdk_nvmf_fc_hwqp *hwqp,
+		    struct spdk_nvmf_fc_xchg *xri, bool hw_xri_busy, bool abts)
 {
-	if (xb && xri->is_active && !spdk_nvmf_fc_is_port_dead(hwqp)) {
-		/* Post an abort to clean XRI state */
-		nvmf_fc_issue_abort(hwqp, xri, abts, NULL, NULL);
-		nvmf_fc_nvmf_add_xri_pending(hwqp, xri);
-	} else if (xb && !spdk_nvmf_fc_is_port_dead(hwqp)) {
+	if (hw_xri_busy && !spdk_nvmf_fc_is_port_dead(hwqp)) {
+		if (xri->active) {
+			/* Driver state of xri is also active, so send abort */
+			nvmf_fc_issue_abort(hwqp, xri, NULL, NULL);
+		}
+		/* Wait for XRI_ABORTED_CQE */
 		nvmf_fc_nvmf_add_xri_pending(hwqp, xri);
 	} else {
-		xri->is_active = false;
+		xri->active = false;
 		nvmf_fc_put_xri(hwqp, xri);
 	}
 }
@@ -2217,7 +2222,7 @@ nvmf_fc_bls_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "BLS WQE Compl(%d) \n", status);
 
-	nvmf_fc_release_xri(hwqp, xri, cqe_entry->u.generic.xb, false);
+	nvmf_fc_cleanup_xri(hwqp, xri, cqe_entry->u.generic.xb, false);
 
 	if (carg->cb) {
 		carg->cb(hwqp, status, carg->cb_args);
@@ -2236,7 +2241,7 @@ nvmf_fc_srsr_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "SRSR WQE Compl(%d) \n", status);
 
-	nvmf_fc_release_xri(hwqp, xri, cqe_entry->u.generic.xb,
+	nvmf_fc_cleanup_xri(hwqp, xri, cqe_entry->u.generic.xb,
 				     nvmf_fc_abts_required(cqe));
 
 	if (carg->cb) {
@@ -2253,7 +2258,7 @@ nvmf_fc_ls_rsp_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	struct spdk_nvmf_fc_hwqp *hwqp = ctx;
 	cqe_t *cqe_entry = (cqe_t *)cqe;
 
-	nvmf_fc_release_xri(hwqp, ls_rqst->xchg, cqe_entry->u.generic.xb,
+	nvmf_fc_cleanup_xri(hwqp, ls_rqst->xchg, cqe_entry->u.generic.xb,
 				     nvmf_fc_abts_required(cqe));
 
 	/* Release RQ buffer */
@@ -2311,7 +2316,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 io_done:
 	if (fc_req->xchg) {
-		nvmf_fc_release_xri(fc_req->hwqp, fc_req->xchg,
+		nvmf_fc_cleanup_xri(fc_req->hwqp, fc_req->xchg,
 					 cqe_entry->u.generic.xb,
 					 nvmf_fc_abts_required(cqe));
 		fc_req->xchg = NULL;
@@ -2497,7 +2502,7 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trecv, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xchg->is_active = true;
+		fc_req->xchg->active = true;
 	}
 
 	return rc;
@@ -2799,7 +2804,7 @@ nvmf_fc_xmt_ls_rsp(struct spdk_nvmf_fc_nport *tgtport,
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)xmit, true, nvmf_fc_ls_rsp_cmpl_cb, ls_rqst);
 	if (!rc) {
-		ls_rqst->xchg->is_active = true;
+		ls_rqst->xchg->active = true;
 	}
 
 	return rc;
@@ -2876,7 +2881,7 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)tsend, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xchg->is_active = true;
+		fc_req->xchg->active = true;
 	}
 
 	return rc;
@@ -3030,7 +3035,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 		memcpy(&trsp->inline_rsp, ersp_buf, ersp_len);
 	}
 
-	if (fc_req->xchg->is_active) {
+	if (fc_req->xchg->active) {
 		trsp->xc = true;
 	}
 
@@ -3046,7 +3051,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trsp, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
-		fc_req->xchg->is_active = true;
+		fc_req->xchg->active = true;
 	}
 
 	return rc;
@@ -3107,7 +3112,7 @@ done:
 	}
 
 	if (!rc) {
-		xri->is_active = true;
+		xri->active = true;
 	}
 
 	return rc;
@@ -3198,7 +3203,7 @@ done:
 	}
 
 	if (!rc) {
-		xri->is_active = true;
+		xri->active = true;
 	}
 
 	return rc;
@@ -3500,6 +3505,20 @@ nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg_in
 	info->xchg_avail_count = spdk_ring_count(hwq->xri_list->xri_ring);
 }
 
+static int
+nvmf_fc_put_xchg(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
+{
+	/* If exchange is busy, first cleanup the xri with hardware. */
+	if (xri->active) {
+		nvmf_fc_cleanup_xri(hwqp, xri, true, xri->send_abts);
+	} else if (xri->aborted && xri->send_abts) {
+		/*TODO: XRI not activated but need to send ABTS */
+	} else {
+		nvmf_fc_put_xri(hwqp, xri);
+	}
+	return 0;
+}
+
 struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.lld_init = nvmf_fc_lld_init,
 	.lld_fini = nvmf_fc_lld_fini,
@@ -3508,8 +3527,7 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.reinit_q = nvmf_fc_reinit_q,
 	.init_q_buffers = nvmf_fc_init_rqpair_buffers,
 	.get_xchg = nvmf_fc_get_xri,
- 	.put_xchg = nvmf_fc_put_xri,
-	.release_xchg = nvmf_fc_release_xri,
+	.put_xchg = nvmf_fc_put_xchg,
 	.poll_queue = nvmf_fc_process_queue,
 	.recv_data = nvmf_fc_recv_data,
 	.send_data = nvmf_fc_send_data,
