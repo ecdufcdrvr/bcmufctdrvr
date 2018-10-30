@@ -235,6 +235,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	args->port_handle = ocs->instance_index;
 	args->cb_ctx = args;
 	args->fcp_rq_id = hal->hal_rq[0]->hdr->id; 
+	args->nvme_aq_index = OCS_NVME_FC_AQ_IND;
 
 	/* assign LS Q */
 	args->ls_queue = (spdk_nvmf_fc_lld_hwqp_t)args + sizeof(struct spdk_nvmf_fc_hw_port_init_args);
@@ -322,6 +323,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 		}
 		hwq->rq_payload.num_buffers =
 			hwq->rq_payload.q.max_entries;
+		hwq->cid_cnt = 0;
 
 		args->io_queue_cnt++;
 	}

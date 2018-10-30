@@ -71,9 +71,7 @@
 static inline void *
 ocs_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_addr)
 {
-	void *buf = rte_zmalloc(tag, size, align);
-	*phys_addr = spdk_vtophys(buf);
-	return buf;
+	return spdk_dma_zmalloc(size, align, phys_addr);
 }
 
 /**

@@ -54,7 +54,6 @@
 #define BCM_MAJOR_CODE_STANDARD 0
 #define BCM_MAJOR_CODE_SENTINEL 1
 
-
 #define BCM_HWQP(hq) ((struct bcm_nvmf_hw_queues *)((hq)->queues))
 
 /* Note: this define should be in sync with FCNVME_MAX_LS_BUFFER_SIZE in fc_nvme_spec.h */
@@ -1996,7 +1995,6 @@ nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Found %d outstanding reqtags that were released\n",
 			      count);
 	}
-
 }
 
 static int
@@ -2055,6 +2053,13 @@ nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp)
 	return rc;
 }
 
+static int
+nvmf_fc_set_q_online_state(struct spdk_nvmf_fc_hwqp *hwqp, bool online)
+{
+	BCM_HWQP(hwqp)->free_rq_slots = BCM_HWQP(hwqp)->rq_payload.num_buffers;
+	hwqp->num_conns = 0;
+	return 0;
+}
 
 static void
 nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
@@ -3237,7 +3242,7 @@ nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t ski
 	return nvmf_fc_post_wqe(hwqp, (uint8_t *)marker, true, nvmf_fc_def_cmpl_cb, NULL);
 }
 
-/* The connection ID (8 bytes)has the following format:
+/* The connection ID (8 bytes) has the following format:
  * byte0: queue number (0-255) - currently there is a max of 16 queues
  * byte1 - byte2: unique value per queue number (0-65535)
  * byte3 - byte7: unused */
@@ -3247,51 +3252,76 @@ nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t ski
 static inline uint64_t
 nvmf_fc_gen_conn_id(uint32_t qnum, struct spdk_nvmf_fc_hwqp *hwqp)
 {
-	if (hwqp->cid_cnt == 0) /* make sure cid_cnt is never 0 */
-		hwqp->cid_cnt++;
+	struct bcm_nvmf_hw_queues *hwq = BCM_HWQP(hwqp);
+	if (hwq->cid_cnt == 0) /* make sure cid_cnt is never 0 */
+		hwq->cid_cnt++;
 	return ((uint64_t) qnum |
-		(hwqp->cid_cnt++ << SPDK_NVMF_FC_BCM_MRQ_CONNID_UV_SHIFT));
+		(hwq->cid_cnt++ << SPDK_NVMF_FC_BCM_MRQ_CONNID_UV_SHIFT));
 }
 
 static struct spdk_nvmf_fc_hwqp *
-nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp* queues,
+nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp *queues,
 			    uint32_t num_queues, uint64_t *conn_id,
 			    uint32_t sq_size, bool for_aq)
 {
-	uint32_t sel_qind = 0;
+	uint32_t sel_qind = num_queues;
+	struct bcm_nvmf_hw_queues *hwq, *hwq_sel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Assign connection to IO queue\n");
+	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LS, "Assign connection to HWQP\n");
 
-	if (!for_aq) {
+	if (for_aq) {
+		for (sel_qind = 0; sel_qind < num_queues; sel_qind++) {
+			if (queues[sel_qind].nvme_aq) {
+ 				hwq_sel = (struct bcm_nvmf_hw_queues *)queues[sel_qind].queues;
+				break;
+			}
+		}
+	}
+
+	if (sel_qind == num_queues) {
 		/* find queue with max amount of space available */
 		uint32_t qind;
 
-		sel_qind = 1; /* queue 0 for AQ's, so start with queue 1 */
-
+		sel_qind = queues[0].nvme_aq ? 1 : 0;
+ 		hwq_sel = (struct bcm_nvmf_hw_queues *)queues[sel_qind].queues;
+//if (hwq_sel->free_rq_slots != queues[sel_qind].free_q_slots) {
+//	SPDK_ERRLOG("!!!! selected free q slots mismatch\n");
+//}
 		for (qind = sel_qind + 1; qind < num_queues; qind++) {
-			if (queues[qind].free_q_slots >
-			    queues[sel_qind].free_q_slots)
+			if (queues[qind].nvme_aq) {
+				continue;
+			}
+ 			hwq = (struct bcm_nvmf_hw_queues *)queues[qind].queues;
+//if (hwq->free_rq_slots != queues[qind].free_q_slots) {
+//	SPDK_ERRLOG("!!!! free q slots mismatch\n");
+//}
+	//		if (queues[qind].free_q_slots >
+	//		    queues[sel_qind].free_q_slots) {
+			if (hwq->free_rq_slots > hwq_sel->free_rq_slots)  {
 				sel_qind = qind;
+				hwq_sel = hwq;
+			}
 		}
-		if (queues[sel_qind].free_q_slots < sq_size) {
+//		if (queues[sel_qind].free_q_slots < sq_size) {
+		if (hwq_sel->free_rq_slots < sq_size) {
 			return NULL; /* no queue has space of this connection */
 		}
 	}
 
-
 	/* decrease the free slots now in case another connect request comes
 	 * in while adding this connection in the poller thread */
-	queues[sel_qind].free_q_slots -= sq_size;
+//	queues[sel_qind].free_q_slots -= sq_size;
+	hwq_sel->free_rq_slots -= sq_size;
 
 	queues[sel_qind].num_conns++;
 
 	/* create connection ID */
 	*conn_id = nvmf_fc_gen_conn_id(sel_qind, &queues[sel_qind]);
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD,
-		      "q_num %d (free now %d), conn_id 0x%lx\n", sel_qind,
-		      queues[sel_qind].free_q_slots,
-		      *conn_id);
+	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LS,
+		      "%s assign to %d (free %d), conn_id 0x%lx\n",
+		      //for_aq ? "AQ" : "IOQ", sel_qind, queues[sel_qind].free_q_slots, *conn_id);
+		      for_aq ? "AQ" : "IOQ", sel_qind, hwq_sel->free_rq_slots, *conn_id);
 
 	return &queues[sel_qind];
 }
@@ -3307,7 +3337,9 @@ static void
 nvmf_fc_release_conn(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t conn_id,
 		     uint32_t sq_size)
 { 
-	hwqp->free_q_slots += sq_size;
+//	hwqp->free_q_slots += sq_size;
+	hwqp->num_conns--;
+	BCM_HWQP(hwqp)->free_rq_slots += sq_size;
 }
 
 /*
@@ -3526,6 +3558,7 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.init_q = nvmf_fc_init_q,
 	.reinit_q = nvmf_fc_reinit_q,
 	.init_q_buffers = nvmf_fc_init_rqpair_buffers,
+	.set_q_online_state = nvmf_fc_set_q_online_state,
 	.get_xchg = nvmf_fc_get_xri,
 	.put_xchg = nvmf_fc_put_xchg,
 	.poll_queue = nvmf_fc_process_queue,

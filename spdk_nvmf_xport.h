@@ -37,6 +37,10 @@
 /* maximum number of IO queues for NVME over FC */
 #define OCS_NVME_FC_MAX_IO_QUEUES  16
 
+
+/* HWQP to assign NMVE admin queue to */
+#define OCS_NVME_FC_AQ_IND 0
+
 /* Common queue definition structure */
 typedef struct bcm_sli_queue {
 	/* general queue housekeeping fields */
@@ -114,6 +118,8 @@ struct bcm_nvmf_hw_queues {
 	struct fc_rcvq rq_hdr;
 	struct fc_rcvq rq_payload;
 	struct fc_xri_list *xri_list;
+	uint32_t free_rq_slots;
+	uint16_t cid_cnt;   /* used to generate unique connection id for MRQ */
 };
 
 /* functions to create XRI lists (for each port) */
