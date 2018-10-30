@@ -263,11 +263,24 @@ ocs_spdk_poller_stop(ocs_t *ocs)
 	}
 }
 
+static struct spdk_thread *ocs_rsvd_thread = NULL;
+
+struct spdk_thread *
+ocs_get_rsvd_thread(void)
+{
+	return ocs_rsvd_thread;
+}
+
 static void
 ocs_delay_poller_start(void *arg1, void *arg2)
 {
 	struct ocs_spdk_fc_poller *poller = arg1;
 	poller->spdk_poller = spdk_poller_register(ocs_spdk_fc_poller, arg2, 0);
+	if (ocs_rsvd_thread == NULL &&
+	    spdk_env_get_current_core() == spdk_env_get_last_core()) {
+		/* save last thread (reserved for SCSI) */
+		ocs_rsvd_thread = spdk_get_thread();
+	}
 }
 
 static int

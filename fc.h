@@ -63,10 +63,10 @@ void ocs_spdk_start_pollers(void);
 int ocsu_init(void);
 extern uint64_t g_flush_timeout;
 void spdk_fc_shutdown(void);
-void 
-process_task_completion(struct spdk_scsi_task *scsi_task);
-void
-process_task_mgmt_completion(struct spdk_scsi_task *scsi_task);
+void process_task_completion(struct spdk_scsi_task *scsi_task);
+void process_task_mgmt_completion(struct spdk_scsi_task *scsi_task);
+
+struct spdk_thread *ocs_get_rsvd_thread(void);
 
 #define BIT_2 (1<<2)
 #endif

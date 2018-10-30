@@ -51,5 +51,6 @@ extern int ocs_spdk_fc_poller(void *arg);
 extern void ocs_spdk_poller_stop(ocs_t *ocs);
 extern bool ocsu_device_remove(struct spdk_pci_addr *pci_addr);
 extern bool ocsu_device_add(struct spdk_pci_addr *pci_addr);
+extern struct spdk_thread *ocs_get_rsvd_thread(void);
 
 #endif // __OCS_OCSU_H__

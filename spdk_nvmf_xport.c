@@ -3551,6 +3551,12 @@ nvmf_fc_put_xchg(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 	return 0;
 }
 
+static struct spdk_thread*
+nvmf_fc_get_rsvd_thread(void)
+{
+	return ocs_get_rsvd_thread();
+}
+
 struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.lld_init = nvmf_fc_lld_init,
 	.lld_fini = nvmf_fc_lld_fini,
@@ -3576,7 +3582,8 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.get_hwqp_from_conn_id = nvmf_fc_get_hwqp_from_conn_id,
 	.release_conn = nvmf_fc_release_conn,
 	.dump_all_queues = nvmf_fc_dump_all_queues,
-	.get_xchg_info = nvmf_fc_get_xri_info
+	.get_xchg_info = nvmf_fc_get_xri_info,
+	.get_rsvd_thread = nvmf_fc_get_rsvd_thread
 };
 
 SPDK_LOG_REGISTER_COMPONENT("nvmf_fc_lld", SPDK_LOG_NVMF_FC_LLD)
