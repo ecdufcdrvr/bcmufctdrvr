@@ -69,15 +69,25 @@
  * given size and alignment.
  */
 static inline void *
-ocs_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_addr)
+ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_addr)
 {
-	return spdk_dma_zmalloc(size, align, phys_addr);
+	void *buf_ptr = NULL;
+	if (tag) {
+		buf_ptr = spdk_memzone_reserve_aligned(tag, size, SPDK_ENV_SOCKET_ID_ANY, 0, align);
+		if (buf_ptr) {
+			*phys_addr = spdk_vtophys(buf_ptr);
+		}
+	}
+	else {
+		ocs_log_err(NULL, "ocs_zmalloc() call without a tag!\n");
+	}
+	return buf_ptr;
 }
 
 /**
  * Free a memory buffer previously allocated with ocsu_zmalloc.
  */
-#define ocs_spdk_free(buf)			rte_free(buf)
+#define ocs_spdk_free(mz_name)		spdk_memzone_free(mz_name)
 
 /**
  * Return the physical address for the specified virtual address.

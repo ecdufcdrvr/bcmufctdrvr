@@ -59,6 +59,9 @@ typedef struct {
 	void *vaddr;
 	uint64_t paddr;
 	size_t size;
+
+	/* memory region name. */
+	char name[64];
 } spdk_ocs_memref_t;
 
 struct spdk_ocs_get_pci_config_t {

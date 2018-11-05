@@ -53,14 +53,6 @@
 
 #include "spdk_nvmf_xport.h"
 
-#include <rte_debug.h>
-#include <rte_config.h>
-#include <rte_per_lcore.h>
-#include <rte_eal.h>
-#include <rte_launch.h>
-#include <rte_common.h>
-
-
 #if !defined(PCI_DEVICE)
 #define PCI_DEVICE(vendor, device) (((uint32_t) vendor << 16) | (device))
 #endif
@@ -161,7 +153,7 @@ attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ocs_t *spdk
 {
 	struct ocs_spdk_device *dev;
 
-	dev = rte_malloc(NULL, sizeof(*dev), 0);
+	dev = calloc(1, sizeof(*dev));
 	if (dev == NULL) {
 		ocs_log_err(NULL, "Failed to allocate device struct\n");
 		return;
@@ -541,7 +533,7 @@ error3:
 	TAILQ_FOREACH(dev, &g_devices, tailq) {
 		if (dev->spdk_pci_dev == pci_dev) {
 			TAILQ_REMOVE(&g_devices, dev, tailq);
-			rte_free(dev);
+			free(dev);
 			break;
 		}
 	}
@@ -589,7 +581,7 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 			if (dev->ocs) {
 				spdk_ocs_detach(dev->ocs);
 			}
-			rte_free(dev);
+			free(dev);
 			break;
 		}
 	}
@@ -635,7 +627,7 @@ ocs_spdk_exit(void)
 		if (dev->ocs) {
 			spdk_ocs_detach(dev->ocs);
 		}
-		rte_free(dev);
+		free(dev);
 	}
 	/* Perform cleanup of user space DMA and device free in this second
 	 * loop, as some back ends tie references to DMA objects to one of the

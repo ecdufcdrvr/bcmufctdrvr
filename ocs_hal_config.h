@@ -59,7 +59,7 @@
 #endif
 
 #ifndef OCS_HAL_RQ_SIZE_PAYLOAD
-#define OCS_HAL_RQ_SIZE_PAYLOAD		2048
+#define OCS_HAL_RQ_SIZE_PAYLOAD		2046
 #endif
 
 /*

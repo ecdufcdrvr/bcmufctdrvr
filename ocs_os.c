@@ -57,6 +57,7 @@ pid_t gettid(void);
 #if ENABLE_DMABUF_SLAB
 typedef struct {
 	uint32_t tag;
+	char name[64];
 } ocs_dslab_app_t;
 
 /**
@@ -83,25 +84,28 @@ ocsu_dslab_dmabuf_alloc(void *os, dslab_dmabuf_t *dma, uint32_t len)
 	ocs_memset(dma, 0, sizeof(*dma));
 
 	/* Allocate the app specific data */
-	app = malloc(sizeof(*app));
+	app = calloc(1, sizeof(*app));
 	if (app == NULL) {
 		ocs_log_err(ocs, "%s: malloc failed\n", __func__);
 		return -1;
 	}
-	dma->app = app;
-
+	snprintf(app->name, sizeof(app->name), "ocs%d-ocs_dma_buff-%d",
+			ocs->instance_index, ocs->dmabuf_next_instance);
+	
 	/* Submit a driver request to allocate a buffer */
-	dma->vaddr = ocs_zmalloc(NULL, len, 64, &(dma->paddr));
+	dma->vaddr = ocs_spdk_zmalloc(app->name, len, 64, &(dma->paddr));
 	if (dma->vaddr == NULL) {
+		free(app);
 		ocs_log_err(ocs, "%s: mmap failed\n", __func__);
 		return -1;
 	}
 
 	/* Fill in the rest of the dlab dma buffer information */
+	dma->app  = app;
 	dma->size = len;
-	app->tag = ocs->dmabuf_next_instance;
+	app->tag  = ocs->dmabuf_next_instance;
+
 	ocs->dmabuf_next_instance ++;
-	memset(dma->vaddr,0,len);
 	return 0;
 }
 
@@ -112,8 +116,10 @@ ocsu_dslab_dmabuf_free(void *os, dslab_dmabuf_t *dma)
 
 	/* Don't free if virtual address is NULL */
 	if (dma->vaddr) {
+		ocs_dslab_app_t *app = dma->app;
+
 		/* Unmap the address range */
-		ocsu_free(dma->vaddr);
+		ocs_spdk_free(app->name);
 
 		free(dma->app);
 		memset(dma, 0, sizeof(*dma));

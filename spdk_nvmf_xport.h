@@ -55,6 +55,7 @@ typedef struct bcm_sli_queue {
 	uint16_t  max_entries;   /* number of entries */
 	void 	  *address;      /* queue address */
 	void 	  *doorbell_reg; /* queue doorbell register address */
+	char	  name[64];      /* unique name */ 
 } bcm_sli_queue_t;
 
 /* EQ/CQ structure */

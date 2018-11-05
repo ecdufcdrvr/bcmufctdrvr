@@ -165,8 +165,9 @@ spdk_ocs_attach(void *device)
  	 * Alignment must be 16 bytes as the low order address bits in the
  	 * address register are also control status.
  	*/
+        snprintf(ocs->bmbx.name, sizeof(ocs->bmbx.name), "ocs_attach_%d", ocs->instance_index);
         ocs->bmbx.size = SLI4_BMBX_SIZE + 32 + 16;
-        ocs->bmbx.vaddr = ocs_zmalloc(NULL, ocs->bmbx.size, 64, &phys);
+        ocs->bmbx.vaddr = ocs_spdk_zmalloc(ocs->bmbx.name, ocs->bmbx.size, 64, &phys);
         if (ocs->bmbx.vaddr == NULL) {
                 ocs_spdk_printf(ocs, "Error: %s dma_alloc_cohereent failed for bmbx\n", __func__);
 		goto error3;

@@ -38,6 +38,7 @@
 #include "ocs_device.h"
 #include "ocs_spdk_nvmet.h"
 #include "ocs_tgt_api.h"
+#include "ocs_impl.h"
 #include "spdk_nvmf_xport.h"
 
 /* this will be set by spdk_fc_subsystem_init() */
@@ -101,10 +102,14 @@ ocs_fill_nvme_sli_queue(ocs_t *ocs,
 	sli_q->doorbell_reg =
 		ocs->ocs_os.bars[sli4_q->doorbell_rset].vaddr +
 		sli4_q->doorbell_offset;
+
+	/* Assign a unique name */
+	snprintf(sli_q->name, sizeof(sli_q->name), "ocs%d-sliq-type%d-qid%d",
+			ocs->instance_index, sli4_q->type, sli4_q->id);
 }
 
 static void
-ocs_free_nvme_buffers(struct spdk_nvmf_fc_buffer_desc *buffers)
+ocs_free_nvme_buffers(char *memzone_name, struct spdk_nvmf_fc_buffer_desc *buffers)
 {
 	if (!buffers) {
 		return;
@@ -115,14 +120,14 @@ ocs_free_nvme_buffers(struct spdk_nvmf_fc_buffer_desc *buffers)
 	 * Because all the buffers are allocated in one shot.
 	 */
 	if (buffers->virt) {
-		spdk_dma_free(buffers->virt);
+		ocs_spdk_free(memzone_name);
 	}
 
 	free(buffers);
 }
 
 static struct spdk_nvmf_fc_buffer_desc *
-ocs_alloc_nvme_buffers(int size, int num_entries)
+ocs_alloc_nvme_buffers(char *name, int size, int num_entries)
 {
 	int i;
 	void *virt;
@@ -164,13 +169,13 @@ ocs_hw_port_cleanup(ocs_t *ocs)
 		struct bcm_nvmf_hw_queues* hwq;
 
  		hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->ls_queue);
-		ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
-		ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+		ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
+		ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
 
 		for (i = 0; i < OCS_NVME_FC_MAX_IO_QUEUES; i ++) {
 			hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->io_queues[i]); 
-			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
-			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+			ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
+			ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
 		}
 
 		free(ocs->tgt_ocs.args);
@@ -258,8 +263,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	/* LS RQ Hdr */
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[1]->hdr,
 				&hwq->rq_hdr.q);
-	hwq->rq_hdr.buffer = ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_HDR,
-						    hwq->rq_hdr.q.max_entries);
+	hwq->rq_hdr.buffer = ocs_alloc_nvme_buffers(hwq->rq_hdr.q.name,
+			OCS_HAL_RQ_SIZE_HDR,
+			hwq->rq_hdr.q.max_entries);
 	if (!hwq->rq_hdr.buffer) {
 		goto error;
 	}
@@ -268,9 +274,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	/* LS RQ Payload */
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[1]->data,
 			&hwq->rq_payload.q);
-	hwq->rq_payload.buffer =
-		ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_PAYLOAD,
-				hwq->rq_payload.q.max_entries);
+	hwq->rq_payload.buffer = ocs_alloc_nvme_buffers(hwq->rq_payload.q.name, 
+			OCS_HAL_RQ_SIZE_PAYLOAD,
+			hwq->rq_payload.q.max_entries);
 	if (!hwq->rq_payload.buffer) {
 		goto error;
 	}
@@ -303,9 +309,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 		/* IO RQ Hdr */
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[i + 2]->hdr,
 				&hwq->rq_hdr.q);
-		hwq->rq_hdr.buffer =
-			ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_HDR,
-					hwq->rq_hdr.q.max_entries);
+		hwq->rq_hdr.buffer = ocs_alloc_nvme_buffers(hwq->rq_hdr.q.name,
+				OCS_HAL_RQ_SIZE_HDR,
+				hwq->rq_hdr.q.max_entries);
 		if (!hwq->rq_hdr.buffer) {
 			goto error;
 		}
@@ -315,9 +321,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 		/* IO RQ Payload */
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_rq[i + 2]->data,
 				&hwq->rq_payload.q);
-		hwq->rq_payload.buffer =
-			ocs_alloc_nvme_buffers(OCS_HAL_RQ_SIZE_PAYLOAD,
-					hwq->rq_payload.q.max_entries);
+		hwq->rq_payload.buffer = ocs_alloc_nvme_buffers(hwq->rq_payload.q.name,
+				OCS_HAL_RQ_SIZE_PAYLOAD,
+				hwq->rq_payload.q.max_entries);
 		if (!hwq->rq_payload.buffer) {
 			goto error;
 		}
@@ -342,19 +348,19 @@ error:
 	if (args) {
  		hwq = (struct bcm_nvmf_hw_queues *)(args->ls_queue);
 		if (hwq->rq_hdr.buffer) {
-			ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+			ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
 		}
 		if (hwq->rq_payload.buffer) {
-			ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+			ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
 		}
 
 		for (i = 0; i < args->io_queue_cnt; i++) {
 			hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
 			if (hwq->rq_hdr.buffer) {
-				ocs_free_nvme_buffers(hwq->rq_hdr.buffer);
+				ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
 			}
 			if (hwq->rq_payload.buffer) {
-				ocs_free_nvme_buffers(hwq->rq_payload.buffer);
+				ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
 			}
 		}
 		free(args);
