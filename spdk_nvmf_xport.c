@@ -1227,6 +1227,20 @@ struct __attribute__((__packed__)) spdk_nvmf_fc_rq_buf_nvme_cmd {
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_fc_rq_buf_nvme_cmd) ==
 		   BCM_RQ_BUFFER_SIZE, "RQ Buffer overflow");
 
+
+/*
+ * Send single request - single response buffers
+ */
+struct nvmf_fc_srsr_bufs {
+	struct spdk_nvmf_fc_srsr_bufs srsr_bufs;
+	uint64_t rqst_phys;
+	uint64_t rsp_phys;
+	void *sgl_virt;
+	uint64_t sgl_phys;
+	uint32_t sgl_len;
+	char mz_name[24]; /* name of memzone buffer allocated */
+};
+
 /*
  * End of SLI-4 definitions
  */
@@ -3123,11 +3137,64 @@ done:
 	return rc;
 }
 
+static struct spdk_nvmf_fc_srsr_bufs*
+nvmf_fc_alloc_srsr_bufs(size_t rqst_len, size_t rsp_len)
+{
+	static uint32_t mz_ind = 0;
+	struct nvmf_fc_srsr_bufs *lld_srsr_bufs;
+	struct spdk_nvmf_fc_srsr_bufs *ret_bufs; 
+
+	/* allocate the larger internal structure used to manage srsr buffers */
+	lld_srsr_bufs = calloc(1, sizeof(struct nvmf_fc_srsr_bufs)); 
+
+	if (!lld_srsr_bufs) {
+		SPDK_ERRLOG("No memory to alloc send disconnect buffer struct\n");
+		return NULL;
+	} 
+
+	ret_bufs = &lld_srsr_bufs->srsr_bufs;
+	ret_bufs->rqst_len = rqst_len;
+	ret_bufs->rsp_len = rsp_len;
+	lld_srsr_bufs->sgl_len = 2 * sizeof(bcm_sge_t);
+
+	snprintf(lld_srsr_bufs->mz_name, sizeof(lld_srsr_bufs->mz_name), "assoc_dcbuf_%x", mz_ind++);
+	ret_bufs->rqst = spdk_memzone_reserve(lld_srsr_bufs->mz_name, rqst_len + rsp_len +
+					      lld_srsr_bufs->sgl_len, SPDK_ENV_SOCKET_ID_ANY, 0);
+
+	if (ret_bufs->rqst == NULL) {
+		SPDK_ERRLOG("No memory to alloc send disconnect buffer struct\n");
+		free(lld_srsr_bufs);
+		return NULL;
+	}
+
+	lld_srsr_bufs->rqst_phys = spdk_vtophys(lld_srsr_bufs->srsr_bufs.rqst);
+	lld_srsr_bufs->srsr_bufs.rsp = lld_srsr_bufs->srsr_bufs.rqst + ret_bufs->rqst_len;
+	lld_srsr_bufs->rsp_phys = lld_srsr_bufs->rqst_phys + ret_bufs->rqst_len;
+	lld_srsr_bufs->sgl_virt = lld_srsr_bufs->srsr_bufs.rsp + ret_bufs->rsp_len;
+	lld_srsr_bufs->sgl_phys = lld_srsr_bufs->rsp_phys + ret_bufs->rsp_len;
+
+	return ret_bufs;
+}
+
+static void
+nvmf_fc_free_srsr_bufs(struct spdk_nvmf_fc_srsr_bufs *srsr_bufs)
+{
+	if (srsr_bufs) {
+		struct nvmf_fc_srsr_bufs *b; 
+		b = SPDK_CONTAINEROF(srsr_bufs, struct nvmf_fc_srsr_bufs, srsr_bufs);
+		if (b) {
+			spdk_memzone_free(b->mz_name);
+		}
+		free(srsr_bufs);
+	}
+}
+
 static int
 nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
-		     struct spdk_nvmf_fc_send_srsr *srsr,
+		     struct spdk_nvmf_fc_srsr_bufs *xmt_srsr_bufs,
 		     spdk_nvmf_fc_caller_cb cb, void *cb_args)
 {
+	struct nvmf_fc_srsr_bufs *srsr_bufs;
 	uint8_t wqe[128] = { 0 };
 	int rc = -1;
 	bcm_gen_request64_wqe_t *gen = (bcm_gen_request64_wqe_t *)wqe;
@@ -3135,15 +3202,16 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 	struct spdk_nvmf_fc_xchg *xri = NULL;
 	bcm_sge_t *sge = NULL;
 
-	if (!srsr) {
+	srsr_bufs = SPDK_CONTAINEROF(xmt_srsr_bufs, struct nvmf_fc_srsr_bufs, srsr_bufs);
+	if (!srsr_bufs) {
 		goto done;
 	}
 
 	/* Make sure caller allocated space for two sges. */
-	if (srsr->sgl.len != (2 * sizeof(bcm_sge_t))) {
+	if (srsr_bufs->sgl_len != (2 * sizeof(bcm_sge_t))) {
 		goto done;
 	}
-	sge = srsr->sgl.virt;
+	sge = srsr_bufs->sgl_virt;
 	memset(sge, 0, (sizeof(bcm_sge_t) * 2));
 
 	xri = nvmf_fc_get_xri(hwqp);
@@ -3161,33 +3229,33 @@ nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 	ctx->cb_args = cb_args;
 
 	/* Fill SGL */
-	sge->buffer_address_high = PTR_TO_ADDR32_HI(srsr->rqst.phys);
-	sge->buffer_address_low  = PTR_TO_ADDR32_LO(srsr->rqst.phys);
+	sge->buffer_address_high = PTR_TO_ADDR32_HI(srsr_bufs->rqst_phys);
+	sge->buffer_address_low  = PTR_TO_ADDR32_LO(srsr_bufs->rqst_phys);
 	sge->sge_type = BCM_SGE_TYPE_DATA;
-	sge->buffer_length = srsr->rqst.len;
+	sge->buffer_length = srsr_bufs->srsr_bufs.rqst_len;
 	sge ++;
 
-	sge->buffer_address_high = PTR_TO_ADDR32_HI(srsr->rsp.phys);
-	sge->buffer_address_low  = PTR_TO_ADDR32_LO(srsr->rsp.phys);
+	sge->buffer_address_high = PTR_TO_ADDR32_HI(srsr_bufs->rsp_phys);
+	sge->buffer_address_low  = PTR_TO_ADDR32_LO(srsr_bufs->rsp_phys);
 	sge->sge_type = BCM_SGE_TYPE_DATA;
-	sge->buffer_length = srsr->rsp.len;
+	sge->buffer_length = srsr_bufs->srsr_bufs.rsp_len;
 	sge->last = true;
 
 	/* Fill WQE contents */
 	gen->xbl = true;
 	gen->bde.bde_type = BCM_BDE_TYPE_BLP;
 	gen->bde.buffer_length = 2 * sizeof(bcm_sge_t);
-	gen->bde.u.data.buffer_address_low  = PTR_TO_ADDR32_LO(srsr->sgl.phys);
-	gen->bde.u.data.buffer_address_high = PTR_TO_ADDR32_HI(srsr->sgl.phys);
+	gen->bde.u.data.buffer_address_low  = PTR_TO_ADDR32_LO(srsr_bufs->sgl_phys);
+	gen->bde.u.data.buffer_address_high = PTR_TO_ADDR32_HI(srsr_bufs->sgl_phys);
 
-	gen->request_payload_length = srsr->rqst.len;
-	gen->max_response_payload_length = srsr->rsp.len;
+	gen->request_payload_length = srsr_bufs->srsr_bufs.rqst_len;
+	gen->max_response_payload_length = srsr_bufs->srsr_bufs.rsp_len;
 	gen->df_ctl	 = 0;
 	gen->type	 = FCNVME_TYPE_NVMF_DATA;
 	gen->r_ctl	 = FCNVME_R_CTL_LS_REQUEST;
 	gen->xri_tag	 = xri->xchg_id;
 	gen->ct		 = BCM_ELS_REQUEST64_CONTEXT_RPI;
-	gen->context_tag = srsr->rpi;
+	gen->context_tag = srsr_bufs->srsr_bufs.rpi;
 	gen->class	 = BCM_ELS_REQUEST64_CLASS_3;
 	gen->command	 = BCM_WQE_GEN_REQUEST64;
 	gen->timer	 = 30;
@@ -3575,6 +3643,8 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.xmt_ls_rsp = nvmf_fc_xmt_ls_rsp,
 	.issue_abort = nvmf_fc_issue_abort,
 	.xmt_bls_rsp = nvmf_fc_xmt_bls_rsp,
+	.alloc_srsr_bufs = nvmf_fc_alloc_srsr_bufs,
+	.free_srsr_bufs = nvmf_fc_free_srsr_bufs,
 	.xmt_srsr_req = nvmf_fc_xmt_srsr_req,
 	.q_sync_available = nvmf_fc_q_sync_available,
 	.issue_q_sync = nvmf_fc_issue_q_sync,
@@ -3583,7 +3653,7 @@ struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
 	.release_conn = nvmf_fc_release_conn,
 	.dump_all_queues = nvmf_fc_dump_all_queues,
 	.get_xchg_info = nvmf_fc_get_xri_info,
-	.get_rsvd_thread = nvmf_fc_get_rsvd_thread
+	.get_rsvd_thread = nvmf_fc_get_rsvd_thread,
 };
 
 SPDK_LOG_REGISTER_COMPONENT("nvmf_fc_lld", SPDK_LOG_NVMF_FC_LLD)
