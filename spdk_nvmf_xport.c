@@ -1295,8 +1295,6 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
                 ring_xri_ptr++;
         }
 
-	TAILQ_INIT(&xri_list->pending_xri_list);
-
 	/* put xri list in global xri list (for cleanup) */
 	TAILQ_INSERT_TAIL(&g_nvmf_fc_xri_list, xri_list, link);
 
@@ -2171,14 +2169,14 @@ nvmf_fc_nvmf_add_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp,
 	struct spdk_nvmf_fc_xchg *tmp;
 
 	/* Check if its already exists. */
-	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->xri_list->pending_xri_list), link) {
+	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->pending_xri_list), link) {
 		if (tmp == xri) {
 			return;
 		}
 	}
 
 	/* Add */
-	TAILQ_INSERT_TAIL(&(BCM_HWQP(hwqp)->xri_list->pending_xri_list), xri, link);
+	TAILQ_INSERT_TAIL(&(BCM_HWQP(hwqp)->pending_xri_list), xri, link);
 }
 
 
@@ -2204,10 +2202,10 @@ nvmf_fc_nvmf_del_xri_pending(struct spdk_nvmf_fc_hwqp *hwqp, uint32_t xri)
 {
 	struct spdk_nvmf_fc_xchg *tmp;
 
-	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->xri_list->pending_xri_list), link) {
+	TAILQ_FOREACH(tmp, &(BCM_HWQP(hwqp)->pending_xri_list), link) {
 		if (tmp->xchg_id == xri) {
 			nvmf_fc_put_xri(hwqp, tmp);
-			TAILQ_REMOVE(&(BCM_HWQP(hwqp)->xri_list->pending_xri_list), tmp, link);
+			TAILQ_REMOVE(&(BCM_HWQP(hwqp)->pending_xri_list), tmp, link);
 			return;
 		}
 	}
@@ -2951,9 +2949,7 @@ nvmf_fc_send_frame(struct spdk_nvmf_fc_hwqp *hwqp,
 	hdr.parameter	 = 0;
 
 	/* Assign a SEQID. */
-	hdr.seq_id = hwqp->send_frame_seqid;
-	hwqp->send_frame_seqid ++;
-
+	hdr.seq_id = BCM_HWQP(hwqp)->send_frame_seqid++;
 	p_hdr = (uint32_t *)&hdr;
 
 	/* Fill header in WQE */
@@ -2973,8 +2969,8 @@ nvmf_fc_send_frame(struct spdk_nvmf_fc_hwqp *hwqp,
 		sf->bde.u.imm.offset = 64;
 		memcpy(&sf->inline_rsp, payload, plen);
 	}
-
-	sf->xri_tag	 = hwqp->send_frame_xchg->xchg_id;
+	
+	sf->xri_tag	 = BCM_HWQP(hwqp)->send_frame_xri;
 	sf->command	 = BCM_WQE_SEND_FRAME;
 	sf->sof		 = 0x2e; /* SOFI3 */
 	sf->eof		 = 0x42; /* EOFT */

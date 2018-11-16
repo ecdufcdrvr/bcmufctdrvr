@@ -31,6 +31,9 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if !defined(__SPDK_NVMF_XPORT_H__)
+#define __SPDK_NVMF_XPORT_H__
+
 #include "nvmf_fc.h"
 #include <spdk/fc_adm_api.h>
 
@@ -103,7 +106,6 @@ struct fc_xri_list {
 	uint32_t xri_count;
 	struct spdk_nvmf_fc_xchg *xri_list;
 	struct spdk_ring   *xri_ring;
-	TAILQ_HEAD(, spdk_nvmf_fc_xchg) pending_xri_list;
 	TAILQ_ENTRY(fc_xri_list) link;
 };
 
@@ -121,7 +123,12 @@ struct bcm_nvmf_hw_queues {
 	struct fc_xri_list *xri_list;
 	uint32_t free_rq_slots;
 	uint16_t cid_cnt;   /* used to generate unique connection id for MRQ */
+	TAILQ_HEAD(, spdk_nvmf_fc_xchg) pending_xri_list;
+	uint32_t send_frame_xri;
+	uint8_t send_frame_seqid;
 };
 
-/* functions to create XRI lists (for each port) */
+/* functions to manage XRI's (for each port) */
 struct fc_xri_list* spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count);
+
+#endif

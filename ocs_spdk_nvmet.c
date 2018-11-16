@@ -218,10 +218,12 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	struct bcm_nvmf_hw_queues* hwq;
 	spdk_nvmf_fc_lld_hwqp_t io_queues_start;
 	struct fc_xri_list *xri_list;
+	uint32_t xri_base = *(ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].base) +
+			    ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size;
 
-	xri_list = spdk_nvmf_fc_create_xri_list(*(ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].base) +
-						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size,
-						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size);
+	xri_list = spdk_nvmf_fc_create_xri_list(xri_base + OCS_NVME_FC_MAX_IO_QUEUES,
+						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size - 
+						OCS_NVME_FC_MAX_IO_QUEUES);
 	
 	if (!xri_list) {
 		ocs_log_err(ocs, "HW port create failed to create nvmf xri list.\n");
@@ -248,6 +250,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 
 	/* assign XRI list to queue (shared by all queues on port */
 	hwq->xri_list = xri_list;
+	TAILQ_INIT(&hwq->pending_xri_list);
 
 	ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[1]->queue,
 			&hwq->eq.q);
@@ -294,6 +297,11 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	
 		/* assign XRI list to queue (shared by all queues on port */
 		hwq->xri_list = xri_list;
+		TAILQ_INIT(&hwq->pending_xri_list);
+	
+		/* assign reserved XRI for send frames */
+		hwq->send_frame_xri = xri_base++;
+		hwq->send_frame_seqid = 0;
 
 		ocs_fill_nvme_sli_queue(ocs, hal->hal_eq[i + 2]->queue,
 				&hwq->eq.q);
