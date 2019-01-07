@@ -100,7 +100,7 @@ void spdk_fc_ini_init(
 	spdk_fc_ini_bdev_list_update_cb cb)
 {
 #ifdef DEBUG
-	extern struct spdk_trace_flag SPDK_LOG_FC_BDEV;
+	extern struct spdk_log_flag SPDK_LOG_FC_BDEV;
 	SPDK_LOG_FC_BDEV.enabled = true;
 #endif
 

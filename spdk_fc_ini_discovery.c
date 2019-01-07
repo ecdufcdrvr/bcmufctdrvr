@@ -1132,7 +1132,7 @@ void spdk_fc_ini_di_init(spdk_fc_ini_bdev_list_update_cb cb)
 {
 #ifdef DEBUG
 	/* set discovery trace logging */
-	extern struct spdk_trace_flag SPDK_LOG_FC_DISCOVERY;
+	extern struct spdk_log_flag SPDK_LOG_FC_DISCOVERY;
 	SPDK_LOG_FC_DISCOVERY.enabled = true;
 #endif
 

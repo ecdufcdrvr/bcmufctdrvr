@@ -95,7 +95,7 @@ static void
 spdk_fc_queue_mgmt_task(struct spdk_scsi_dev *dev, struct spdk_fc_task *task,
 		enum spdk_scsi_task_func function)
 {
-	spdk_scsi_dev_queue_mgmt_task(dev, &task->scsi, function);
+	spdk_scsi_dev_queue_mgmt_task(dev, &task->scsi/*, function*/);
 }
 
 static void
