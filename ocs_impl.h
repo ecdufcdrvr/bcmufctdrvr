@@ -47,12 +47,7 @@
 
 #include "spdk/env.h"
 #include "ocs_pci.h"
-
-#ifdef SPDK_CONFIG_PCIACCESS
-#include <pciaccess.h>
-#else
-#include <rte_pci.h>
-#endif
+#include "../../lib/env_dpdk/env_internal.h"
 
 /**
  * \file
@@ -116,6 +111,25 @@ ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_ad
 #define ocs_pcicfg_read32(handle, var, offset)  spdk_pci_device_cfg_read32(handle, var, offset)
 #define ocs_pcicfg_write32(handle, var, offset) spdk_pci_device_cfg_write32(handle, var, offset)
 
+#define SPDK_OCS_PCI_DEVICE(DEVICE_ID) RTE_PCI_DEVICE(SPDK_PCI_VID_OCS, DEVICE_ID)
+static struct rte_pci_id ocs_driver_id[] = {
+	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG5)},
+	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG6)},
+	{ .vendor_id = 0, /* sentinel */ },
+};
+
+static struct spdk_pci_driver ocs_rte_driver = {
+	.driver = {
+		.drv_flags = RTE_PCI_DRV_NEED_MAPPING,
+		.id_table  = ocs_driver_id,
+		.probe     = spdk_pci_device_init,
+		.driver.name = "ocs_driver",
+	},
+	.cb_fn = NULL,
+	.cb_arg = NULL,
+	.is_registered = false,
+};
+
 struct ocs_pci_enum_ctx {
 	int (*user_enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev);
 	void *user_enum_ctx;
@@ -136,8 +150,6 @@ ocs_pci_device_match_id(uint16_t vendor_id, uint16_t device_id)
 
 	return false;
 }
-
-#ifdef SPDK_CONFIG_PCIACCESS
 
 static int
 ocs_pci_enum_cb(void *enum_ctx, struct spdk_pci_device *pci_dev)
@@ -161,70 +173,9 @@ ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev
 	ocs_enum_ctx.user_enum_cb = enum_cb;
 	ocs_enum_ctx.user_enum_ctx = enum_ctx;
 
-	return spdk_pci_enumerate(ocs_pci_enum_cb, &ocs_enum_ctx);
+	return spdk_pci_enumerate(&ocs_rte_driver, ocs_pci_enum_cb, &ocs_enum_ctx);
 }
 
-#else /* !SPDK_CONFIG_PCIACCESS */
-
-#define SPDK_OCS_PCI_DEVICE(DEVICE_ID) RTE_PCI_DEVICE(SPDK_PCI_VID_OCS, DEVICE_ID)
-
-/* TODO: avoid duplicating the device ID list */
-static struct rte_pci_id ocs_driver_id[] = {
-	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG5)},
-	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG6)},
-	{ .vendor_id = 0, /* sentinel */ },
-};
-
-/*
- * TODO: eliminate this global if possible (does rte_pci_driver have a context field for this?)
- *
- * This should be protected by the ocs driver lock, since ocs_probe() holds the lock
- *  the whole time, but we shouldn't have to depend on that.
- */
-static struct ocs_pci_enum_ctx g_ocs_pci_enum_ctx;
-
-static int
-ocs_driver_init(struct rte_pci_driver *dr, struct rte_pci_device *rte_dev)
-{
-	/*
-	 * These are actually the same type internally.
-	 * TODO: refactor this so it's inside pci.c
-	 */
-	struct spdk_pci_device *pci_dev = (struct spdk_pci_device *)rte_dev;
-
-	return g_ocs_pci_enum_ctx.user_enum_cb(g_ocs_pci_enum_ctx.user_enum_ctx, pci_dev);
-}
-
-static struct rte_pci_driver ocs_rte_driver = {
-#if RTE_VERSION >= RTE_VERSION_NUM(16, 11, 0, 0)
-	.driver = {
-		.name = "ocs_driver"
-	},
-	.probe = ocs_driver_init,
-#else
-	.name = "ocs_driver",
-	.devinit = ocs_driver_init,
-#endif
-	.id_table = ocs_driver_id,
-	.drv_flags = RTE_PCI_DRV_NEED_MAPPING,
-};
-
-static inline int
-ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev), void *enum_ctx)
-{
-	int rc;
-
-	g_ocs_pci_enum_ctx.user_enum_cb = enum_cb;
-	g_ocs_pci_enum_ctx.user_enum_ctx = enum_ctx;
-
-	rte_pci_register(&ocs_rte_driver);
-	rc = rte_bus_probe();
-	rte_pci_unregister(&ocs_rte_driver);
-
-	return rc;
-}
-
-#endif /* !SPDK_CONFIG_PCIACCESS */
 
 typedef pthread_mutex_t ocs_mutex_t;
 
