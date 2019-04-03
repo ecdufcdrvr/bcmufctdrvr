@@ -320,7 +320,8 @@ ocs_read_phase_start(ocs_io_t *io)
 		/* First phase */
 		phys_map_size = (size_t)primary->scsi.data_transferred;
 		io->sgl[0].addr = spdk_vtophys(primary->scsi.iovs[0].iov_base, &phys_map_size);
-		ocs_assert(phys_map_size == (size_t)primary->scsi.data_transferred);
+		/* ocs_assert(phys_map_size == (size_t)primary->scsi.data_transferred, 0);
+		 */
 		io->sgl[0].len  = primary->scsi.data_transferred;
 		xfer_bytes 	+= io->sgl[0].len;
 		num_sges --;
@@ -335,7 +336,8 @@ ocs_read_phase_start(ocs_io_t *io)
 		i = io->sgl_allocated - num_sges;
 		phys_map_size = (size_t)subtask->scsi.data_transferred;
 		io->sgl[i].addr = spdk_vtophys(subtask->scsi.iovs[0].iov_base, &phys_map_size);
-		ocs_assert(phys_map_size == (size_t)subtask->scsi.data_transferred);
+		/* ocs_assert(phys_map_size == (size_t)subtask->scsi.data_transferred, 0);
+		 */
 		io->sgl[i].len  = subtask->scsi.data_transferred;
 		xfer_bytes 	+= io->sgl[i].len;
 

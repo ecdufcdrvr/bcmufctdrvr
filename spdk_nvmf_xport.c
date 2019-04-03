@@ -2444,7 +2444,8 @@ nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 		size_t mapped_size = fc_req->req.iov[i].iov_len;
 
 		iov_phys = spdk_vtophys(fc_req->req.iov[i].iov_base, &mapped_size);
-		ocs_assert(mapped_size == fc_req->req.iov[i].iov_len);
+		/* ocs_assert(mapped_size == fc_req->req.iov[i].iov_len, 0);
+		 */
 		sge->sge_type = BCM_SGE_TYPE_DATA;
 		sge->buffer_address_low  = PTR_TO_ADDR32_LO(iov_phys);
 		sge->buffer_address_high = PTR_TO_ADDR32_HI(iov_phys);
@@ -2482,7 +2483,8 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 
 		phys_map_size = (size_t)fc_req->req.length;
 		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base, &phys_map_size);
-		ocs_assert(phys_map_size == (size_t)fc_req->req.length);
+		/* ocs_assert(phys_map_size == (size_t)fc_req->req.length, 0);
+		 */
 		trecv->dbde = true;
 		trecv->bde.bde_type = BCM_BDE_TYPE_BDE_64;
 		trecv->bde.buffer_length = fc_req->req.length;
@@ -2857,7 +2859,8 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 
 		phys_map_size = (size_t)fc_req->req.length;
 		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base, &phys_map_size);
-		ocs_assert(phys_map_size == (size_t)fc_req->req.length);
+		/* ocs_assert(phys_map_size == (size_t)fc_req->req.length, 0);
+		 */
 		tsend->dbde = true;
 		tsend->bde.bde_type = BCM_BDE_TYPE_BDE_64;
 		tsend->bde.buffer_length = fc_req->req.length;
