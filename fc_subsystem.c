@@ -62,7 +62,7 @@ spdk_mobj_ctor(struct rte_mempool *mp, __attribute__((unused))void *arg,
 	m->buf = (void *)((unsigned long)((uint8_t *)m->buf + 512) & ~511UL);
 	off = (uint64_t)(uint8_t *)m->buf - (uint64_t)(uint8_t *)m;
 
-	m->phys_addr = spdk_vtophys(m) + off;
+	m->phys_addr = spdk_vtophys(m, NULL) + off;
 }
 
 

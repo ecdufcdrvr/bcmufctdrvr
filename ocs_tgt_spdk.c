@@ -312,12 +312,15 @@ ocs_read_phase_start(ocs_io_t *io)
 	struct spdk_fc_task *primary, *current, *subtask = NULL, *tmp;
 	uint32_t flags = 0, xfer_bytes = 0, rc;
 	int num_sges = io->sgl_allocated, i;
+	size_t phys_map_size;
 
 	primary = io->tgt_io.primary; 
 	current = io->tgt_io.current;
 	if (current == primary) {
 		/* First phase */
-		io->sgl[0].addr = spdk_vtophys(primary->scsi.iovs[0].iov_base);
+		phys_map_size = (size_t)primary->scsi.data_transferred;
+		io->sgl[0].addr = spdk_vtophys(primary->scsi.iovs[0].iov_base, &phys_map_size);
+		ocs_assert(phys_map_size == (size_t)primary->scsi.data_transferred);
 		io->sgl[0].len  = primary->scsi.data_transferred;
 		xfer_bytes 	+= io->sgl[0].len;
 		num_sges --;
@@ -330,7 +333,9 @@ ocs_read_phase_start(ocs_io_t *io)
 	TAILQ_FOREACH_FROM_SAFE(subtask, &primary->fc_subtask_list, fc_link, tmp) {
 
 		i = io->sgl_allocated - num_sges;
-		io->sgl[i].addr = spdk_vtophys(subtask->scsi.iovs[0].iov_base);
+		phys_map_size = (size_t)subtask->scsi.data_transferred;
+		io->sgl[i].addr = spdk_vtophys(subtask->scsi.iovs[0].iov_base, &phys_map_size);
+		ocs_assert(phys_map_size == (size_t)subtask->scsi.data_transferred);
 		io->sgl[i].len  = subtask->scsi.data_transferred;
 		xfer_bytes 	+= io->sgl[i].len;
 

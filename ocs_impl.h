@@ -70,7 +70,7 @@ ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_ad
 	if (tag) {
 		buf_ptr = spdk_memzone_reserve_aligned(tag, size, SPDK_ENV_SOCKET_ID_ANY, 0, align);
 		if (buf_ptr) {
-			*phys_addr = spdk_vtophys(buf_ptr);
+			*phys_addr = spdk_vtophys(buf_ptr, &size);
 		}
 	}
 	else {
@@ -87,7 +87,7 @@ ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_ad
 /**
  * Return the physical address for the specified virtual address.
  */
-#define ocs_vtophys(buf)		spdk_vtophys(buf)
+#define ocs_vtophys(buf)		spdk_vtophys(buf, NULL)
 
 /**
  * Delay us.

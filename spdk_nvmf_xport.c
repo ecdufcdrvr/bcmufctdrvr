@@ -45,6 +45,7 @@
 #include "spdk_nvmf_xport.h"
 #include "ocs_tgt_api.h"
 #include "fc.h"
+#include "ocs.h"
 #include "spdk/barrier.h"
 
 /*
@@ -2440,7 +2441,10 @@ nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 	sge++;
 
 	for (i = 0; i < fc_req->req.iovcnt; i++) {
-		iov_phys = spdk_vtophys(fc_req->req.iov[i].iov_base);
+		size_t mapped_size = fc_req->req.iov[i].iov_len;
+
+		iov_phys = spdk_vtophys(fc_req->req.iov[i].iov_base, &mapped_size);
+		ocs_assert(mapped_size == fc_req->req.iov[i].iov_len);
 		sge->sge_type = BCM_SGE_TYPE_DATA;
 		sge->buffer_address_low  = PTR_TO_ADDR32_LO(iov_phys);
 		sge->buffer_address_high = PTR_TO_ADDR32_HI(iov_phys);
@@ -2474,8 +2478,11 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	if (fc_req->req.iovcnt == 1) {
 		/* Data is a single physical address, use a BDE */
 		uint64_t bde_phys;
+		size_t phys_map_size;
 
-		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base);
+		phys_map_size = (size_t)fc_req->req.length;
+		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base, &phys_map_size);
+		ocs_assert(phys_map_size == (size_t)fc_req->req.length);
 		trecv->dbde = true;
 		trecv->bde.bde_type = BCM_BDE_TYPE_BDE_64;
 		trecv->bde.buffer_length = fc_req->req.length;
@@ -2846,8 +2853,11 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	if (fc_req->req.iovcnt == 1) {
 		/* Data is a single physical address, use a BDE */
 		uint64_t bde_phys;
+		size_t phys_map_size;
 
-		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base);
+		phys_map_size = (size_t)fc_req->req.length;
+		bde_phys = spdk_vtophys(fc_req->req.iov[0].iov_base, &phys_map_size);
+		ocs_assert(phys_map_size == (size_t)fc_req->req.length);
 		tsend->dbde = true;
 		tsend->bde.bde_type = BCM_BDE_TYPE_BDE_64;
 		tsend->bde.buffer_length = fc_req->req.length;
@@ -3163,7 +3173,7 @@ nvmf_fc_alloc_srsr_bufs(size_t rqst_len, size_t rsp_len)
 		return NULL;
 	}
 
-	lld_srsr_bufs->rqst_phys = spdk_vtophys(lld_srsr_bufs->srsr_bufs.rqst);
+	lld_srsr_bufs->rqst_phys = spdk_vtophys(lld_srsr_bufs->srsr_bufs.rqst, NULL);
 	lld_srsr_bufs->srsr_bufs.rsp = lld_srsr_bufs->srsr_bufs.rqst + ret_bufs->rqst_len;
 	lld_srsr_bufs->rsp_phys = lld_srsr_bufs->rqst_phys + ret_bufs->rqst_len;
 	lld_srsr_bufs->sgl_virt = lld_srsr_bufs->srsr_bufs.rsp + ret_bufs->rsp_len;
