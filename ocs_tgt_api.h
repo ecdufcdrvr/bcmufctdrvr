@@ -40,6 +40,7 @@
 
 #include "spdk/scsi.h"
 
+
 #define MAX_GRP_NAME_LEN	256
 #define MAX_WWN_NAME_LEN	128
 #define MAX_INITIATORS_IN_IG	256
@@ -129,6 +130,10 @@ struct spdk_fc_lun_map {
 	int core_id;
 
 	TAILQ_ENTRY(spdk_fc_lun_map) tailq;
+
+	/* cleanup context */
+	struct spdk_thread *io_ch_thread;
+	struct spdk_thread *scsi_dev_thread;
 };
 
 

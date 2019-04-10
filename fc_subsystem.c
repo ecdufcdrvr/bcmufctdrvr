@@ -182,8 +182,11 @@ spdk_fc_subsystem_fini(void)
 
 	spdk_fc_free_all_pools();
 
-	return(spdk_fc_ini_di_shutdown());
-
+	spdk_fc_ini_di_shutdown();
+	
+	spdk_fc_cf_cleanup_cfg();
+	
+	return 0;
 }
 
 void

@@ -256,6 +256,7 @@ spdk_ocs_detach(struct spdk_ocs_t *ocs)
 	TAILQ_REMOVE(&driver->attached_chans, ocs, tailq);
 	ocs_mutex_unlock(&driver->lock);
 	ocs_unmap_pci_bar(ocs);
+	spdk_pci_device_detach(ocs->pdev);
 	free(ocs);
 
 	return 0;

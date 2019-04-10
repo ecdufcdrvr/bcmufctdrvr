@@ -641,7 +641,6 @@ ocs_spdk_exit(void)
 	}
 
 	ocs_device_shutdown_complete();
-	spdk_app_stop(0);
 }
 
 /**

@@ -284,6 +284,8 @@ spdk_fc_cf_init_lun_maps(void)
 				SPDK_ERRLOG("Unable to create SCSI dev for lunmapping%d.\n", lun_map->id);
 				goto error;
 			}
+			lun_map->scsi_dev_thread = spdk_get_thread();
+			lun_map->io_ch_thread = NULL;
 			lun_map->core_id = -1;
 	
 			TAILQ_INSERT_TAIL(&g_spdk_fc_lun_maps.head, lun_map, tailq);
@@ -297,6 +299,66 @@ error:
 		free(lun_map);
 	}
 	return rc;
+}
+
+static void
+spdk_fc_cf_cleanup_scsidevs_done(void *ctx)
+{
+	struct spdk_fc_lun_map *tmp_lun_map = NULL, *lun_map = NULL;
+	struct spdk_fc_ig *tmp_ig = NULL, *ig = NULL;
+	struct spdk_fc_hba_port *tmp_hba_port = NULL, *hba_port = NULL;
+
+	/* Free the conf resources */
+	TAILQ_FOREACH_SAFE(lun_map, &g_spdk_fc_lun_maps.head, tailq, tmp_lun_map) {
+		free(lun_map);
+	}
+	TAILQ_FOREACH_SAFE(ig, &g_spdk_fc_igs.head, tailq, tmp_ig) {
+		free(ig);
+	}
+	TAILQ_FOREACH_SAFE(hba_port, &g_spdk_fc_hba_ports.head, tailq, tmp_hba_port) {
+		free(hba_port);
+	}
+	ocs_lock_free(&g_spdk_config_lock);
+}
+
+static void
+spdk_fc_cf_thread_cleanup_scsidevs(void *ctx)
+{
+	struct spdk_fc_lun_map *lun_map = NULL;
+
+	TAILQ_FOREACH(lun_map, &g_spdk_fc_lun_maps.head, tailq) {
+		if (lun_map->scsi_dev_thread == spdk_get_thread() && lun_map->scsi_dev) {
+			spdk_scsi_dev_destruct(lun_map->scsi_dev);
+			lun_map->scsi_dev = NULL;
+		}
+	}
+}
+
+static void
+spdk_fc_cf_cleanup_io_channels_done(void *ctx)
+{
+	spdk_for_each_thread(spdk_fc_cf_thread_cleanup_scsidevs,
+			     NULL, spdk_fc_cf_cleanup_scsidevs_done);
+}
+
+static void
+spdk_fc_cf_thread_cleanup_io_channels(void *ctx)
+{
+	struct spdk_fc_lun_map *lun_map = NULL;
+
+	TAILQ_FOREACH(lun_map, &g_spdk_fc_lun_maps.head, tailq) {
+		if (lun_map->io_ch_thread == spdk_get_thread()) {
+			spdk_scsi_dev_free_io_channels(lun_map->scsi_dev);
+		}
+	}
+}
+
+void
+spdk_fc_cf_cleanup_cfg(void)
+{
+	/* Cleanup io_channels, scsidev and then resources in order. */
+	spdk_for_each_thread(spdk_fc_cf_thread_cleanup_io_channels,
+			     NULL, spdk_fc_cf_cleanup_io_channels_done);
 }
 
 void
@@ -436,7 +498,8 @@ spdk_fc_cf_get_io_channel(struct spdk_scsi_dev *scsi_dev)
 				if (spdk_scsi_dev_allocate_io_channels(scsi_dev) != 0) {
 					return -1;
 				}
-				lun_map->core_id = rte_lcore_id();
+				lun_map->core_id = spdk_env_get_current_core();
+				lun_map->io_ch_thread = spdk_get_thread();
 			}
 			return lun_map->core_id;
 		}

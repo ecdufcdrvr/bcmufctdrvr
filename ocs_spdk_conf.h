@@ -57,6 +57,7 @@ struct spdk_fc_hba_ports_list {
 int spdk_fc_cf_init_hba_ports(void);
 int spdk_fc_cf_init_igs(void);
 int spdk_fc_cf_init_lun_maps(void);
+void spdk_fc_cf_cleanup_cfg(void);
 
 struct spdk_scsi_dev *
 spdk_fc_cf_get_initiator_scsidev(int hba_port_id, uint64_t wwn);
