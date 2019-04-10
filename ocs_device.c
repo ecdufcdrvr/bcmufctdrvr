@@ -588,6 +588,7 @@ ocs_process_abts(ocs_io_t *io, fc_header_t *hdr)
 
 #if defined(OCS_NVME_FC)
 		ocs_nvme_process_abts(ocs, ox_id, rx_id, node->rnode.indicator);
+		ocs_scsi_io_free(io);
 #else
 		/* Send a BA_ACC */
 		ocs_bls_send_acc_hdr(io, hdr);

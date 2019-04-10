@@ -132,12 +132,12 @@ scsi_io_free_cb(ocs_io_t *io, ocs_scsi_io_status_e scsi_status, uint32_t flags, 
 		spdk_fc_task_put(primary);
 	}
 
+	io->tgt_io.primary = NULL;
 	if (ocs_io_busy(io)) {
 		ocs_scsi_io_complete(io);
 		ocs_atomic_sub_return(&ocs->tgt_ocs.ios_in_use, 1);
 	}
 
-	io->tgt_io.primary = NULL;
 	return 0;	
 }
 
