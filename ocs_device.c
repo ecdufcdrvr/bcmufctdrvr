@@ -1552,6 +1552,11 @@ __ocs_d_port_logged_in(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	}
 
+	case OCS_EVT_ABTS_RCVD: {
+		ocs_process_abts(cbdata->io, cbdata->header->dma.virt);
+		break;
+	}
+
 #if defined(ENABLE_FABRIC_EMULATION)
 	/*
 	 * FC_GS received for directory server when using fabric emulation
