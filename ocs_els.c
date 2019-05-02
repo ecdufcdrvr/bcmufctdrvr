@@ -1746,7 +1746,7 @@ ocs_ns_send_rftid(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 			rftid->fc4_types[FC_GS_TYPE_WORD(FC_TYPE_NVME)] = ocs_htobe32(1 << FC_GS_TYPE_BIT(FC_TYPE_NVME));
 		}
 		
-		if (node->sport->enable_ini || node->sport->enable_tgt) { // Word 0 
+		if (ocs->enable_scsi_tgt) { // Word 0 
 			rftid->fc4_types[FC_GS_TYPE_WORD(FC_TYPE_FCP)] = ocs_htobe32(1 << FC_GS_TYPE_BIT(FC_TYPE_FCP));
 		}
 

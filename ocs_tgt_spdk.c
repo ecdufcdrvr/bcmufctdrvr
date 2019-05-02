@@ -520,11 +520,12 @@ ocs_scsi_tgt_new_device(ocs_t *ocs)
 	FIND_NODE_BY_ID(g_spdk_fc_hba_ports, (int)ocs->instance_index, hba_port, tmp);
 	if (!hba_port) {
 		 /* No Valid HBAPort node found. Keep the port in down. */
-		ocs->dont_linkup = TRUE;
+		ocs->enable_scsi_tgt = FALSE; 
 		ocs_log_err(ocs, "No valid [HBAPort%d] found for ocs%d\n",
 				ocs->instance_index, ocs->instance_index);
 	} else {
 		/* If user configured WWNN and WWPN, the use them. */
+		ocs->enable_scsi_tgt = TRUE; 
 		if (ocs_strlen(hba_port->wwnn)) {
 			parse_wwn((char *)hba_port->wwnn, &ocs->xport->req_wwnn);
 		}
@@ -591,12 +592,11 @@ ocs_scsi_tgt_new_sport(ocs_sport_t *sport)
 
 	ocs_lock(&g_spdk_config_lock);
 	FIND_NODE_BY_ID(g_spdk_fc_hba_ports, (int)ocs->instance_index, hba_port, tmp);
-	if (!hba_port) {
-		goto done;
-	}
-
-	if (spdk_fc_cf_add_scsidev_port(hba_port, sport->fc_id) != 0) {
-		goto done;
+	if (hba_port) {
+		if (spdk_fc_cf_add_scsidev_port(hba_port, sport->fc_id) != 0) {
+			ocs_log_err(ocs, "Failed to scsidev port \n")
+			goto done;
+		}
 	}
 
 	if (ocs->enable_nvme_tgt && ocs_nvme_process_hw_port_online(sport)) {
@@ -605,6 +605,7 @@ ocs_scsi_tgt_new_sport(ocs_sport_t *sport)
 	}
 
 	if (ocs->enable_nvme_tgt && ocs_nvme_nport_create(sport)) {
+		ocs_log_err(ocs, "Failed to create nport\n")
 		goto done;
 	}
 

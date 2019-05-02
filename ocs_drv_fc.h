@@ -79,6 +79,7 @@ struct ocs_s {
 	bool enable_ini;
 	bool enable_tgt;
 	bool enable_nvme_tgt;
+	bool enable_scsi_tgt;
 	int ctrlmask;
 	int logmask;
 	uint32_t max_isr_time_msec;		/*>> Maximum ISR time */

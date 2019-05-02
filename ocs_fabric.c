@@ -706,7 +706,7 @@ __ocs_ns_nvme_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		node->els_req_cnt--;
 
 		/* Check if we need to send RFFID for scsi. */
-		if (node->sport->enable_ini || node->sport->enable_tgt) {
+		if (ocs->enable_scsi_tgt) {
 			ocs_ns_send_rffid(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
 					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
 			ocs_node_transition(node, __ocs_ns_rffid_wait_rsp, NULL);
