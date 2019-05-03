@@ -528,17 +528,13 @@ ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
 
 	if (ocs_nvme_api_call_sync(SPDK_FC_IT_ADD, &args, &args.cb_ctx)) {
 		ocs_log_err(ocs, "NVME IT add failed.\n");
-		goto err;
+		return -1;
 	}
 
 	ocs_log_info(ocs, "NVME IT add success.\n");
 
 	ocs_send_prli_acc(io, ox_id, FC_TYPE_NVME, ocs_nvme_prli_resp_cb, NULL);
 	return 0;
-err:
-	ocs_send_ls_rjt(io, ox_id, FC_REASON_UNABLE_TO_PERFORM,
-			FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
-	return -1;
 }
 
 int
