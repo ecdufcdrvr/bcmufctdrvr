@@ -2311,7 +2311,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	if (fc_req->state == SPDK_NVMF_FC_REQ_WRITE_XFER) {
 		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
 
-		spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_WRITE_BDEV);
+		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_WRITE_BDEV);
 
 		spdk_nvmf_request_exec(&fc_req->req);
 
@@ -2322,7 +2322,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
 
-		spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
+		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
 		if (spdk_nvmf_fc_handle_rsp(fc_req)) {
 			goto io_done;
 		}
@@ -2330,7 +2330,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	}
 
 	/* IO completed successfully */
-	spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_SUCCESS);
+	spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_SUCCESS);
 
 io_done:
 	if (fc_req->xchg) {
@@ -2341,9 +2341,9 @@ io_done:
 	}
 
 	if (fc_req->is_aborted) {
-		spdk_nvmf_fc_req_abort_complete(fc_req);
+		spdk_nvmf_fc_request_abort_complete(fc_req);
 	} else {
-		spdk_nvmf_fc_free_req(fc_req);
+		spdk_nvmf_fc_request_free(fc_req);
 	}
 }
 
@@ -2628,8 +2628,8 @@ nvmf_fc_process_rqpair(struct spdk_nvmf_fc_hwqp *hwqp, fc_eventq_t *cq, uint8_t 
 		/* Process marker completion */
 		nvmf_fc_process_marker_cqe(hwqp, cqe);
 	} else {
-		rc = spdk_nvmf_fc_process_frame(hwqp, buff_idx, frame, payload_buffer,
-						    rcqe->payload_data_placement_length);
+		rc = spdk_nvmf_fc_hwqp_process_frame(hwqp, buff_idx, frame, payload_buffer,
+						     rcqe->payload_data_placement_length);
 		if (!rc) {
 			return 0;
 		}
@@ -2749,8 +2749,8 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 				 * There might be some buffers/xri freed.
 				 * First give chance for pending frames
 				 */
-				spdk_nvmf_fc_process_pending_ls_rqst(hwqp);
-				spdk_nvmf_fc_process_pending_req(hwqp);
+				spdk_nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
+				spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
 			} else if (cq_id == BCM_HWQP(hwqp)->cq_rq.q.qid) {
 				nvmf_fc_process_cq_entry(hwqp, &BCM_HWQP(hwqp)->cq_rq);
 			} else {
@@ -2771,7 +2771,7 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 	}
 
 	if (!pending_req_processed) {
-		spdk_nvmf_fc_process_pending_req(hwqp);
+		spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
 	}
 
 	if (n_processed) {
@@ -2895,7 +2895,7 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 		fc_conn->rsp_count++;
 		spdk_nvmf_fc_advance_conn_sqhead(qpair);
 		tsend->ar = true;
-		spdk_nvmf_fc_req_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
+		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
 	}
 
 	tsend->command = BCM_WQE_FCP_TSEND64;

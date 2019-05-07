@@ -490,7 +490,7 @@ spdk_fc_api_del_lun_map(int lun_map_id)
 
 	spdk_fc_cf_delete_lun_map(lun_map_id);
 	spdk_scsi_dev_free_io_channels(lun_map->scsi_dev);
-	spdk_scsi_dev_destruct(lun_map->scsi_dev);
+	spdk_scsi_dev_destruct(lun_map->scsi_dev, NULL, NULL);
 	
 	TAILQ_REMOVE(&g_spdk_fc_lun_maps.head, lun_map, tailq);
 	free(lun_map);	

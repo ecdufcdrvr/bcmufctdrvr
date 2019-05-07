@@ -328,7 +328,7 @@ spdk_fc_cf_thread_cleanup_scsidevs(void *ctx)
 
 	TAILQ_FOREACH(lun_map, &g_spdk_fc_lun_maps.head, tailq) {
 		if (lun_map->scsi_dev_thread == spdk_get_thread() && lun_map->scsi_dev) {
-			spdk_scsi_dev_destruct(lun_map->scsi_dev);
+			spdk_scsi_dev_destruct(lun_map->scsi_dev, NULL, NULL);
 			lun_map->scsi_dev = NULL;
 		}
 	}
