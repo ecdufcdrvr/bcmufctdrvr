@@ -1287,7 +1287,7 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
         for (i = 0; i < xri_count; i++) {
                 ring_xri_ptr->xchg_id = xri_base + i;
                 ring_xri_vptr[0] = ring_xri_ptr;
-                rc = spdk_ring_enqueue(xri_list->xri_ring, ring_xri_vptr, 1);
+                rc = spdk_ring_enqueue(xri_list->xri_ring, ring_xri_vptr, 1, NULL);
                 if (rc == 0) {
 			free(xri_list->xri_list);
 			free(xri_list);
@@ -1400,7 +1400,7 @@ nvmf_fc_create_reqtag_pool(struct spdk_nvmf_fc_hwqp *hwqp)
 		obj = wq->reqtag_objs + i;
 
 		obj->index = i;
-		if (spdk_ring_enqueue(wq->reqtag_ring, (void **)&obj, 1) != 1) {
+		if (spdk_ring_enqueue(wq->reqtag_ring, (void **)&obj, 1, NULL) != 1) {
 			SPDK_ERRLOG("fc reqtag ring enqueue objects failed %d\n", i);
 			goto error;
 		}
@@ -1455,7 +1455,7 @@ nvmf_fc_release_reqtag(struct spdk_nvmf_fc_hwqp *hwqp, fc_reqtag_t *tag)
 	struct fc_wrkq *wq = &BCM_HWQP(hwqp)->wq;
 	int rc;
 
-	rc = spdk_ring_enqueue(wq->reqtag_ring, (void**)&tag, 1);
+	rc = spdk_ring_enqueue(wq->reqtag_ring, (void**)&tag, 1, NULL);
 
 	if (rc == 1) {
 		wq->p_reqtags[tag->index] = NULL;
@@ -1997,7 +1997,7 @@ nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
 			wq_prev->p_reqtags[i]->cb = NULL;
 			wq_prev->p_reqtags[i]->cb_args = NULL;
 
-			(void)spdk_ring_enqueue(wq_curr->reqtag_ring, (void**) &wq_prev->p_reqtags[i], 1);
+			(void)spdk_ring_enqueue(wq_curr->reqtag_ring, (void**) &wq_prev->p_reqtags[i], 1, NULL);
 			wq_prev->p_reqtags[i] = NULL;
 			count = count + 1;
 		}
@@ -2160,7 +2160,7 @@ nvmf_fc_put_xri(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 {
 	void *xxri[1];
 	xxri[0] = xri;
-	return spdk_ring_enqueue(BCM_HWQP(hwqp)->xri_list->xri_ring, xxri, 1);
+	return spdk_ring_enqueue(BCM_HWQP(hwqp)->xri_list->xri_ring, xxri, 1, NULL);
 }
 
 static inline void
@@ -2629,7 +2629,7 @@ nvmf_fc_process_rqpair(struct spdk_nvmf_fc_hwqp *hwqp, fc_eventq_t *cq, uint8_t 
 		nvmf_fc_process_marker_cqe(hwqp, cqe);
 	} else {
 		rc = spdk_nvmf_fc_hwqp_process_frame(hwqp, buff_idx, frame, payload_buffer,
-						     rcqe->payload_data_placement_length);
+						    rcqe->payload_data_placement_length);
 		if (!rc) {
 			return 0;
 		}
@@ -3336,71 +3336,29 @@ nvmf_fc_gen_conn_id(uint32_t qnum, struct spdk_nvmf_fc_hwqp *hwqp)
 		(hwq->cid_cnt++ << SPDK_NVMF_FC_BCM_MRQ_CONNID_UV_SHIFT));
 }
 
-static struct spdk_nvmf_fc_hwqp *
-nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp *queues,
-			    uint32_t num_queues, uint64_t *conn_id,
-			    uint32_t sq_size, bool for_aq)
+static bool
+nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp *hwqp,
+			    uint64_t *conn_id, uint32_t sq_size)
 {
-	uint32_t sel_qind = num_queues;
-	struct bcm_nvmf_hw_queues *hwq, *hwq_sel;
+ 	struct bcm_nvmf_hw_queues *hwq = (struct bcm_nvmf_hw_queues *)hwqp->queues;
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LS, "Assign connection to HWQP\n");
 
-	if (for_aq) {
-		for (sel_qind = 0; sel_qind < num_queues; sel_qind++) {
-			if (queues[sel_qind].nvme_aq) {
- 				hwq_sel = (struct bcm_nvmf_hw_queues *)queues[sel_qind].queues;
-				break;
-			}
-		}
+	if (hwq->free_rq_slots < sq_size) {
+		return false; /* no queue has space of this connection */
 	}
 
-	if (sel_qind == num_queues) {
-		/* find queue with max amount of space available */
-		uint32_t qind;
-
-		sel_qind = queues[0].nvme_aq ? 1 : 0;
- 		hwq_sel = (struct bcm_nvmf_hw_queues *)queues[sel_qind].queues;
-//if (hwq_sel->free_rq_slots != queues[sel_qind].free_q_slots) {
-//	SPDK_ERRLOG("!!!! selected free q slots mismatch\n");
-//}
-		for (qind = sel_qind + 1; qind < num_queues; qind++) {
-			if (queues[qind].nvme_aq) {
-				continue;
-			}
- 			hwq = (struct bcm_nvmf_hw_queues *)queues[qind].queues;
-//if (hwq->free_rq_slots != queues[qind].free_q_slots) {
-//	SPDK_ERRLOG("!!!! free q slots mismatch\n");
-//}
-	//		if (queues[qind].free_q_slots >
-	//		    queues[sel_qind].free_q_slots) {
-			if (hwq->free_rq_slots > hwq_sel->free_rq_slots)  {
-				sel_qind = qind;
-				hwq_sel = hwq;
-			}
-		}
-//		if (queues[sel_qind].free_q_slots < sq_size) {
-		if (hwq_sel->free_rq_slots < sq_size) {
-			return NULL; /* no queue has space of this connection */
-		}
-	}
-
-	/* decrease the free slots now in case another connect request comes
-	 * in while adding this connection in the poller thread */
-//	queues[sel_qind].free_q_slots -= sq_size;
-	hwq_sel->free_rq_slots -= sq_size;
-
-	queues[sel_qind].num_conns++;
+	hwq->free_rq_slots -= sq_size;
+	hwqp->num_conns++;
 
 	/* create connection ID */
-	*conn_id = nvmf_fc_gen_conn_id(sel_qind, &queues[sel_qind]);
+	*conn_id = nvmf_fc_gen_conn_id(hwqp->hwqp_id, hwqp);
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LS,
-		      "%s assign to %d (free %d), conn_id 0x%lx\n",
-		      //for_aq ? "AQ" : "IOQ", sel_qind, queues[sel_qind].free_q_slots, *conn_id);
-		      for_aq ? "AQ" : "IOQ", sel_qind, hwq_sel->free_rq_slots, *conn_id);
+		      "QP assign to %d (free %d), conn_id 0x%lx\n",
+		      hwqp->hwqp_id, hwq->free_rq_slots, *conn_id);
 
-	return &queues[sel_qind];
+	return true;
 }
 
 static struct spdk_nvmf_fc_hwqp *
@@ -3414,7 +3372,6 @@ static void
 nvmf_fc_release_conn(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t conn_id,
 		     uint32_t sq_size)
 { 
-//	hwqp->free_q_slots += sq_size;
 	hwqp->num_conns--;
 	BCM_HWQP(hwqp)->free_rq_slots += sq_size;
 }

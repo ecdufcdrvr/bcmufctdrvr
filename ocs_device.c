@@ -142,11 +142,6 @@ __ocs_d_initiate_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 		ocs_scsi_io_alloc_disable(node);
 
-		/* make necessary delete upcall(s) */
-		if (node->nvme_init) {
-			ocs_nvme_node_lost(node);	
-		}
-
 		if (node->init && !node->targ) {
 			ocs_log_info(node->ocs, "[%s] delete (initiator) WWPN %s WWNN %s\n", node->display_name,
 				node->wwpn, node->wwnn);

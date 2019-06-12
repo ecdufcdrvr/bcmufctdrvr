@@ -11630,7 +11630,7 @@ ocs_hal_rx_allocate(ocs_hal_t *hal)
 	rqindex = 0;
 
 #if defined(OCS_NVME_FC)
-	for (i = 0; i < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); i++) {
+	for (i = 0; i < (hal->hal_rq_count - (ocs->num_cores + 1)); i++) {
 #else
 	for (i = 0; i < hal->hal_rq_count; i++) {
 #endif
@@ -11678,13 +11678,14 @@ ocs_hal_rx_post(ocs_hal_t *hal)
 	uint32_t idx;
 	uint32_t rq_idx;
 	int32_t rc = 0;
+	ocs_t *ocs = hal->os;
 
 	/*
 	 * In RQ pair mode, we MUST post the header and payload buffer at the
 	 * same time.
 	 */
 #if defined(OCS_NVME_FC)
-	for (rq_idx = 0, idx = 0; rq_idx < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); rq_idx++) {
+	for (rq_idx = 0, idx = 0; rq_idx < (hal->hal_rq_count - (ocs->num_cores + 1)); rq_idx++) {
 #else
 	for (rq_idx = 0, idx = 0; rq_idx < hal->hal_rq_count; rq_idx++) {
 #endif
@@ -11723,6 +11724,7 @@ ocs_hal_rx_free(ocs_hal_t *hal)
 {
 	hal_rq_t *rq;
 	uint32_t i;
+	ocs_t *ocs = hal->os;
 
 	if (!hal->hal_rq_count) {
 		return;
@@ -11730,7 +11732,7 @@ ocs_hal_rx_free(ocs_hal_t *hal)
 
 	/* Free hal_rq buffers */
 #if defined(OCS_NVME_FC)
-	for (i = 0; i < (hal->hal_rq_count - (OCS_NVME_FC_MAX_IO_QUEUES + 1)); i++) {
+	for (i = 0; i < (hal->hal_rq_count - (ocs->num_cores + 1)); i++) {
 #else
 	for (i = 0; i < hal->hal_rq_count; i++) {
 #endif

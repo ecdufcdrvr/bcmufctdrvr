@@ -44,50 +44,11 @@
 /* this will be set by spdk_fc_subsystem_init() */
 uint32_t ocs_spdk_master_core = 0;
 
-struct nvme_api_ctx {
-	int rc;
-	sem_t sem;
-};
-
-static void
-ocs_nvme_api_call_done(uint8_t port_handle, enum spdk_fc_event event_type,
-		void *in, int err)
-{
-	struct nvme_api_ctx *ctx = in;
-
-	ctx->rc = err;
-	sem_post(&ctx->sem);
-}
-
-static int
-ocs_nvme_api_call_sync(enum spdk_fc_event event_type, void *args, void **cb_args)
-{
-	struct nvme_api_ctx ctx;
-
-	memset(&ctx, 0, sizeof(struct nvme_api_ctx));
-	sem_init(&ctx.sem, 1, 0);
-
-	if (spdk_env_get_current_core() == ocs_spdk_master_core) {
-		/* Might be app is stoping. Just return success */
-		ctx.rc = 0;
-		goto done;	
-	} else {
-		/* Set the default status */
-		ctx.rc = 1;
-	}
-
-	*cb_args = &ctx;
-
-	if (spdk_nvmf_fc_master_enqueue_event(event_type, args, ocs_nvme_api_call_done)) {
-		goto done;
-	}
-
-	/* Block untill api is done. */
-	sem_wait(&ctx.sem);
-done:
-	sem_destroy(&ctx.sem);	
-	return ctx.rc;
-}
+#define IS_APP_SHUTTINGDOWN(rc) do {					\
+	if (spdk_env_get_current_core() == ocs_spdk_master_core) {	\
+		return rc;						\
+	}								\
+} while (0)
 
 static void
 ocs_fill_nvme_sli_queue(ocs_t *ocs,
@@ -165,14 +126,14 @@ void
 ocs_hw_port_cleanup(ocs_t *ocs)
 {
 	if (ocs && ocs->tgt_ocs.args) {
-		int i;
+		uint32_t i;
 		struct bcm_nvmf_hw_queues* hwq;
 
  		hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->ls_queue);
 		ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
 		ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
 
-		for (i = 0; i < OCS_NVME_FC_MAX_IO_QUEUES; i ++) {
+		for (i = 0; i < ocs->num_cores; i ++) {
 			hwq = (struct bcm_nvmf_hw_queues *)(ocs->tgt_ocs.args->io_queues[i]); 
 			ocs_free_nvme_buffers(hwq->rq_hdr.q.name, hwq->rq_hdr.buffer);
 			ocs_free_nvme_buffers(hwq->rq_payload.q.name, hwq->rq_payload.buffer);
@@ -221,9 +182,9 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	uint32_t xri_base = *(ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].base) +
 			    ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size;
 
-	xri_list = spdk_nvmf_fc_create_xri_list(xri_base + OCS_NVME_FC_MAX_IO_QUEUES,
+	xri_list = spdk_nvmf_fc_create_xri_list(xri_base + ocs->num_cores,
 						ocs->hal.sli.config.extent[SLI_RSRC_FCOE_XRI].size - 
-						OCS_NVME_FC_MAX_IO_QUEUES);
+						ocs->num_cores);
 	
 	if (!xri_list) {
 		ocs_log_err(ocs, "HW port create failed to create nvmf xri list.\n");
@@ -234,7 +195,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 
 	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_hw_port_init_args) +
 			  ((sizeof(struct bcm_nvmf_hw_queues) + sizeof(spdk_nvmf_fc_lld_hwqp_t)) *
-			  (OCS_NVME_FC_MAX_IO_QUEUES + 1)), OCS_M_ZERO);
+			  (ocs->num_cores + 1)), OCS_M_ZERO);
 	if (!args) {
 		goto error;
 	}
@@ -290,8 +251,8 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	/* assign the io queues */
 	args->io_queues = args->ls_queue + sizeof(struct bcm_nvmf_hw_queues);
 	io_queues_start = (spdk_nvmf_fc_lld_hwqp_t) args->io_queues +
-			  (OCS_NVME_FC_MAX_IO_QUEUES * sizeof(void *));
-	for (i = 0; i < OCS_NVME_FC_MAX_IO_QUEUES; i++) {
+			  (ocs->num_cores * sizeof(void *));
+	for (i = 0; i < ocs->num_cores; i++) {
 		args->io_queues[i] = io_queues_start + (i * sizeof(struct bcm_nvmf_hw_queues));
 		hwq = (struct bcm_nvmf_hw_queues *)(args->io_queues[i]);
 	
@@ -376,84 +337,177 @@ error:
 	return -1;
 }
 
+
+static void
+ocs_nvme_process_hw_port_online_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct spdk_nvmf_fc_hw_port_online_args *args = in;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "HW Port online failed.\n");
+	} else {
+		ocs_log_info(ocs, "HW Port online success.\n");
+	}
+	free(args);
+}
+
 int
 ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	struct spdk_nvmf_fc_hw_port_online_args args;
-
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_port_online_args));
-	args.port_handle = ocs->instance_index;
-
-	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_ONLINE, &args, &args.cb_ctx)) {
-		ocs_log_err(ocs, "HW Port online failed.\n");
-		return -1;		
+	struct spdk_nvmf_fc_hw_port_online_args *args;
+	
+	IS_APP_SHUTTINGDOWN(0);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_hw_port_online_args), OCS_M_ZERO);
+	if (!args) {
+		goto err;
 	}
 
-	ocs_log_info(ocs, "HW Port online success.\n");
+	args->port_handle = ocs->instance_index;
+	args->cb_ctx = args;
+
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_ONLINE, args,
+				ocs_nvme_process_hw_port_online_cb)) {
+		ocs_log_err(ocs, "HW Port online failed.\n");
+		goto err;
+	}
+
 	return 0;
+err:
+	free(args);
+	return -1;
+}
+
+static void
+ocs_nvme_process_hw_port_offline_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct spdk_nvmf_fc_hw_port_offline_args *args = in;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "HW Port offline failed.\n");
+	} else {
+		ocs_log_info(ocs, "HW Port offline success.\n");
+	}
+	free(args);
 }
 
 int
 ocs_nvme_process_hw_port_offline(ocs_t *ocs)
 {
-	struct spdk_nvmf_fc_hw_port_offline_args args;
-
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_port_offline_args));
-	args.port_handle = ocs->instance_index;
-
-	if (ocs_nvme_api_call_sync(SPDK_FC_HW_PORT_OFFLINE, &args, &args.cb_ctx)) {
-		ocs_log_err(ocs, "HW Port offline failed.\n");
-		return -1;		
+	struct spdk_nvmf_fc_hw_port_offline_args *args;
+	
+	IS_APP_SHUTTINGDOWN(0);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_hw_port_offline_args), OCS_M_ZERO);
+	if (!args) {
+		goto err;
 	}
 
-	ocs_log_info(ocs, "HW Port offline success.\n");
+	args->port_handle = ocs->instance_index;
+	args->cb_ctx = args;
+
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_OFFLINE, args,
+				ocs_nvme_process_hw_port_offline_cb)) {
+		ocs_log_err(ocs, "HW Port offline failed.\n");
+		goto err;
+	}
+
 	return 0;
+err:
+	free(args);
+	return -1;
+}
+
+static void
+ocs_nvme_nport_create_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct spdk_nvmf_fc_nport_create_args *args = in;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "nport create failed.\n");
+	} else {
+		ocs_log_info(ocs, "nport create success.\n");
+	}
+	free(args);
 }
 
 int
 ocs_nvme_nport_create(ocs_sport_t *sport)
 {
 	ocs_t *ocs = sport->ocs;
-	struct spdk_nvmf_fc_nport_create_args args;
+	struct spdk_nvmf_fc_nport_create_args *args;
 
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_nport_create_args));
-
-	/* We register physical port as nport. Real nports not supported yet. */
-	args.nport_handle	= 0;
-	args.port_handle	= ocs->instance_index;
-	args.fc_nodename.u.wwn 	= ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_NODE);
-	args.fc_portname.u.wwn 	= ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_PORT);
-	args.subsys_id		= 1;
-	args.d_id		= sport->fc_id;
-
-	if (ocs_nvme_api_call_sync(SPDK_FC_NPORT_CREATE, &args, &args.cb_ctx)) {
-		ocs_log_err(ocs, "nport create failed.\n");
-		return -1;		
+	IS_APP_SHUTTINGDOWN(0);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_nport_create_args), OCS_M_ZERO);
+	if (!args) {
+		goto err;
 	}
 
-	ocs_log_info(ocs, "nport create success.\n");
+	/* We register physical port as nport. Real nports not supported yet. */
+	args->nport_handle	= 0;
+	args->port_handle	= ocs->instance_index;
+	args->fc_nodename.u.wwn = ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_NODE);
+	args->fc_portname.u.wwn = ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_PORT);
+	args->subsys_id		= 1;
+	args->d_id		= sport->fc_id;
+	args->cb_ctx 		= args;
+
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_NPORT_CREATE, args,
+				ocs_nvme_nport_create_cb)) {
+		ocs_log_err(ocs, "nport create failed.\n");
+		goto err;
+	}
 	return 0;
+err:
+	free(args);
+	return -1;
+}
+
+static void
+ocs_nvme_nport_delete_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct spdk_nvmf_fc_nport_delete_args *args = in;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "nport delete failed.\n");
+	} else {
+		ocs_log_info(ocs, "nport delete success.\n");
+	}
+	free(args);
 }
 
 int
 ocs_nvme_nport_delete(ocs_t *ocs)
 {
-	struct spdk_nvmf_fc_nport_delete_args args;
-
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_nport_delete_args));
-
-	args.port_handle	= ocs->instance_index;
-	args.nport_handle	= 0;
-	args.subsys_id		= 1;
-
-	if (ocs_nvme_api_call_sync(SPDK_FC_NPORT_DELETE, &args, &args.cb_ctx)) {
-		ocs_log_err(ocs, "nport delete failed.\n");
-		return -1;		
+	struct spdk_nvmf_fc_nport_delete_args *args;
+	
+	IS_APP_SHUTTINGDOWN(0);
+	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_nport_delete_args), OCS_M_ZERO);
+	if (!args) {
+		goto err;
 	}
 
-	ocs_log_info(ocs, "nport delete success.\n");
+	args->port_handle	= ocs->instance_index;
+	args->nport_handle	= 0;
+	args->subsys_id		= 1;
+	args->cb_ctx 		= args;
+
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_NPORT_DELETE, args,
+				ocs_nvme_nport_delete_cb)) {
+		ocs_log_err(ocs, "nport delete failed.\n");
+		goto err;
+	}
 	return 0;
+err:
+	free(args);
+	return -1;
 }
 
 static void
@@ -469,6 +523,7 @@ ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi)
 	struct spdk_nvmf_fc_abts_args *args;
 	int rc;
 
+	IS_APP_SHUTTINGDOWN(0);
 	args = ocs_malloc(NULL, sizeof(struct spdk_nvmf_fc_abts_args), OCS_M_ZERO);
 	if (!args) {
 		goto err;
@@ -496,6 +551,12 @@ err:
 	return -1;
 }
 
+struct ocs_nvme_process_prli_ctx {
+	struct spdk_nvmf_fc_hw_i_t_add_args args;
+	ocs_io_t *io;
+	uint16_t ox_id;
+};
+
 static void
 ocs_nvme_prli_resp_cb(ocs_node_t *node, ocs_node_cb_t *cbdata, void *cbarg)
 {
@@ -505,36 +566,92 @@ ocs_nvme_prli_resp_cb(ocs_node_t *node, ocs_node_cb_t *cbdata, void *cbarg)
 	}
 }
 
+static void
+ocs_nvme_process_prli_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct ocs_nvme_process_prli_ctx *ctx = in;
+	struct spdk_nvmf_fc_hw_i_t_add_args *args = &ctx->args;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "NVME IT add failed.\n");
+		ocs_send_ls_rjt(ctx->io, ctx->ox_id, FC_REASON_UNABLE_TO_PERFORM,
+				FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
+	} else {
+		ocs_log_info(ocs, "NVME IT add success.\n");
+		ocs_send_prli_acc(ctx->io, ctx->ox_id, FC_TYPE_NVME, ocs_nvme_prli_resp_cb, NULL);
+	}
+	free(ctx);
+}
+
 int
 ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	struct spdk_nvmf_fc_hw_i_t_add_args args;
+	struct ocs_nvme_process_prli_ctx *ctx;
+	struct spdk_nvmf_fc_hw_i_t_add_args *args;
 
+	IS_APP_SHUTTINGDOWN(0);
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_add_args));
+	ctx = ocs_malloc(NULL, sizeof(struct ocs_nvme_process_prli_ctx), OCS_M_ZERO);
+	if (!ctx) {
+		goto err;
+	}
+	ctx->io = io;
+	ctx->ox_id = ox_id;
 
-	args.port_handle	= node->ocs->instance_index;
-	args.nport_handle	= node->sport->instance_index;
-	args.rpi		= node->rnode.indicator;
-	args.s_id		= node->rnode.fc_id;
-	args.fc_nodename.u.wwn	= ocs_node_get_wwnn(node);
-	args.fc_portname.u.wwn	= ocs_node_get_wwpn(node);
-	args.target_prli_info	= node->nvme_prli_service_params;
+	args = &ctx->args;
+	args->port_handle	= node->ocs->instance_index;
+	args->nport_handle	= 0;
+	args->rpi		= node->rnode.indicator;
+	args->s_id		= node->rnode.fc_id;
+	args->fc_nodename.u.wwn	= ocs_node_get_wwnn(node);
+	args->fc_portname.u.wwn	= ocs_node_get_wwpn(node);
+	args->target_prli_info	= node->nvme_prli_service_params;
+	args->cb_ctx = ctx;
 
-	if (ocs_nvme_api_call_sync(SPDK_FC_IT_ADD, &args, &args.cb_ctx)) {
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_IT_ADD, args,
+				ocs_nvme_process_prli_cb)) {
 		ocs_log_err(ocs, "NVME IT add failed.\n");
-		return -1;
+		goto err;
 	}
 
-	ocs_log_info(ocs, "NVME IT add success.\n");
-
-	ocs_send_prli_acc(io, ox_id, FC_TYPE_NVME, ocs_nvme_prli_resp_cb, NULL);
 	return 0;
+err:
+	free(ctx);
+	ocs_send_ls_rjt(io, ox_id, FC_REASON_UNABLE_TO_PERFORM,
+			FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
+	return -1;
+}
+
+struct ocs_nvme_process_prlo_ctx {
+	struct spdk_nvmf_fc_hw_i_t_delete_args args;
+	ocs_io_t *io;
+	uint16_t ox_id;
+};
+
+static void
+ocs_nvme_process_prlo_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct ocs_nvme_process_prlo_ctx *ctx = in;
+	struct spdk_nvmf_fc_hw_i_t_delete_args *args = &ctx->args;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "%s: NVME IT delete failed.\n", __func__);
+		ocs_send_ls_rjt(ctx->io, ctx->ox_id, FC_REASON_UNABLE_TO_PERFORM,
+				FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
+	} else {
+		ocs_log_info(ocs, "%s: NVME IT delete success.\n", __func__);
+		ocs_send_prlo_acc(ctx->io, ctx->ox_id, FC_TYPE_NVME, NULL, NULL);
+	}
+	free(ctx);
 }
 
 int
@@ -542,54 +659,93 @@ ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id)
 {
 	ocs_t *ocs = io->ocs;
 	ocs_node_t *node;
-	struct spdk_nvmf_fc_hw_i_t_delete_args args;
+	struct ocs_nvme_process_prlo_ctx *ctx;
+	struct spdk_nvmf_fc_hw_i_t_delete_args *args;
 
+	IS_APP_SHUTTINGDOWN(0);
 	if (!io || !(node = io->node)) {
 		return -1;
 	}
 
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_delete_args));
+	ctx = ocs_malloc(NULL, sizeof(struct ocs_nvme_process_prlo_ctx), OCS_M_ZERO);
+	if (!ctx) {
+		goto err;
+	}
+	ctx->io = io;
+	ctx->ox_id = ox_id;
 
-	args.port_handle  = node->ocs->instance_index;
-	args.nport_handle = node->sport->instance_index;
-	args.rpi = node->rnode.indicator;
-	args.s_id = node->rnode.fc_id;
+	args = &ctx->args;
+	args->port_handle  = node->ocs->instance_index;
+	args->nport_handle = 0;
+	args->rpi = node->rnode.indicator;
+	args->s_id = node->rnode.fc_id;
+	args->cb_ctx = ctx;
 
-	if (ocs_nvme_api_call_sync(SPDK_FC_IT_DELETE, &args, &args.cb_ctx)) {
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_IT_DELETE, args,
+				ocs_nvme_process_prlo_cb)) {
 		ocs_log_err(ocs, "NVME IT delete failed.\n");
 		goto err;
 	}
 
-	ocs_log_info(ocs, "NVME IT delete success.\n");
-	ocs_send_prlo_acc(io, ox_id, FC_TYPE_NVME, NULL, NULL);
 	return 0;
 err:
+	free(ctx);
 	ocs_send_ls_rjt(io, ox_id, FC_REASON_UNABLE_TO_PERFORM,
 			FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
 	return -1;
 }
 
+struct ocs_nvme_node_lost_ctx {
+	struct spdk_nvmf_fc_hw_i_t_delete_args args;
+	ocs_node_t *node;
+};
+
+static void
+ocs_nvme_node_lost_cb(uint8_t port_handle, enum spdk_fc_event event_type,
+		void *in, int err)
+{
+	struct ocs_nvme_node_lost_ctx *ctx = in;
+	struct spdk_nvmf_fc_hw_i_t_delete_args *args = &ctx->args;
+	ocs_t *ocs = ocs_get_instance(args->port_handle);
+
+	if (err) {
+		ocs_log_err(ocs, "%s: NVME IT delete failed.\n", __func__);
+	} else {
+		ocs_log_info(ocs, "%s: NVME IT delete success.\n", __func__);
+	}
+
+	ocs_node_post_event(ctx->node, OCS_EVT_NODE_DEL_INI_COMPLETE, NULL);
+	free(ctx);	
+}
 
 int
 ocs_nvme_node_lost(ocs_node_t *node)
 {
 	ocs_t *ocs = node->ocs;
-	struct spdk_nvmf_fc_hw_i_t_delete_args args;
+	struct ocs_nvme_node_lost_ctx *ctx;
+	struct spdk_nvmf_fc_hw_i_t_delete_args *args;
 
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_delete_args));
+	IS_APP_SHUTTINGDOWN(-1);
+	ctx = ocs_malloc(NULL, sizeof(struct ocs_nvme_node_lost_ctx), OCS_M_ZERO);
+	if (!ctx) {
+		goto err;
+	}
+	ctx->node = node;
 
-	args.port_handle	= node->ocs->instance_index;
-	args.nport_handle	= node->sport->instance_index;
-	args.rpi		= node->rnode.indicator;
-	args.s_id		= node->rnode.fc_id;
+	args = &ctx->args;
+	args->port_handle	= node->ocs->instance_index;
+	args->nport_handle	= 0;
+	args->rpi		= node->rnode.indicator;
+	args->s_id		= node->rnode.fc_id;
+	args->cb_ctx		= ctx;
 
-	if (ocs_nvme_api_call_sync(SPDK_FC_IT_DELETE, &args, &args.cb_ctx)) {
+	if (spdk_nvmf_fc_master_enqueue_event(SPDK_FC_IT_DELETE, args, ocs_nvme_node_lost_cb)) {
 		ocs_log_err(ocs, "NVME IT delete failed.\n");
 		goto err;
 	}
 
-	ocs_log_info(ocs, "NVME IT delete success.\n");
 	return 0;
 err:
+	free(ctx);	
 	return -1;
 }

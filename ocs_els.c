@@ -1421,24 +1421,48 @@ ocs_send_flogi_acc(ocs_io_t *io, uint32_t ox_id, uint32_t is_fport, els_cb_t cb,
 	return io;
 }
 
-/**
- * @ingroup els_api
- * @brief Send a PRLI accept response
- *
- * <h3 class="desc">Description</h3>
- * Construct a PRLI LS_ACC response, and send to the \c node, using the originator
- * \c ox_id exchange ID.
- *
- * @param io Pointer to a SCSI IO object.
- * @param ox_id Originator exchange ID.
- * @param cb Callback function.
- * @param cbarg Callback function argument.
- *
- * @return Returns pointer to IO object, or NULL if error.
- */
+static ocs_io_t *
+ocs_send_nvme_prli_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
+{
+	ocs_node_t *node = io->node;
+	int32_t rc;
+	ocs_t *ocs = node->ocs;
+	fc_nvme_prli_payload_t *prli;
 
-ocs_io_t *
-ocs_send_prli_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, void *cbarg)
+	node_els_trace();
+
+	io->els_callback = cb;
+	io->els_callback_arg = cbarg;
+	io->display_name = "prli_acc";
+	io->init_task_tag = ox_id;
+
+	ocs_memset(&io->iparam, 0, sizeof(io->iparam));
+	io->iparam.els.ox_id = ox_id;
+
+	prli = io->els_req.virt;
+	ocs_memset(prli, 0, sizeof(*prli));
+
+	prli->command_code = FC_ELS_CMD_ACC;
+	prli->type = FC_TYPE_NVME;
+	prli->flags = ocs_htobe16(FC_PRLI_REQUEST_EXECUTED);
+	prli->service_params = ocs_htobe16(FC_PRLI_TARGET_FUNCTION|
+				FC_PRLI_NVME_DISC_FUNCTION);
+	prli->first_burst = 0;
+	prli->payload_length = ocs_htobe16(sizeof(fc_nvme_prli_payload_t));
+	prli->page_length = 16;
+	prli->type_ext = 0;
+
+	io->hio_type = OCS_HAL_ELS_RSP;
+	if ((rc = ocs_els_send_rsp(io, sizeof(*prli)))) {
+		ocs_els_io_free(io);
+		io = NULL;
+	}
+
+	return io;
+}
+
+static ocs_io_t *
+ocs_send_fcp_prli_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 {
 	ocs_node_t *node = io->node;
 	int32_t rc;
@@ -1459,20 +1483,13 @@ ocs_send_prli_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, vo
 	ocs_memset(prli, 0, sizeof(*prli));
 
 	prli->command_code = FC_ELS_CMD_ACC;
-	if (fc_type == FC_TYPE_NVME) {
-		prli->type = FC_TYPE_NVME;
-		prli->flags = ocs_htobe16(FC_PRLI_REQUEST_EXECUTED);
-		prli->service_params = ocs_htobe16(FC_PRLI_TARGET_FUNCTION|
-				FC_PRLI_NVME_DISC_FUNCTION);
-	} else {
-		prli->type = FC_TYPE_FCP;
-		prli->flags = ocs_htobe16(FC_PRLI_ESTABLISH_IMAGE_PAIR | FC_PRLI_REQUEST_EXECUTED);
-		prli->service_params = ocs_htobe16(FC_PRLI_READ_XRDY_DISABLED |
+	prli->type = FC_TYPE_FCP;
+	prli->flags = ocs_htobe16(FC_PRLI_ESTABLISH_IMAGE_PAIR | FC_PRLI_REQUEST_EXECUTED);
+	prli->service_params = ocs_htobe16(FC_PRLI_READ_XRDY_DISABLED |
 				(node->sport->enable_ini ? FC_PRLI_INITIATOR_FUNCTION : 0) |
 				(node->sport->enable_tgt ? FC_PRLI_TARGET_FUNCTION : 0));
-	}
-	prli->page_length = 16;
 	prli->payload_length = ocs_htobe16(sizeof(fc_prli_payload_t));
+	prli->page_length = 16;
 	prli->type_ext = 0;
 
 	io->hio_type = OCS_HAL_ELS_RSP;
@@ -1482,6 +1499,33 @@ ocs_send_prli_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, vo
 	}
 
 	return io;
+}
+
+/**
+ * @ingroup els_api
+ * @brief Send a PRLI accept response
+ *
+ * <h3 class="desc">Description</h3>
+ * Construct a PRLI LS_ACC response, and send to the \c node, using the originator
+ * \c ox_id exchange ID.
+ *
+ * @param io Pointer to a SCSI IO object.
+ * @param ox_id Originator exchange ID.
+ * @param fc_type FC4 type: FCP or NVME.
+ * @param cb Callback function.
+ * @param cbarg Callback function argument.
+ *
+ * @return Returns pointer to IO object, or NULL if error.
+ */
+
+ocs_io_t *
+ocs_send_prli_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, void *cbarg)
+{
+	if (fc_type == FC_TYPE_NVME) {
+		return ocs_send_nvme_prli_acc(io, ox_id, cb, cbarg);
+	}
+
+	return ocs_send_fcp_prli_acc(io, ox_id, cb, cbarg);
 }
 
 /**

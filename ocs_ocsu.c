@@ -246,7 +246,7 @@ ocs_spdk_poller_stop(ocs_t *ocs)
 {
 	if (ocs != NULL) {
 		uint32_t i, index = ocs_instance(ocs);
-		uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
+		uint32_t pollers_required = ocs->hal.config.n_eq - (ocs->num_cores + 1);
 
 		ocs_log_debug(ocs, "Destroying poller threads on port : %d\n", index);
 		for (i = 0; i < pollers_required; i++) {
@@ -279,7 +279,7 @@ static int
 ocs_create_pollers(ocs_t *ocs)
 {
 	uint32_t index = 0, i, lcore_id;
-	uint32_t pollers_required = ocs->hal.config.n_eq - (OCS_NVME_FC_MAX_IO_QUEUES + 1);
+	uint32_t pollers_required = ocs->hal.config.n_eq - (ocs->num_cores + 1);
 	struct spdk_event *event = NULL;
 
 	for (i = 0; i < pollers_required; i++) {
@@ -309,15 +309,24 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 {
 	ocs_t *ocs;
 	int32_t rc = -1, num_interrupts;
+	uint32_t num_cores = 0;
 	const char *desc = "Unknown adapter";
 	struct spdk_ocs_get_pci_config_t pciconfig;
 	struct spdk_fc_hba_port *hba_port = NULL, *tmp;
+
+	num_cores = spdk_env_get_core_count();
+	if (num_cores > OCS_NVME_FC_MAX_IO_QUEUES) {
+		ocs_log_err(NULL, "%s: Cant configure more cores than %d for FC\n",
+			 __func__, OCS_NVME_FC_MAX_IO_QUEUES);
+		return NULL;
+	}
 
 	ocs = ocs_device_alloc(0);
 	if (ocs == NULL) {
 		ocs_log_err(NULL, "ocsu_device_init failed\n");
 		return NULL;
 	}
+	ocs->num_cores = num_cores;
 
 	spdk_ocs_get_pci_config(pci_dev, &pciconfig);
 
@@ -362,13 +371,13 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		ocs->enable_ini = hba_port->initiator;
 		ocs->enable_tgt = hba_port->target;
 		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, OCS_NVME_FC_MAX_IO_QUEUES);
+			MRQ_TOPOLOGY, num_cores);
 	} else {
 		// use default
 		ocs->enable_ini = initiator;
 		ocs->enable_tgt = target;
 		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, OCS_NVME_FC_MAX_IO_QUEUES);
+			MRQ_TOPOLOGY, num_cores);
 	}
 
 	// For now always enable.

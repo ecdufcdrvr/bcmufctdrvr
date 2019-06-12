@@ -688,7 +688,13 @@ done:
 int32_t
 ocs_scsi_del_initiator(ocs_node_t *node, ocs_scsi_del_initiator_reason_e reason)
 {
-	return 0;
+	if (node->nvme_init) {
+		if (!ocs_nvme_node_lost(node)) {
+			return OCS_SCSI_CALL_ASYNC;
+		}
+	}
+
+	return OCS_SCSI_CALL_COMPLETE;
 }
 
 

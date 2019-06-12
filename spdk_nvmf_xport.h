@@ -35,7 +35,7 @@
 #define __SPDK_NVMF_XPORT_H__
 
 #include "nvmf_fc.h"
-#include <spdk/fc_adm_api.h>
+#include <spdk_internal/fc_adm_api.h>
 
 /* maximum number of IO queues for NVME over FC */
 #define OCS_NVME_FC_MAX_IO_QUEUES  16
