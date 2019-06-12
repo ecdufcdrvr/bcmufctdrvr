@@ -330,6 +330,21 @@ typedef struct fc_prli_payload_s {
 			service_params:16;
 } fc_prli_payload_t;
 
+typedef struct fc_nvme_prli_payload_s {
+	uint32_t	command_code:8,
+			page_length:8,
+			payload_length:16;
+	uint32_t	type:8,
+			type_ext:8,
+			flags:16;
+	uint32_t	rsvd1;
+	uint32_t	rsvd2;
+	uint32_t	:16,
+			service_params:16;
+	uint32_t	:16,
+			first_burst:16;
+} fc_nvme_prli_payload_t;
+
 typedef struct fc_prlo_payload_s {
 	uint32_t	command_code:8,
 			page_length:8,

@@ -162,7 +162,7 @@ struct ocs_s {
 	char queue_topology[256];
 #ifdef OCS_USPACE_SPDK
 	uint8_t domain_shutdown_timedout;
-	uint32_t dmabuf_next_instance; 	
+	uint32_t dmabuf_next_instance, num_cores;
 #endif
 };
 
