@@ -142,7 +142,7 @@ __ocs_d_initiate_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 		ocs_scsi_io_alloc_disable(node);
 
-		if (node->init && !node->targ) {
+		if ((node->init || node->nvme_init) && !node->targ) {
 			ocs_log_info(node->ocs, "[%s] delete (initiator) WWPN %s WWNN %s\n", node->display_name,
 				node->wwpn, node->wwnn);
 			ocs_node_transition(node, __ocs_d_wait_del_node, NULL);
@@ -206,7 +206,7 @@ __ocs_d_initiate_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		}
 
 		/* if neither initiator nor target, proceed to cleanup */
-		if (!node->init && !node->targ){
+		if (!node->init && !node->targ && !node->nvme_init){
 			/*
 			 * node has either been detached or is in the process of being detached,
 			 * call common node's initiate cleanup function
