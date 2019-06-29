@@ -3319,21 +3319,13 @@ nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t ski
 	return nvmf_fc_post_wqe(hwqp, (uint8_t *)marker, true, nvmf_fc_def_cmpl_cb, NULL);
 }
 
-/* The connection ID (8 bytes) has the following format:
- * byte0: queue number (0-255) - currently there is a max of 16 queues
- * byte1 - byte2: unique value per queue number (0-65535)
- * byte3 - byte7: unused */
-#define SPDK_NVMF_FC_BCM_MRQ_CONNID_UV_SHIFT    8
-#define SPDK_NVMF_FC_BCM_MRQ_CONNID_QUEUE_MASK  0xff
-
 static inline uint64_t
 nvmf_fc_gen_conn_id(uint32_t qnum, struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	struct bcm_nvmf_hw_queues *hwq = BCM_HWQP(hwqp);
-	if (hwq->cid_cnt == 0) /* make sure cid_cnt is never 0 */
-		hwq->cid_cnt++;
-	return ((uint64_t) qnum |
-		(hwq->cid_cnt++ << SPDK_NVMF_FC_BCM_MRQ_CONNID_UV_SHIFT));
+
+	hwq->cid_cnt++;
+	return ((hwqp->fc_port->num_io_queues * hwq->cid_cnt) + qnum);
 }
 
 static bool
@@ -3365,7 +3357,7 @@ static struct spdk_nvmf_fc_hwqp *
 nvmf_fc_get_hwqp_from_conn_id(struct spdk_nvmf_fc_hwqp *queues, 
 			      uint32_t num_queues, uint64_t conn_id)
 {
-	return &queues[(conn_id & SPDK_NVMF_FC_BCM_MRQ_CONNID_QUEUE_MASK) % num_queues];
+	return &queues[conn_id % num_queues];
 }
 
 static void

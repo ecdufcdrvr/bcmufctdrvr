@@ -574,7 +574,7 @@ ocs_nvme_process_prli_cb(uint8_t port_handle, enum spdk_fc_event event_type,
 	struct spdk_nvmf_fc_hw_i_t_add_args *args = &ctx->args;
 	ocs_t *ocs = ocs_get_instance(args->port_handle);
 
-	if (err) {
+	if (err && (err != -EEXIST)) {
 		ocs_log_err(ocs, "NVME IT add failed.\n");
 		ocs_send_ls_rjt(ctx->io, ctx->ox_id, FC_REASON_UNABLE_TO_PERFORM,
 				FC_EXPL_NO_ADDITIONAL,	0, NULL, NULL);
