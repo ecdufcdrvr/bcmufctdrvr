@@ -37,6 +37,7 @@
 #include "spdk_internal/event.h"
 #include "spdk/env.h"
 #include "task.h"
+#include "ocsu_scsi_if.h"
 #include "fc.h"
 #include "fc_subsystem.h"
 #include "ocs.h"
@@ -113,6 +114,7 @@ spdk_fc_free_all_pools(void)
 	}
 }
 
+#ifdef __USE_SPDK_SCSI_LIB__
 static int
 spdk_fc_app_read_parameters(void)
 {
@@ -139,6 +141,7 @@ error:
 	CLEANUP_NODE_LIST(g_spdk_fc_lun_maps, tmp2);
 	return -1;
 }
+#endif
 
 int
 spdk_fc_subsystem_init(void)
@@ -148,11 +151,13 @@ spdk_fc_subsystem_init(void)
 	/* save master core value */
 	ocs_spdk_master_core = spdk_env_get_current_core();
 
+#ifdef __USE_SPDK_SCSI_LIB__
 	rc = spdk_fc_app_read_parameters();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_fc_app_read_parameters() failed\n");
 		return -1;
 	}
+#endif
 
 	rc = spdk_fc_initialize_all_pools();
 	if (rc != 0) {

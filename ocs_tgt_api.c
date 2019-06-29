@@ -44,6 +44,7 @@
 #include "ocs_spdk_conf.h"
 #include "ocs_els.h"
 #include "ocs_fabric.h"
+#include "ocsu_scsi_if.h"
 #include "fc_subsystem.h"
 #include "spdk/scsi_spec.h"
 

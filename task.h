@@ -49,11 +49,7 @@ struct spdk_fc_task {
 	struct spdk_mobj *mobj;	
 };
 
-static inline void
-spdk_fc_task_put(struct spdk_fc_task *task)
-{
-        spdk_scsi_task_put(&task->scsi);
-}
+void spdk_fc_task_put(struct spdk_fc_task *task);
 
 struct spdk_fc_task *
 spdk_fc_task_get(uint32_t *owner_task_ctr, struct spdk_fc_task *parent,

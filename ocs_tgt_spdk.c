@@ -47,6 +47,7 @@
 #include "spdk/scsi_spec.h"
 #include "spdk/scsi.h"
 #include "ocs_spdk_nvmet.h"
+#include "ocsu_scsi_if.h"
 
 extern struct spdk_fc_igs_list g_spdk_fc_igs;
 extern struct spdk_fc_lun_map_list g_spdk_fc_lun_maps;

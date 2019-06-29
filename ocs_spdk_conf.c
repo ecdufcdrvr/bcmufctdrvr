@@ -41,7 +41,7 @@
 #include "ocs_device.h"
 #include "ocs_els.h"
 #include "ocs_tgt_api.h"
-#include "scsi_internal.h"
+#include "ocsu_scsi_if.h"
 
 struct spdk_fc_igs_list g_spdk_fc_igs;
 struct spdk_fc_lun_map_list g_spdk_fc_lun_maps;

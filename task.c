@@ -35,6 +35,7 @@
 #include <rte_mempool.h>
 
 #include "spdk/log.h"
+#include "ocsu_scsi_if.h"
 #include "task.h"
 
 static void
@@ -49,6 +50,12 @@ spdk_fc_task_free(struct spdk_scsi_task *scsi_task)
 
 	*task->owner_task_ctr -= 1;
 	rte_mempool_put(g_spdk_fc.task_pool, (void *)task);
+}
+
+void
+spdk_fc_task_put(struct spdk_fc_task *task)
+{
+        spdk_scsi_task_put(&task->scsi);
 }
 
 struct spdk_fc_task *
