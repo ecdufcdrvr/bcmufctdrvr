@@ -38,7 +38,7 @@
 #include "fc.h"
 #include "ocs_spdk.h"
 #include "ocs_impl.h"
-//#include <pciaccess.h>
+#include "nvmf_fc.h"
 
 struct spdk_ocs_t *spdk_ocs_devices[MAX_OCS_DEVICES];
 
@@ -297,3 +297,26 @@ int spdk_ocs_get_pci_config(struct spdk_pci_device *dev, struct spdk_ocs_get_pci
 
 	return 0;
 }
+
+static void
+spdk_ocs_subsystem_init(void)
+{
+	extern struct spdk_nvmf_fc_ll_drvr_ops g_ocs_spdk_nvmf_fc_lld_ops;
+
+	spdk_nvmf_fc_register_lld_ops(&g_ocs_spdk_nvmf_fc_lld_ops);
+
+	spdk_subsystem_init_next(0);
+}
+
+static void
+spdk_ocs_subsystem_fini(void)
+{
+}
+
+static struct spdk_subsystem g_spdk_subsystem_bcm_fc_lld = {
+	.name = "bcm fc",
+	.init = spdk_ocs_subsystem_init,
+	.fini = spdk_ocs_subsystem_fini,
+};
+
+SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_bcm_fc_lld)
