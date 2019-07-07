@@ -3583,7 +3583,7 @@ nvmf_fc_get_rsvd_thread(void)
 	return ocs_get_rsvd_thread();
 }
 
-struct spdk_nvmf_fc_ll_drvr_ops spdk_nvmf_fc_lld_ops = {
+struct spdk_nvmf_fc_ll_drvr_ops g_ocs_spdk_nvmf_fc_lld_ops = {
 	.lld_init = nvmf_fc_lld_init,
 	.lld_fini = nvmf_fc_lld_fini,
 	.lld_start = nvmf_fc_lld_start,
