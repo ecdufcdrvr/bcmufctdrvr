@@ -311,6 +311,7 @@ spdk_ocs_subsystem_init(void)
 static void
 spdk_ocs_subsystem_fini(void)
 {
+	spdk_subsystem_fini_next();
 }
 
 static struct spdk_subsystem g_spdk_subsystem_bcm_fc_lld = {
