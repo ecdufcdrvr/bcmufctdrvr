@@ -7,10 +7,13 @@ User mode driver supports Emulex LPe31000-series and LPe32000-series HBAs.
 ### Instructions to include driver module with SPDK NVMF Target:
 
 ~~~{.sh}
-git clone https://github.com/spdk/spdk
+git clone https://github.com/spdk/spdk spdk
+git clone https://github.com/ecdufcdrvr/bcmufctdrvr fc
 cd spdk
 git submodule update --init
-git clone https://github.com/ecdufcdrvr/bcmufctdrvr fc
-./configure --with-fc
+cd ../fc
+make DPDK_DIR=../spdk/dpdk/build SPDK_DIR=../spdk
+cd ../spdk
+./configure --with-fc=../fc/build
 make
 ~~~
