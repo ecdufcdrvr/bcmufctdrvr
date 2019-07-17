@@ -36,10 +36,105 @@
 
 #include "ocs.h"
 #include "ocs_os.h"
-#include "ocs_tgt_api.h"
+#include "spdk/scsi.h"
 #include "spdk/conf.h"
 
 #define SPDK_FC_LARGE_RBUF_MAX_SIZE (64 * 1024)
+#define MAX_GRP_NAME_LEN	256
+#define MAX_WWN_NAME_LEN	128
+#define MAX_INITIATORS_IN_IG	256
+#define MAX_MAPPINGS_IN_LUNMAP	64
+
+#define TAILQ_COUNT(count, head, field, var) do {	\
+	count = 0;					\
+	for (var = TAILQ_FIRST(head); var;		\
+			 var = TAILQ_NEXT(var, field))	\
+	{						\
+		count ++;				\
+	}						\
+} while (0)
+
+#define FIND_NODE_BY_ID(list, idx, node, tvar) do {	\
+	node = NULL;					\
+							\
+	TAILQ_FOREACH(tvar, &list.head, tailq) {	\
+		if (tvar->id == idx) {			\
+			node = tvar;			\
+			break;				\
+		}					\
+	}						\
+} while (0)
+
+
+#define SPDK_GET_SECTION_ID(name, id) do {			\
+	const char *p; 						\
+	for (p = name; *p != '\0' && !isdigit((int) *p); p++)	\
+		;					\
+	if (*p != '\0') {					\
+		id = (int)strtol(p, NULL, 10);			\
+	} else {						\
+		id = 0;						\
+	}							\
+} while (0)
+
+
+#define CLEANUP_NODE_LIST(list, tvar) do {		\
+	TAILQ_FOREACH(tvar, &list.head, tailq) { 	\
+		free(tvar);				\
+	}						\
+} while (0)
+
+struct spdk_fc_ig {
+	int  id;
+
+	/* List of initiators in this group */
+	int  num_initiators;
+	char initiators[MAX_INITIATORS_IN_IG][MAX_WWN_NAME_LEN];
+
+	/* For internal use only. */
+	TAILQ_ENTRY(spdk_fc_ig) tailq;
+};
+
+struct spdk_fc_hba_port {
+	int  id;
+	
+	int mrqs;
+	bool initiator;
+	bool target;
+
+	char wwnn[MAX_WWN_NAME_LEN];
+	char wwpn[MAX_WWN_NAME_LEN];
+
+	TAILQ_ENTRY(spdk_fc_hba_port) tailq;
+};
+
+#define SPDK_SCSI_LUN_MAX_NAME_LENGTH 16
+
+struct spdk_fc_lun_map {
+	int id;
+
+	int num_luns;
+	int lun_ids[SPDK_SCSI_DEV_MAX_LUN];
+	char lun_names[SPDK_SCSI_DEV_MAX_LUN][SPDK_SCSI_LUN_MAX_NAME_LENGTH];
+
+	/* Ports and groups that have access to this lunmap */
+	int num_mappings;
+	int ig_ids[MAX_MAPPINGS_IN_LUNMAP];
+	int hba_port_ids[MAX_MAPPINGS_IN_LUNMAP];
+
+	/* Below for internal purpose only */
+
+	/* scsi device for this lunmap */
+	struct spdk_scsi_dev *scsi_dev;
+	int core_id;
+
+	TAILQ_ENTRY(spdk_fc_lun_map) tailq;
+
+	/* cleanup context */
+	struct spdk_thread *io_ch_thread;
+	struct spdk_thread *scsi_dev_thread;
+};
+
 
 struct spdk_fc_igs_list {
 	TAILQ_HEAD(, spdk_fc_ig) head;
@@ -59,18 +154,6 @@ int spdk_fc_cf_init_igs(void);
 int spdk_fc_cf_init_lun_maps(void);
 void spdk_fc_cf_cleanup_cfg(void);
 
-struct spdk_scsi_dev *
-spdk_fc_cf_get_initiator_scsidev(int hba_port_id, uint64_t wwn);
-
-void
-spdk_fc_cf_delete_ig_initiator(int ig_id, char *wwn_name);
-
-void
-spdk_fc_cf_delete_ig(int ig_id);
-
-void
-spdk_fc_cf_delete_lun_map(int lun_map_id);
-
 int
 spdk_fc_cf_add_scsidev_port(struct spdk_fc_hba_port *hba_port, uint64_t tgt_id);
 
@@ -83,19 +166,14 @@ ocs_sport_logout_all_initiators(ocs_sport_t *sport);
 void
 ocs_sport_logout_initiator(ocs_sport_t *sport, uint64_t wwn);
 
-void
-spdk_fc_cf_delete_lun_from_lun_map(void *arg1, void *arg2);
-
-void
-spdk_fc_cf_add_lun_to_lun_map(void *arg1, void *arg2);
-
-void
-ocs_scsi_dev_set_nodes_dirty(struct spdk_scsi_dev *dev);
+struct spdk_scsi_dev *
+spdk_fc_cf_get_initiator_scsidev(int hba_port_id, uint64_t wwn);
 
 // Global
 extern struct spdk_fc_igs_list g_spdk_fc_igs;
 extern struct spdk_fc_lun_map_list g_spdk_fc_lun_maps;
 extern struct spdk_fc_hba_ports_list g_spdk_fc_hba_ports;
 extern ocs_lock_t g_spdk_config_lock;
+
 
 #endif

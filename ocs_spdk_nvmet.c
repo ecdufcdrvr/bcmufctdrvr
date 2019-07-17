@@ -37,7 +37,6 @@
 #include "ocs_els.h"
 #include "ocs_device.h"
 #include "ocs_spdk_nvmet.h"
-#include "ocs_tgt_api.h"
 #include "ocs_impl.h"
 #include "spdk_nvmf_xport.h"
 

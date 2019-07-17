@@ -85,7 +85,7 @@ ocs_device_init(void)
 
 	/* driver-wide init for initiator-client */
 	if (initiator) {
-		rc = ocs_scsi_ini_driver_init();
+		rc = ocs_scsi_ini_driver_init(initiator);
 		if (rc) {
 			return rc;
 		}
@@ -455,7 +455,7 @@ void
 ocs_device_shutdown_complete(void)
 {
 	if (initiator) {
-		ocs_scsi_ini_driver_exit();
+		ocs_scsi_ini_driver_exit(initiator);
 	}
 	if (target) {
 		ocs_scsi_tgt_driver_exit();

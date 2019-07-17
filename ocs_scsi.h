@@ -316,8 +316,8 @@ extern void ocs_scsi_update_first_burst_transferred(ocs_io_t *io, uint32_t trans
 
 /* Calls from base driver to initiator-client */
 
-extern int32_t ocs_scsi_ini_driver_init(void);
-extern int32_t ocs_scsi_ini_driver_exit(void);
+extern int32_t ocs_scsi_ini_driver_init(int32_t);
+extern int32_t ocs_scsi_ini_driver_exit(int32_t);
 extern int32_t ocs_scsi_ini_io_init(ocs_io_t *io);
 extern int32_t ocs_scsi_ini_io_exit(ocs_io_t *io);
 extern int32_t ocs_scsi_ini_new_device(ocs_t *ocs);

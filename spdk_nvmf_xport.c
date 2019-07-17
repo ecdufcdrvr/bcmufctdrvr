@@ -43,7 +43,7 @@
 #include "spdk/trace.h"
 #include "spdk_internal/log.h"
 #include "spdk_nvmf_xport.h"
-#include "ocs_tgt_api.h"
+#include "fc_subsystem.h"
 #include "fc.h"
 #include "ocs.h"
 #include "spdk/barrier.h"
@@ -1951,13 +1951,13 @@ nvmf_fc_rqpair_buffer_release(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t buff_idx)
 static int
 nvmf_fc_lld_init(void) 
 {
-	return spdk_fc_api_subsystem_init();
+	return spdk_fc_subsystem_init();
 }
 
 static void 
 nvmf_fc_lld_fini(void) 
 {
-	spdk_fc_api_subsystem_exit();
+	spdk_fc_subsystem_fini();
 	nvmf_fc_xri_list_cleanup();
 }
 

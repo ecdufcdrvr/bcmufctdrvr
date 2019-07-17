@@ -52,7 +52,6 @@
 #include "ocs.h"
 #include "ocs_hal.h"
 #include "ocs_hal_queues.h"
-#include "spdk_fc_ini_discovery.h"
 #include "spdk_nvmf_xport.h"
 
 #define OCS_HAL_MQ_DEPTH	128
@@ -9281,7 +9280,6 @@ ocs_hal_cb_link(void *ctx, void *e)
 				hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_LOST, d);
 			}
 		}
-		spdk_fc_ini_di_update_devs_notify(INI_NODE_EVENT_TYPE_PORT_DOWN, hal->os);
 		break;
 	default:
 		ocs_log_test(hal->os, "%s: unhandled link status %#x\n", __func__, event->status);

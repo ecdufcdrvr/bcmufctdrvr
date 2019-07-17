@@ -32,9 +32,6 @@
  */
 
 #include "ocs.h"
-#include "spdk_fc_ini_discovery.h"
-
-extern bool block_ready;
 
 /*!
  * @defgroup scsi_api_initiator SCSI Initiator
@@ -47,12 +44,13 @@ extern bool block_ready;
  * Called by OS initialization code to initialize initiator
  * client. This is called prior to any PCI device enumeration.
  *
+ * @param initiator TRUE for initiator mode
+ *
  * @return Returns 0 on success, or a negative error code value on failure.
  */
 int32_t
-ocs_scsi_ini_driver_init(void)
+ocs_scsi_ini_driver_init(int32_t initiator)
 {
-	ocs_log_err(NULL, "Init driver called\n");
 	return 0;
 }
 
@@ -98,10 +96,12 @@ ocs_scsi_ini_io_exit(ocs_io_t *io)
  * Called by OS driver-wide cleanup/exit code to cleanup
  * initiator client.
  *
+ * @param initiator TRUE for initiator mode
+ *
  * @return returns 0 for success, a negative error code value for failure.
  */
 int32_t
-ocs_scsi_ini_driver_exit(void)
+ocs_scsi_ini_driver_exit(int32_t initiator)
 {
 	return 0;
 }
@@ -121,7 +121,6 @@ ocs_scsi_ini_driver_exit(void)
 int32_t
 ocs_scsi_ini_new_device(ocs_t *ocs)
 {
-	ocs_log_info(NULL, "Init driver new ini device called\n");
 	return 0;
 }
 
@@ -169,7 +168,7 @@ int32_t ocs_scsi_ini_new_domain(ocs_domain_t *domain)
 {
 	ocs_assert(domain, -1);
 	ocs_assert(domain->ocs, -1);
-	ocs_log_debug(domain->ocs, "%s()\n", __func__);
+	ocs_log_debug(domain->ocs, "ocs_scsi_ini_new_domain\n");
 	return 0;
 }
 
@@ -228,12 +227,6 @@ void ocs_scsi_ini_del_sport(ocs_sport_t *sport)
 
 int32_t ocs_scsi_new_target(ocs_node_t *node)
 {
-	printf("TEST: ocs_scsi_new_target node:%p\n", node);
-	ocs_log_info(NULL, "Init driver new target node found called\n");
-
-	if (block_ready == TRUE)
-		spdk_fc_ini_di_update_devs_notify(
-			INI_NODE_EVENT_TYPE_NEW_TARGET, node);
 	return 0;
 }
 
@@ -262,14 +255,7 @@ int32_t ocs_scsi_del_target(ocs_node_t *node, ocs_scsi_del_target_reason_e reaso
 {
 	ocs_assert(node, OCS_SCSI_CALL_COMPLETE);
 	ocs_assert(node->ocs, OCS_SCSI_CALL_COMPLETE);
-	ocs_log_debug(node->ocs, "%s()\n", __func__);
-
-	/*
-	 * On link down, notification is sent to block layer. So, do not notify
-	 * for target down.
-	 **/
-	if (node->ocs->hal.link.status != SLI_LINK_STATUS_DOWN)
-		spdk_fc_ini_di_update_devs_notify(INI_NODE_EVENT_TYPE_TARGET_DOWN, node);
+	ocs_log_debug(node->ocs, "ocs_scsi_del_target\n");
 	return OCS_SCSI_CALL_COMPLETE;
 }
 

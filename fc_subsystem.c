@@ -47,7 +47,6 @@
 
 extern uint32_t ocs_spdk_master_core;
 
-extern int spdk_fc_ini_di_shutdown(void);
 extern void spdk_fc_free_all_pools(void);
 struct spdk_fc_globals g_spdk_fc;
 
@@ -187,8 +186,6 @@ spdk_fc_subsystem_fini(void)
 
 	spdk_fc_free_all_pools();
 
-	spdk_fc_ini_di_shutdown();
-	
 	spdk_fc_cf_cleanup_cfg();
 	
 	return 0;
@@ -200,7 +197,3 @@ spdk_fc_config_text(FILE *fp)
 	/* Display running configuration. */
 }
 
-//SPDK_SUBSYSTEM_REGISTER(fc, spdk_fc_subsystem_init, spdk_fc_subsystem_fini,
-//	spdk_fc_config_text)
-//SPDK_SUBSYSTEM_DEPEND(fc, scsi)
-//SPDK_SUBSYSTEM_DEPEND(fc, bdev)

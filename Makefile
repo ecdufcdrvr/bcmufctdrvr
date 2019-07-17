@@ -41,8 +41,6 @@ CFLAGS += $(DPDK_INC) $(DEFINES)
 
 C_SRCS     =  \
 	fc_subsystem.c \
-	spdk_fc_ini_bdev.c \
-	spdk_fc_ini_discovery.c \
 	ocs_spdk.c \
 	ocs_driver.c \
 	ocs_ocsu.c \
@@ -71,7 +69,6 @@ C_SRCS     =  \
 	ocs_hal_queues.c \
 	ocs_hal_rqpair.c \
 	ocs_hal_workaround.c \
-	ocs_tgt_api.c \
 	ocs_spdk_conf.c \
 	task.c \
 	ocs_ini_stub.c \
@@ -85,7 +82,6 @@ C_SRCS     =  \
 	ocs_cbuf.c \
 	ocs_array.c \
 	ocs_pool.c \
-	ocsu_ml_fc.c \
 	ocs_spdk_nvmet.c \
 	spdk_nvmf_xport.c \
 	ocs_tgt_spdk.c 
