@@ -38,6 +38,7 @@
  */
 
 #include "ocs.h"
+#include "ocs_spdk_nvmet.h"
 
 static void ocs_xport_link_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_link_stat_counts_t *counters, void *arg);
 static void ocs_xport_host_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_host_stat_counts_t *counters, void *arg);
@@ -526,11 +527,17 @@ ocs_xport_initialize(ocs_xport_t *xport)
 	if (ocs->enable_tgt) {
 		rc = ocs_scsi_tgt_new_device(ocs);
 		if (rc) {
-			ocs_log_err(ocs, "%s: failed to initialize target\n", __func__);
+			ocs_log_err(ocs, "%s: failed to initialize scsi target\n", __func__);
 			goto ocs_xport_init_cleanup;
-		} else {
-			tgt_device_set = TRUE;
 		}
+
+		rc = ocs_nvme_tgt_new_device(ocs);
+		if (rc) {
+			ocs_log_err(ocs, "%s: failed to initialize nvme target\n", __func__);
+			goto ocs_xport_init_cleanup;
+		}
+
+		tgt_device_set = TRUE;
 	}
 
 	if (ocs->enable_ini) {
@@ -561,6 +568,7 @@ ocs_xport_init_cleanup:
 
 	if (tgt_device_set) {
 		ocs_scsi_tgt_del_device(ocs);
+		ocs_nvme_tgt_del_device(ocs);
 	}
 
 	if (hal_initialized) {
@@ -589,6 +597,7 @@ ocs_xport_detach(ocs_xport_t *xport)
 	/* free resources associated with target-server and initiator-client */
 	if (ocs->enable_tgt) {
 		ocs_scsi_tgt_del_device(ocs);
+		ocs_nvme_tgt_del_device(ocs);
 	}
 	if (ocs->enable_ini) {
 		ocs_scsi_ini_del_device(ocs);

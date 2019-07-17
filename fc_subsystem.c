@@ -36,14 +36,15 @@
 #include "spdk_internal/log.h"
 #include "spdk_internal/event.h"
 #include "spdk/env.h"
-#include "task.h"
-#include "ocsu_scsi_if.h"
 #include "fc.h"
 #include "fc_subsystem.h"
 #include "ocs.h"
-#include "ocs_spdk_conf.h"
 
 #define DEFAULT_TASK_POOL_SIZE 16384
+
+#ifndef SPDK_FC_LARGE_RBUF_MAX_SIZE
+#define SPDK_FC_LARGE_RBUF_MAX_SIZE (64 * 1024)
+#endif
 
 extern uint32_t ocs_spdk_master_core;
 
@@ -74,13 +75,7 @@ spdk_fc_initialize_all_pools(void)
 
 
 	/* create scsi_task pool */
-	fc->task_pool = rte_mempool_create("SCSI_TASK_Pool",
-		DEFAULT_TASK_POOL_SIZE,
-		sizeof(struct spdk_fc_task),
-		128, 0,
-		NULL, NULL, NULL, NULL,
-		SOCKET_ID_ANY, 0);
-	if (!fc->task_pool) {
+	if (ocs_scsi_alloc_task_pool(&fc->task_pool)) {
 		SPDK_ERRLOG("create task pool failed\n");
 		return -1;
 	}

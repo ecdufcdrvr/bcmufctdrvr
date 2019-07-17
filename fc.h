@@ -39,12 +39,6 @@
 #include <sys/uio.h>
 #include <stdbool.h>
 
-#include "spdk/bdev.h"
-#include "spdk/assert.h"
-#include "spdk/scsi.h"
-
-#define SPDK_FC_BUILD_ETC "/usr/local/etc/spdk"
-#define SPDK_FC_DEFAULT_CONFIG SPDK_FC_BUILD_ETC "/fc.conf"
 struct spdk_mobj {
         struct rte_mempool *mp;
         void *buf;
@@ -63,10 +57,13 @@ void ocs_spdk_start_pollers(void);
 int ocsu_init(void);
 extern uint64_t g_flush_timeout;
 void spdk_fc_shutdown(void);
+/*
 void process_task_completion(struct spdk_scsi_task *scsi_task);
 void process_task_mgmt_completion(struct spdk_scsi_task *scsi_task);
+*/
 
 struct spdk_thread *ocs_get_rsvd_thread(void);
+int32_t ocs_scsi_alloc_task_pool(struct rte_mempool **task_pool);
 
 #define BIT_2 (1<<2)
 #endif

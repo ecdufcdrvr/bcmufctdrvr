@@ -748,3 +748,82 @@ err:
 	free(ctx);	
 	return -1;
 }
+
+int32_t
+ocs_nvme_tgt_new_domain(ocs_domain_t *domain)
+{
+	return 0;
+}
+
+void
+ocs_nvme_tgt_del_domain(ocs_domain_t *domain)
+{
+	ocs_t *ocs = domain->ocs;
+
+	if (!ocs->enable_nvme_tgt)
+		return;
+
+	if (ocs_nvme_nport_delete(ocs)) {
+		ocs_log_err(ocs, "Failed to delete nvme port \n");
+	}
+
+	if (ocs_nvme_process_hw_port_offline(ocs)) {
+		ocs_log_err(ocs, "Failed to bring down nvme port offline\n");
+	}
+}
+
+int32_t
+ocs_nvme_tgt_new_device(ocs_t *ocs)
+{
+	int32_t rc = 0;
+
+	/* If nvme capability is enabled, notify backend. */
+	if (ocs->enable_nvme_tgt) {
+		rc = ocs_nvme_hw_port_create(ocs);
+	}
+
+	return rc;
+}
+
+int32_t
+ocs_nvme_tgt_del_device(ocs_t *ocs)
+{
+	/* If nvme capability is enabled, notify backend. */
+	if (ocs->enable_nvme_tgt) {
+		ocs_hw_port_cleanup(ocs);
+	}
+
+	return 0;
+}
+
+int32_t
+ocs_nvme_tgt_new_sport(ocs_sport_t *sport)
+{
+	ocs_t *ocs = sport->ocs;
+	int32_t rc = -1;
+
+	/* currently just the physical sport */
+	if (sport->is_vport) {
+		return rc;
+	}
+
+	if (!ocs->enable_nvme_tgt) {
+		return 0;
+	}
+
+	if (ocs_nvme_process_hw_port_online(sport)) {
+		ocs_log_err(ocs, "Failed to bring up nvme port online\n")
+		goto done;
+	}
+
+	if (ocs_nvme_nport_create(sport)) {
+		ocs_log_err(ocs, "Failed to create nport\n")
+		goto done;
+	}
+
+	/* Success */
+	rc = 0;
+
+done:
+	return rc;
+}

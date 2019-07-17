@@ -41,6 +41,7 @@
 #include "ocs_fabric.h"
 #include "ocs_els.h"
 #include "ocs_device.h"
+#include "ocs_spdk_nvmet.h"
 
 static void ocs_vport_update_spec(ocs_sport_t *sport);
 static void ocs_vport_link_down(ocs_sport_t *sport);
@@ -793,6 +794,7 @@ __ocs_sport_attached(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		}
 		if (ocs->enable_tgt) {
 			ocs_scsi_tgt_new_sport(sport);
+			ocs_nvme_tgt_new_sport(sport);
 		}
 		/* Update the vport (if its not the physical sport) parameters */
 		if (sport->is_vport) {

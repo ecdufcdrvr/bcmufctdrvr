@@ -44,7 +44,6 @@
 #include "ocs_impl.h"
 
 #include "ocs_spdk.h"
-#include "ocs_spdk_conf.h"
 #include "spdk/env.h"
 #include "spdk/string.h"
 #include "spdk/event.h"
@@ -312,7 +311,7 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	uint32_t num_cores = 0;
 	const char *desc = "Unknown adapter";
 	struct spdk_ocs_get_pci_config_t pciconfig;
-	struct spdk_fc_hba_port *hba_port = NULL, *tmp;
+	struct spdk_fc_hba_port *hba_port = NULL;
 
 	num_cores = spdk_env_get_core_count();
 	if (num_cores > OCS_NVME_FC_MAX_IO_QUEUES) {
@@ -366,7 +365,7 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	ocs_dma_init(ocs);
 
 	/* Initialize per ocs queue topology */
-	FIND_NODE_BY_ID(g_spdk_fc_hba_ports, (int)ocs->instance_index, hba_port, tmp);
+	hba_port = ocs_spdk_tgt_find_hba_port(ocs->instance_index);
 	if (hba_port) {
 		ocs->enable_ini = hba_port->initiator;
 		ocs->enable_tgt = hba_port->target;

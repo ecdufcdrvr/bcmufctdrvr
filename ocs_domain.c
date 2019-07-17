@@ -45,6 +45,7 @@
 #include "ocs_fabric.h"
 #include "ocs_device.h"
 #include "spv.h"
+#include "ocs_spdk_nvmet.h"
 
 #define domain_sm_trace(domain)  \
 	do { \
@@ -1116,8 +1117,10 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_DOMAIN_FREE_OK: {
 		if (ocs->enable_ini)
 			ocs_scsi_ini_del_domain(domain);
-		if (ocs->enable_tgt)
+		if (ocs->enable_tgt) {
 			ocs_scsi_tgt_del_domain(domain);
+			ocs_nvme_tgt_del_domain(domain);
+		}
 
 		//sm: / domain_free
 		if (domain->domain_found_pending) {

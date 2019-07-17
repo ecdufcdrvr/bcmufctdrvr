@@ -72,6 +72,23 @@
 
 #define OCS_SCSI_WQ_CLASS_LOW_LATENCY	(1)
 
+#ifndef MAX_WWN_NAME_LEN
+#define MAX_WWN_NAME_LEN        128
+#endif
+
+struct spdk_fc_hba_port {
+	int  id;
+
+	int mrqs;
+	bool initiator;
+	bool target;
+
+	char wwnn[MAX_WWN_NAME_LEN];
+	char wwpn[MAX_WWN_NAME_LEN];
+
+	TAILQ_ENTRY(spdk_fc_hba_port) tailq;
+};
+
 /*!
  * @defgroup scsi_api_base SCSI Base Target/Initiator
  * @defgroup scsi_api_target SCSI Target
@@ -153,6 +170,24 @@ typedef enum {
 	OCS_SCSI_TMF_INCORRECT_LOGICAL_UNIT_NUMBER,
 	OCS_SCSI_TMF_SERVICE_DELIVERY,
 } ocs_scsi_tmf_resp_e;
+
+typedef enum {
+	OCS_SCSI_TARGET_DELETED,
+	OCS_SCSI_TARGET_MISSING,
+} ocs_scsi_del_target_reason_e;
+
+typedef enum {
+	OCS_SCSI_INITIATOR_DELETED,
+	OCS_SCSI_INITIATOR_MISSING,
+} ocs_scsi_del_initiator_reason_e;
+
+typedef enum {
+	OCS_SCSI_DDUMP_DEVICE,
+	OCS_SCSI_DDUMP_DOMAIN,
+	OCS_SCSI_DDUMP_SPORT,
+	OCS_SCSI_DDUMP_NODE,
+	OCS_SCSI_DDUMP_IO,
+} ocs_scsi_ddump_type_e;
 
 /**
  * @brief property names for ocs_scsi_get_property() functions
@@ -277,10 +312,6 @@ extern int32_t ocs_scsi_tgt_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_tgt_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_validate_initiator(ocs_node_t *node);
 extern int32_t ocs_scsi_new_initiator(ocs_node_t *node);
-typedef enum {
-	OCS_SCSI_INITIATOR_DELETED,
-	OCS_SCSI_INITIATOR_MISSING,
-} ocs_scsi_del_initiator_reason_e;
 extern int32_t ocs_scsi_del_initiator(ocs_node_t *node, ocs_scsi_del_initiator_reason_e reason);
 extern int32_t ocs_scsi_recv_cmd(ocs_io_t *io, uint32_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags);
 extern int32_t ocs_scsi_recv_cmd_first_burst(ocs_io_t *io, uint32_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags,
@@ -289,7 +320,9 @@ extern int32_t ocs_scsi_recv_tmf(ocs_io_t *tmfio, uint64_t lun, ocs_scsi_tmf_cmd
 	uint32_t flags);
 extern ocs_sport_t *ocs_sport_get_instance(ocs_domain_t *domain, uint32_t index);
 extern ocs_domain_t *ocs_domain_get_instance(ocs_t *ocs, uint32_t index);
+extern struct spdk_fc_hba_port *ocs_spdk_tgt_find_hba_port(int instance);
 
+void spdk_fc_cf_cleanup_cfg(void);
 
 /* Calls from target-server to base driver */
 
@@ -328,10 +361,6 @@ extern int32_t ocs_scsi_ini_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_ini_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_new_target(ocs_node_t *node);
 
-typedef enum {
-	OCS_SCSI_TARGET_DELETED,
-	OCS_SCSI_TARGET_MISSING,
-} ocs_scsi_del_target_reason_e;
 extern int32_t ocs_scsi_del_target(ocs_node_t *node, ocs_scsi_del_target_reason_e reason);
 
 /* Calls from the initiator-client to the base driver */
@@ -350,14 +379,6 @@ extern int32_t ocs_scsi_send_tmf(ocs_node_t *node, ocs_io_t *io, ocs_io_t *io_to
 	ocs_scsi_tmf_cmd_e tmf, ocs_scsi_sgl_t *sgl, uint32_t sgl_count, uint32_t len, ocs_scsi_rsp_io_cb_t cb, void *arg);
 extern int32_t ocs_scsi_send_nodata_io(ocs_node_t *node, ocs_io_t *io, uint64_t lun, void *cdb, uint32_t cdb_len, ocs_scsi_rsp_io_cb_t cb, void *arg);
 extern void ocs_scsi_del_target_complete(ocs_node_t *node);
-
-typedef enum {
-	OCS_SCSI_DDUMP_DEVICE,
-	OCS_SCSI_DDUMP_DOMAIN,
-	OCS_SCSI_DDUMP_SPORT,
-	OCS_SCSI_DDUMP_NODE,
-	OCS_SCSI_DDUMP_IO,
-} ocs_scsi_ddump_type_e;
 
 /* base driver to target/initiator */
 

@@ -53,5 +53,12 @@ int ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id);
 int ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id);
 int ocs_nvme_node_lost(ocs_node_t *node);
 int ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi);
+void ocs_nvme_tgt_del_domain(ocs_domain_t *domain);
+
+int32_t ocs_nvme_tgt_new_sport(ocs_sport_t *sport);
+int32_t ocs_nvme_tgt_del_device(ocs_t *ocs);
+int32_t ocs_nvme_tgt_new_device(ocs_t *ocs);
+void ocs_nvme_tgt_del_domain(ocs_domain_t *domain);
+int32_t ocs_nvme_tgt_new_domain(ocs_domain_t *domain);
 
 #endif //__OCS_SPDK_NVMET_H__

@@ -69,8 +69,6 @@ C_SRCS     =  \
 	ocs_hal_queues.c \
 	ocs_hal_rqpair.c \
 	ocs_hal_workaround.c \
-	ocs_spdk_conf.c \
-	task.c \
 	ocs_ini_stub.c \
 	ocs_textbuf.c \
 	ocs_dif.c \
@@ -84,7 +82,7 @@ C_SRCS     =  \
 	ocs_pool.c \
 	ocs_spdk_nvmet.c \
 	spdk_nvmf_xport.c \
-	ocs_tgt_spdk.c 
+	ocs_tgt_stub.c
 
 LIBNAME = fc
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

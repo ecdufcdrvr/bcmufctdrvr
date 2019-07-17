@@ -40,7 +40,6 @@
 #define __OCS_SCSI_TGT_H__
 
 #include "ocs_scsi.h"
-#include "spdk/scsi.h"
 
 #define OCS_SPDK_BUILD_NODE_NAME \
 	do { \
