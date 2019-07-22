@@ -115,7 +115,7 @@ void ocs_pci_set_bus_master(struct spdk_ocs_t *ocs, bool enable)
 	ocs_pcicfg_read32(ocs->pdev, &pci_reg, 0x4);
 
 	if (enable) {
-		pci_reg |= BIT_2; 
+		pci_reg |= BIT_2;
 	} else {
 		pci_reg &= ~BIT_2;
 	}
@@ -151,7 +151,7 @@ spdk_ocs_attach(void *device)
 	if (ocs_map_pci_bar(ocs) != 0) {
 		goto error2;
 	}
-	
+
 	ocs_pcicfg_read32(ocs->pdev, &sli_intf, 0x58);
 	ocs->if_type = (sli_intf >> 12) & 0xf;
 
@@ -200,7 +200,7 @@ static int
 ocs_enum_cb(void *ctx, struct spdk_pci_device *pci_dev)
 {
 	struct ocs_enum_ctx *enum_ctx = ctx;
-	struct spdk_ocs_t 	     *ocs      = NULL;	
+	struct spdk_ocs_t 	     *ocs      = NULL;
 
 	/* Verify that this device is not already attached */
 	TAILQ_FOREACH(ocs, &g_ocs_driver.attached_chans, tailq) {
@@ -297,27 +297,3 @@ int spdk_ocs_get_pci_config(struct spdk_pci_device *dev, struct spdk_ocs_get_pci
 
 	return 0;
 }
-
-static void
-spdk_ocs_subsystem_init(void)
-{
-	extern struct spdk_nvmf_fc_ll_drvr_ops g_ocs_spdk_nvmf_fc_lld_ops;
-
-	spdk_nvmf_fc_register_lld_ops(&g_ocs_spdk_nvmf_fc_lld_ops);
-
-	spdk_subsystem_init_next(0);
-}
-
-static void
-spdk_ocs_subsystem_fini(void)
-{
-	spdk_subsystem_fini_next();
-}
-
-static struct spdk_subsystem g_spdk_subsystem_bcm_fc_lld = {
-	.name = "bcm fc",
-	.init = spdk_ocs_subsystem_init,
-	.fini = spdk_ocs_subsystem_fini,
-};
-
-SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_bcm_fc_lld)
