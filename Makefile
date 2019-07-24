@@ -49,7 +49,7 @@ CFLAGS += -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu9
 CFLAGS += -Wno-varargs
 CFLAGS += -D_GNU_SOURCE -DOCS_USPACE_SPDK -DOCS_NVME_FC
 
-CFLAGS += -I$(DPDK_DIR)/include -I$(SPDK_DIR)/include -I$(SPDK_DIR)/lib/env_dpdk -I$(SPDK_DIR)/lib/nvmf
+CFLAGS += -I$(CURDIR)/include -I$(DPDK_DIR)/include -I$(SPDK_DIR)/include -I$(SPDK_DIR)/lib/env_dpdk -I$(SPDK_DIR)/lib/nvmf
 
 C_SRCS  =  \
 	src/fc_subsystem.c \
@@ -102,9 +102,9 @@ DEPFLAGS = -MMD -MP -MF $*.d.tmp
 
 OBJS = $(C_SRCS:.c=.o)
 
-.PHONY: all clean
+.PHONY: all clean include
 
-all: $(CONFIG_PREFIX) $(LIB)
+all: $(CONFIG_PREFIX) $(LIB) include
 	@:
 
 clean:
@@ -124,6 +124,9 @@ $(LIB): $(OBJS)
 	mv -f $*.d.tmp $*.d && touch -c $@
 
 %.d: ;
+
+include:
+	cp include/* $(CONFIG_PREFIX)
 
 .PRECIOUS: $(OBJS)
 

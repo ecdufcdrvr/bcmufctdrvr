@@ -31,6 +31,8 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "bcm_fc_lld.h"
+
 #include "spdk/env.h"
 #include "spdk/assert.h"
 #include "spdk/nvmf.h"
@@ -1302,7 +1304,7 @@ spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count)
 	return xri_list;
 }
 
-static void 
+static void
 nvmf_fc_xri_list_cleanup(void)
 {
 	struct fc_xri_list *xri_list, *tmp;
@@ -1931,7 +1933,7 @@ nvmf_fc_rqpair_buffer_post(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t idx, bool no
 	return rc;
 }
 
-static void
+void
 nvmf_fc_rqpair_buffer_release(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t buff_idx)
 {
 	/* Decrement used */
@@ -1948,32 +1950,32 @@ nvmf_fc_rqpair_buffer_release(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t buff_idx)
 	nvmf_fc_rqpair_buffer_post(hwqp, buff_idx, true);
 }
 
-static int
-nvmf_fc_lld_init(void) 
+int
+nvmf_fc_lld_init(void)
 {
 	return spdk_fc_subsystem_init();
 }
 
-static void 
-nvmf_fc_lld_fini(void) 
+void
+nvmf_fc_lld_fini(void)
 {
 	spdk_fc_subsystem_fini();
 	nvmf_fc_xri_list_cleanup();
 }
 
-static void
+void
 nvmf_fc_lld_start(void)
 {
 	ocs_spdk_start_pollers();
 }
 
-static int
+int
 nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	return nvmf_fc_create_reqtag_pool(hwqp);
 }
 
-static void
+void
 nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
 {
 	struct fc_wrkq *wq_prev, *wq_curr;
@@ -2010,7 +2012,7 @@ nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
 	}
 }
 
-static int
+int
 nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	int rc = 0;
@@ -2066,7 +2068,7 @@ nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp)
 	return rc;
 }
 
-static int
+int
 nvmf_fc_set_q_online_state(struct spdk_nvmf_fc_hwqp *hwqp, bool online)
 {
 	BCM_HWQP(hwqp)->free_rq_slots = BCM_HWQP(hwqp)->rq_payload.num_buffers;
@@ -2090,7 +2092,7 @@ nvmf_fc_abort_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	free(carg);
 }
 
-static int
+int
 nvmf_fc_issue_abort(struct spdk_nvmf_fc_hwqp *hwqp,
 		    struct spdk_nvmf_fc_xchg *xri,
 		    spdk_nvmf_fc_caller_cb cb, void *cb_args)
@@ -2136,7 +2138,7 @@ done:
 	return rc;
 }
 
-static struct spdk_nvmf_fc_xchg *
+struct spdk_nvmf_fc_xchg *
 nvmf_fc_get_xri(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	struct spdk_nvmf_fc_xchg *xri[1];
@@ -2463,7 +2465,7 @@ nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 	return offset;
 }
 
-static int
+int
 nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 {
 	int rc = 0;
@@ -2540,12 +2542,12 @@ nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 	bcm_fc_async_rcqe_marker_t *marker = (void *)cqe;
 	struct spdk_nvmf_fc_poller_api_queue_sync_done_args *poller_args;
 
-	poller_args = calloc(1, sizeof(struct spdk_nvmf_fc_poller_api_queue_sync_done_args)); 
+	poller_args = calloc(1, sizeof(struct spdk_nvmf_fc_poller_api_queue_sync_done_args));
 	if (poller_args) {
 		poller_args->hwqp = hwqp;
 		poller_args->tag = (uint64_t)marker->tag_higher << 32 | marker->tag_lower;
 		poller_args->cb_info.cb_thread = spdk_get_thread();
-		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Process Marker compl for tag = %lx\n", 
+		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Process Marker compl for tag = %lx\n",
 			      poller_args->tag);
 		spdk_nvmf_fc_poller_api_func(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,
 					     poller_args);
@@ -2707,7 +2709,7 @@ nvmf_fc_process_cq_entry(struct spdk_nvmf_fc_hwqp *hwqp, struct fc_eventq *cq)
 	return rc;
 }
 
-static uint32_t
+uint32_t
 nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	int rc = 0, budget = 0;
@@ -2781,7 +2783,7 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 	return (n_processed + n_processed_total);
 }
 
-static int
+int
 nvmf_fc_xmt_ls_rsp(struct spdk_nvmf_fc_nport *tgtport,
 			    struct spdk_nvmf_fc_ls_rqst *ls_rqst)
 {
@@ -2836,7 +2838,7 @@ nvmf_fc_xmt_ls_rsp(struct spdk_nvmf_fc_nport *tgtport,
 	return rc;
 }
 
-static int
+int
 nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 {
 	int rc = 0;
@@ -2982,7 +2984,7 @@ nvmf_fc_send_frame(struct spdk_nvmf_fc_hwqp *hwqp,
 		sf->bde.u.imm.offset = 64;
 		memcpy(&sf->inline_rsp, payload, plen);
 	}
-	
+
 	sf->xri_tag	 = BCM_HWQP(hwqp)->send_frame_xri;
 	sf->command	 = BCM_WQE_SEND_FRAME;
 	sf->sof		 = 0x2e; /* SOFI3 */
@@ -3040,7 +3042,7 @@ nvmf_fc_sendframe_rsp(struct spdk_nvmf_fc_request *fc_req,
 	return rc;
 }
 
-static int
+int
 nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t ersp_len)
 {
 	int rc = 0;
@@ -3085,7 +3087,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 	return rc;
 }
 
-static int
+int
 nvmf_fc_xmt_bls_rsp(struct spdk_nvmf_fc_hwqp *hwqp,
 			     uint16_t ox_id, uint16_t rx_id,
 			     uint16_t rpi, bool rjt, uint8_t rjt_exp,
@@ -3146,20 +3148,20 @@ done:
 	return rc;
 }
 
-static struct spdk_nvmf_fc_srsr_bufs*
+struct spdk_nvmf_fc_srsr_bufs*
 nvmf_fc_alloc_srsr_bufs(size_t rqst_len, size_t rsp_len)
 {
 	static uint32_t mz_ind = 0;
 	struct nvmf_fc_srsr_bufs *lld_srsr_bufs;
-	struct spdk_nvmf_fc_srsr_bufs *ret_bufs; 
+	struct spdk_nvmf_fc_srsr_bufs *ret_bufs;
 
 	/* allocate the larger internal structure used to manage srsr buffers */
-	lld_srsr_bufs = calloc(1, sizeof(struct nvmf_fc_srsr_bufs)); 
+	lld_srsr_bufs = calloc(1, sizeof(struct nvmf_fc_srsr_bufs));
 
 	if (!lld_srsr_bufs) {
 		SPDK_ERRLOG("No memory to alloc send disconnect buffer struct\n");
 		return NULL;
-	} 
+	}
 
 	ret_bufs = &lld_srsr_bufs->srsr_bufs;
 	ret_bufs->rqst_len = rqst_len;
@@ -3185,11 +3187,11 @@ nvmf_fc_alloc_srsr_bufs(size_t rqst_len, size_t rsp_len)
 	return ret_bufs;
 }
 
-static void
+void
 nvmf_fc_free_srsr_bufs(struct spdk_nvmf_fc_srsr_bufs *srsr_bufs)
 {
 	if (srsr_bufs) {
-		struct nvmf_fc_srsr_bufs *b; 
+		struct nvmf_fc_srsr_bufs *b;
 		b = SPDK_CONTAINEROF(srsr_bufs, struct nvmf_fc_srsr_bufs, srsr_bufs);
 		if (b) {
 			spdk_memzone_free(b->mz_name);
@@ -3198,7 +3200,7 @@ nvmf_fc_free_srsr_bufs(struct spdk_nvmf_fc_srsr_bufs *srsr_bufs)
 	}
 }
 
-static int
+int
 nvmf_fc_xmt_srsr_req(struct spdk_nvmf_fc_hwqp *hwqp,
 		     struct spdk_nvmf_fc_srsr_bufs *xmt_srsr_bufs,
 		     spdk_nvmf_fc_caller_cb cb, void *cb_args)
@@ -3291,12 +3293,12 @@ done:
 	return rc;
 }
 
-static bool
+bool
 nvmf_fc_q_sync_available(void) {
 	return true;
 }
 
-static int
+int
 nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t skip_rq)
 {
 	uint8_t wqe[128] = { 0 };
@@ -3328,7 +3330,7 @@ nvmf_fc_gen_conn_id(uint32_t qnum, struct spdk_nvmf_fc_hwqp *hwqp)
 	return ((hwqp->fc_port->num_io_queues * hwq->cid_cnt) + qnum);
 }
 
-static bool
+bool
 nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp *hwqp,
 			    uint64_t *conn_id, uint32_t sq_size)
 {
@@ -3353,17 +3355,17 @@ nvmf_fc_assign_conn_to_hwqp(struct spdk_nvmf_fc_hwqp *hwqp,
 	return true;
 }
 
-static struct spdk_nvmf_fc_hwqp *
-nvmf_fc_get_hwqp_from_conn_id(struct spdk_nvmf_fc_hwqp *queues, 
+struct spdk_nvmf_fc_hwqp *
+nvmf_fc_get_hwqp_from_conn_id(struct spdk_nvmf_fc_hwqp *queues,
 			      uint32_t num_queues, uint64_t conn_id)
 {
 	return &queues[conn_id % num_queues];
 }
 
-static void
+void
 nvmf_fc_release_conn(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t conn_id,
 		     uint32_t sq_size)
-{ 
+{
 	hwqp->num_conns--;
 	BCM_HWQP(hwqp)->free_rq_slots += sq_size;
 }
@@ -3529,7 +3531,7 @@ nvmf_fc_dump_hwqp(struct spdk_nvmf_fc_queue_dump_info *dump_info,
 /*
  * Dump the hwqps.
  */
-static void
+void
 nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 			struct spdk_nvmf_fc_hwqp *io_queues,
 			uint32_t num_io_queues,
@@ -3553,7 +3555,7 @@ nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 	}
 }
 
-static void
+void
 nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg_info *info)
 {
 	struct bcm_nvmf_hw_queues *hwq = BCM_HWQP(hwqp);
@@ -3563,7 +3565,7 @@ nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg_in
 	info->xchg_avail_count = spdk_ring_count(hwq->xri_list->xri_ring);
 }
 
-static int
+int
 nvmf_fc_put_xchg(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 {
 	/* If exchange is busy, first cleanup the xri with hardware. */
@@ -3577,41 +3579,10 @@ nvmf_fc_put_xchg(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 	return 0;
 }
 
-static struct spdk_thread*
+struct spdk_thread*
 nvmf_fc_get_rsvd_thread(void)
 {
 	return ocs_get_rsvd_thread();
 }
-
-struct spdk_nvmf_fc_ll_drvr_ops g_ocs_spdk_nvmf_fc_lld_ops = {
-	.lld_init = nvmf_fc_lld_init,
-	.lld_fini = nvmf_fc_lld_fini,
-	.lld_start = nvmf_fc_lld_start,
-	.init_q = nvmf_fc_init_q,
-	.reinit_q = nvmf_fc_reinit_q,
-	.init_q_buffers = nvmf_fc_init_rqpair_buffers,
-	.set_q_online_state = nvmf_fc_set_q_online_state,
-	.get_xchg = nvmf_fc_get_xri,
-	.put_xchg = nvmf_fc_put_xchg,
-	.poll_queue = nvmf_fc_process_queue,
-	.recv_data = nvmf_fc_recv_data,
-	.send_data = nvmf_fc_send_data,
-	.q_buffer_release = nvmf_fc_rqpair_buffer_release,
-	.xmt_rsp = nvmf_fc_xmt_rsp,
-	.xmt_ls_rsp = nvmf_fc_xmt_ls_rsp,
-	.issue_abort = nvmf_fc_issue_abort,
-	.xmt_bls_rsp = nvmf_fc_xmt_bls_rsp,
-	.alloc_srsr_bufs = nvmf_fc_alloc_srsr_bufs,
-	.free_srsr_bufs = nvmf_fc_free_srsr_bufs,
-	.xmt_srsr_req = nvmf_fc_xmt_srsr_req,
-	.q_sync_available = nvmf_fc_q_sync_available,
-	.issue_q_sync = nvmf_fc_issue_q_sync,
-	.assign_conn_to_hwqp = nvmf_fc_assign_conn_to_hwqp,
-	.get_hwqp_from_conn_id = nvmf_fc_get_hwqp_from_conn_id,
-	.release_conn = nvmf_fc_release_conn,
-	.dump_all_queues = nvmf_fc_dump_all_queues,
-	.get_xchg_info = nvmf_fc_get_xri_info,
-	.get_rsvd_thread = nvmf_fc_get_rsvd_thread,
-};
 
 SPDK_LOG_REGISTER_COMPONENT("nvmf_fc_lld", SPDK_LOG_NVMF_FC_LLD)
