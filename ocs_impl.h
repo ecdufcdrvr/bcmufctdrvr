@@ -47,7 +47,7 @@
 
 #include "spdk/env.h"
 #include "ocs_pci.h"
-#include "../../lib/env_dpdk/env_internal.h"
+#include "env_internal.h"
 
 /**
  * \file

@@ -2,6 +2,8 @@
 #  BSD LICENSE
 #
 #  Copyright (c) 2018 Broadcom.  All Rights Reserved.
+#  Copyright (c) Intel Corporation. All Rights Reserved.
+#
 #  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -31,15 +33,25 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-SPDK_ROOT_DIR := $(abspath $(CURDIR)/..)
-include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
+ifneq ($(V),1)
+Q ?= @
+endif
+S ?= $(notdir $(CURDIR))
 
-DEFINES         = -DOCS_USPACE_SPDK -DOCS_NVME_FC
+CONFIG_PREFIX=$(CURDIR)/build/
+CONFIG_DEBUG=n
 
-CFLAGS += $(ENV_CFLAGS) -I$(SPDK_ROOT_DIR)/lib/scsi -I$(SPDK_ROOT_DIR)/lib/nvmf
-CFLAGS += $(DPDK_INC) $(DEFINES)
+CFLAGS += -g -Wall -Werror -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations
+CFLAGS += -march=native -fPIC -fstack-protector -fno-common
+CFLAGS += -Wformat -Wformat-security
+CFLAGS += -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu99
+# Disable clang warning: passing an object that undergoes default argument promotion to 'va_start' has undefined behavior [-Wvarargs]
+CFLAGS += -Wno-varargs
+CFLAGS += -D_GNU_SOURCE -DOCS_USPACE_SPDK -DOCS_NVME_FC
 
-C_SRCS     =  \
+CFLAGS += -I$(DPDK_DIR)/include -I$(SPDK_DIR)/include -I$(SPDK_DIR)/lib/env_dpdk -I$(SPDK_DIR)/lib/nvmf
+
+C_SRCS  =  \
 	fc_subsystem.c \
 	ocs_spdk.c \
 	ocs_driver.c \
@@ -84,8 +96,36 @@ C_SRCS     =  \
 	spdk_nvmf_xport.c \
 	ocs_tgt_stub.c
 
-LIBNAME = fc
-include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk
+LIB := $(CONFIG_PREFIX)libufc.a
 
-# Disable clang warning: passing an object that undergoes default argument promotion to 'va_start' has undefined behavior [-Wvarargs]
-CFLAGS += -Wno-varargs
+DEPFLAGS = -MMD -MP -MF $*.d.tmp
+
+OBJS = $(C_SRCS:.c=.o)
+
+.PHONY: all clean
+
+all: $(CONFIG_PREFIX) $(LIB)
+	@:
+
+clean:
+	$(Q)rm -rf *.a *.o *.d *.d.tmp *.gcno *.gcda $(LIB) $(CONFIG_PREFIX)
+
+$(CONFIG_PREFIX):
+	mkdir -p $(CONFIG_PREFIX)
+
+$(LIB): $(OBJS)
+	$(Q)echo "  LIB $(notdir $@)"; \
+	rm -f $@; \
+	ar crDs $@ $(OBJS)
+
+%.o: %.c %.d $(MAKEFILE_LIST)
+	$(Q)echo "  CC $S/$@"; \
+	cc -o $@ $(DEPFLAGS) $(CFLAGS) -c $< && \
+	mv -f $*.d.tmp $*.d && touch -c $@
+
+%.d: ;
+
+.PRECIOUS: $(OBJS)
+
+-include $(OBJS:.o=.d)
+
