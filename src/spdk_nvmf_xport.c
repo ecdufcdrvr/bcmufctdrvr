@@ -31,7 +31,7 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "bcm_fc_lld.h"
+#include "fc_lld.h"
 
 #include "spdk/env.h"
 #include "spdk/assert.h"
