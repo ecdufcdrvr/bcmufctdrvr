@@ -2751,8 +2751,15 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 				 * There might be some buffers/xri freed.
 				 * First give chance for pending frames
 				 */
-				spdk_nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
-				spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
+				/* TODO: This is temp workaround to resolve older patches which
+				 * do not have fc transport fix to run through CI. This should be
+				 * removed once the flow of resubmission older patches slows down.
+				 */
+				if (hwqp->fgroup) {
+					spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
+				} else {
+					spdk_nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
+				}
 			} else if (cq_id == BCM_HWQP(hwqp)->cq_rq.q.qid) {
 				nvmf_fc_process_cq_entry(hwqp, &BCM_HWQP(hwqp)->cq_rq);
 			} else {
