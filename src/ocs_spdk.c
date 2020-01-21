@@ -76,7 +76,7 @@ ocs_map_pci_bar(struct spdk_ocs_t *ocs)
 		rc = spdk_pci_device_map_bar(ocs->pdev, bar, &addr, &phys_addr, &size);
 		if (rc) {
 			printf("Failed to map bar: %d\n", bar);
-			return rc;
+			rc = 0;
 		}
 
 		if (size) {
