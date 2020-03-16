@@ -47,7 +47,7 @@
 #include "spdk/env.h"
 #include "spdk/string.h"
 #include "spdk/event.h"
-#include "spdk/io_channel.h"
+#include "spdk/thread.h"
 #include "fc.h"
 
 #include "spdk_nvmf_xport.h"

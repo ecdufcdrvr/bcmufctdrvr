@@ -42,7 +42,7 @@
 #include "ocs_impl.h"
 #include "spdk/env.h"
 #include "spdk/event.h"
-#include "spdk/io_channel.h"
+#include "spdk/thread.h"
 
 /* @brief Select DMA buffer allocation method
  */
