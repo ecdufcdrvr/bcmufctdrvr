@@ -122,7 +122,7 @@ static struct spdk_pci_driver ocs_rte_driver = {
 	.driver = {
 		.drv_flags = RTE_PCI_DRV_NEED_MAPPING,
 		.id_table  = ocs_driver_id,
-		.probe     = spdk_pci_device_init,
+		.probe     = pci_device_init,
 		.driver.name = "ocs_driver",
 	},
 	.cb_fn = NULL,
