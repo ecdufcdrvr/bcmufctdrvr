@@ -38,6 +38,7 @@
 #include "spdk/nvmf.h"
 #include "spdk/endian.h"
 #include "spdk/nvmf_spec.h"
+#include "spdk/dif.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
 #include "spdk/event.h"
@@ -263,6 +264,7 @@
 
 #define BCM_SGE_TYPE_DATA		0x00
 #define BCM_SGE_TYPE_SKIP		0x0c
+#define BCM_SGE_TYPE_DISEED		0x08
 
 #define BCM_ABORT_CRITERIA_XRI_TAG      0x01
 
@@ -304,6 +306,47 @@ typedef struct bcm_sge {
 			last: 1;
 	uint32_t	buffer_length;
 } bcm_sge_t;
+
+typedef enum  {
+	BCM_DISEED_OP_IN_CRC_OUT_CRC = 0x4,
+	BCM_DISEED_OP_IN_CHKSUM_OUT_CHKSUM = 0x5,
+	BCM_DISEED_OP_IN_CRC_OUT_NEW_CRC = 0x9
+} bcm_diseed_opcode_e;
+
+typedef enum  {
+	BCM_DISEED_BLOCK_SIZE_512B = 0,
+	BCM_DISEED_BLOCK_SIZE_1024B,
+	BCM_DISEED_BLOCK_SIZE_2048B,
+	BCM_DISEED_BLOCK_SIZE_4096B,
+	BCM_DISEED_BLOCK_SIZE_520B,
+	BCM_DISEED_BLOCK_SIZE_4104B,
+} bcm_diseed_block_size_e;
+
+typedef struct bcm_diseed_sge {
+	uint32_t	ref_tag_compare;
+	uint32_t	replace_ref_tag;
+	uint32_t	replace_app_tag: 16,/* Bit 0:15 */
+			: 1,					/* Bit 16 */
+			app_tag_mask: 1,		/* Bit 17 */
+			host_seed: 1,			/* Bit 18 */
+			wire_seed: 1,			/* Bit 19 */
+			invert_crc: 1,			/* Bit 20 */
+			invert_crc_seed: 1,		/* Bit 21 */
+			rsvd_22_24: 3,			/* Bit 22:24 */
+			new_app_tag: 1,			/* Bit 25 */
+			head_insert: 1,			/* Bit 26 */
+			sge_type: 4,			/* Bit 27:30 */
+			last: 1;				/* Bit 31 */
+	uint32_t app_tag: 16,			/* Bit 0:15 */
+			block_size: 3,			/* Bit 16:18 */
+			auto_inc_ref_tag: 1,	/* Bit 19 */
+			check_app_tag: 1,		/* Bit 20 */
+			check_ref_tag: 1,		/* Bit 21 */
+			check_crc: 1,			/* Bit 22 */
+			new_ref_tag: 1,			/* Bit 23 */
+			rx_opcode: 4,			/* Bit 24:27 */
+			tx_opcode: 4;			/* Bit 28:31 */
+} bcm_diseed_sge_t;
 
 #define BCM_SGE_SIZE sizeof(struct bcm_sge)
 
@@ -2384,6 +2427,52 @@ nvmf_fc_process_wqe_release(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t wqid)
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "WQE RELEASE\n");
 }
 
+static void
+nvmf_fc_setup_diseed(struct spdk_nvmf_fc_request *fc_req, bcm_diseed_sge_t *diseed_sge)
+{
+	uint32_t block_data_size;
+
+	block_data_size = fc_req->req.dif.dif_ctx.block_size -
+			  fc_req->req.dif.dif_ctx.md_size;
+	switch (block_data_size) {
+	case 512:
+		diseed_sge->block_size = BCM_DISEED_BLOCK_SIZE_512B;
+		break;
+	case 1024:
+		diseed_sge->block_size = BCM_DISEED_BLOCK_SIZE_1024B;
+		break;
+	case 2048:
+		diseed_sge->block_size = BCM_DISEED_BLOCK_SIZE_2048B;
+		break;
+	case 4096:
+		diseed_sge->block_size = BCM_DISEED_BLOCK_SIZE_4096B;
+		break;
+	default:
+		;
+	}
+
+	switch (fc_req->req.dif.dif_ctx.dif_type) {
+	case SPDK_DIF_TYPE1:
+	case SPDK_DIF_TYPE2:
+		diseed_sge->auto_inc_ref_tag = 1;
+		diseed_sge->check_ref_tag = 1;
+		diseed_sge->ref_tag_compare = fc_req->req.dif.dif_ctx.init_ref_tag;
+		break;
+	case SPDK_DIF_TYPE3:
+	case SPDK_DIF_DISABLE:
+	default:
+		diseed_sge->auto_inc_ref_tag = 0;
+	}
+
+	diseed_sge->check_crc = 1;
+
+	diseed_sge->rx_opcode = BCM_DISEED_OP_IN_CRC_OUT_CRC;
+	diseed_sge->tx_opcode = BCM_DISEED_OP_IN_CRC_OUT_CRC;
+
+	diseed_sge->sge_type = BCM_SGE_TYPE_DISEED;
+
+}
+
 static uint32_t
 nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 {
@@ -2442,6 +2531,12 @@ nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 	sge->sge_type = BCM_SGE_TYPE_SKIP;
 	sge++;
 
+	if (fc_req->req.dif.dif_ctx.dif_type != SPDK_DIF_DISABLE) {
+		/* PI is enabled, insert DISEED SGE */
+		nvmf_fc_setup_diseed(fc_req, (bcm_diseed_sge_t *)sge);
+		sge++;
+	}
+
 	for (i = 0; i < fc_req->req.iovcnt; i++) {
 		size_t mapped_size = fc_req->req.iov[i].iov_len;
 
@@ -2478,7 +2573,8 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	}
 
 	trecv->xbl = true;
-	if (fc_req->req.iovcnt == 1) {
+	if (fc_req->req.iovcnt == 1 &&
+	    fc_req->req.dif.dif_ctx.dif_type == SPDK_DIF_DISABLE) {
 		/* Data is a single physical address, use a BDE */
 		uint64_t bde_phys;
 		size_t phys_map_size;
@@ -2855,13 +2951,23 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	struct spdk_nvmf_fc_hwqp *hwqp = fc_req->hwqp;
 	struct spdk_nvmf_qpair *qpair = fc_req->req.qpair;
 	struct spdk_nvmf_fc_conn *fc_conn = spdk_nvmf_fc_get_conn(qpair);
+	bool dif_enabled;
 
 	if (!fc_req->req.iovcnt) {
 		return -1;
 	}
 
+	dif_enabled = spdk_nvmf_request_get_dif_ctx(&fc_req->req, &fc_req->req.dif.dif_ctx);
+	if (dif_enabled) {
+		rc = spdk_dif_generate_stream(fc_req->req.iov, fc_req->req.iovcnt,
+                                      0, fc_req->req.length, &fc_req->req.dif.dif_ctx);
+		if (rc != 0) {
+			SPDK_ERRLOG("DIF generate failed, rc = %#x, %d\n", rc, rc);
+		}
+	}
+
 	tsend->xbl = true;
-	if (fc_req->req.iovcnt == 1) {
+	if (fc_req->req.iovcnt == 1 && dif_enabled == false) {
 		/* Data is a single physical address, use a BDE */
 		uint64_t bde_phys;
 		size_t phys_map_size;
@@ -2898,6 +3004,9 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	tsend->xri_tag = fc_req->xchg->xchg_id;
 	tsend->rpi = fc_req->rpi;
 	tsend->pu = true;
+	if (dif_enabled) {
+		tsend->dif = 0x01;
+	}
 
 	if (!spdk_nvmf_fc_send_ersp_required(fc_req, (fc_conn->rsp_count + 1),
 					xfer_len)) {
