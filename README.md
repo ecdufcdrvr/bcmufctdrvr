@@ -11,6 +11,8 @@ git clone https://github.com/spdk/spdk spdk
 git clone https://github.com/ecdufcdrvr/bcmufctdrvr fc
 cd spdk
 git submodule update --init
+./configure --without-fc
+make
 cd ../fc
 make DPDK_DIR=../spdk/dpdk/build SPDK_DIR=../spdk
 cd ../spdk
