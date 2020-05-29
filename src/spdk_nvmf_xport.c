@@ -2187,7 +2187,7 @@ static void
 nvmf_fc_cleanup_xri(struct spdk_nvmf_fc_hwqp *hwqp,
 		    struct spdk_nvmf_fc_xchg *xri, bool hw_xri_busy, bool abts)
 {
-	if (hw_xri_busy && !spdk_nvmf_fc_is_port_dead(hwqp)) {
+	if (hw_xri_busy && !nvmf_fc_is_port_dead(hwqp)) {
 		if (xri->active) {
 			/* Driver state of xri is also active, so send abort */
 			nvmf_fc_issue_abort(hwqp, xri, NULL, NULL);
@@ -2313,7 +2313,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	if (fc_req->state == SPDK_NVMF_FC_REQ_WRITE_XFER) {
 		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
 
-		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_WRITE_BDEV);
+		nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_WRITE_BDEV);
 
 		spdk_nvmf_request_exec(&fc_req->req);
 
@@ -2324,15 +2324,15 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
 
-		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
-		if (spdk_nvmf_fc_handle_rsp(fc_req)) {
+		nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
+		if (nvmf_fc_handle_rsp(fc_req)) {
 			goto io_done;
 		}
 		return;
 	}
 
 	/* IO completed successfully */
-	spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_SUCCESS);
+	nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_SUCCESS);
 
 io_done:
 	if (fc_req->xchg) {
@@ -2343,9 +2343,9 @@ io_done:
 	}
 
 	if (fc_req->is_aborted) {
-		spdk_nvmf_fc_request_abort_complete(fc_req);
+		nvmf_fc_request_abort_complete(fc_req);
 	} else {
-		spdk_nvmf_fc_request_free(fc_req);
+		_nvmf_fc_request_free(fc_req);
 	}
 }
 
@@ -2549,7 +2549,7 @@ nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 		poller_args->cb_info.cb_thread = spdk_get_thread();
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "Process Marker compl for tag = %lx\n",
 			      poller_args->tag);
-		spdk_nvmf_fc_poller_api_func(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,
+		nvmf_fc_poller_api_func(hwqp, SPDK_NVMF_FC_POLLER_API_QUEUE_SYNC_DONE,
 					     poller_args);
 	}
 }
@@ -2630,8 +2630,8 @@ nvmf_fc_process_rqpair(struct spdk_nvmf_fc_hwqp *hwqp, fc_eventq_t *cq, uint8_t 
 		/* Process marker completion */
 		nvmf_fc_process_marker_cqe(hwqp, cqe);
 	} else {
-		rc = spdk_nvmf_fc_hwqp_process_frame(hwqp, buff_idx, frame, payload_buffer,
-						    rcqe->payload_data_placement_length);
+		rc = nvmf_fc_hwqp_process_frame(hwqp, buff_idx, frame, payload_buffer,
+						rcqe->payload_data_placement_length);
 		if (!rc) {
 			return 0;
 		}
@@ -2756,9 +2756,9 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 				 * removed once the flow of resubmission older patches slows down.
 				 */
 				if (hwqp->fgroup) {
-					spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
+					nvmf_fc_hwqp_process_pending_reqs(hwqp);
 				} else {
-					spdk_nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
+					nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
 				}
 			} else if (cq_id == BCM_HWQP(hwqp)->cq_rq.q.qid) {
 				nvmf_fc_process_cq_entry(hwqp, &BCM_HWQP(hwqp)->cq_rq);
@@ -2780,7 +2780,7 @@ nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
 	}
 
 	if (!pending_req_processed && hwqp->fgroup) {
-		spdk_nvmf_fc_hwqp_process_pending_reqs(hwqp);
+		nvmf_fc_hwqp_process_pending_reqs(hwqp);
 	}
 
 	if (n_processed) {
@@ -2854,7 +2854,7 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	bcm_fcp_tsend64_wqe_t *tsend = (bcm_fcp_tsend64_wqe_t *)wqe;
 	struct spdk_nvmf_fc_hwqp *hwqp = fc_req->hwqp;
 	struct spdk_nvmf_qpair *qpair = fc_req->req.qpair;
-	struct spdk_nvmf_fc_conn *fc_conn = spdk_nvmf_fc_get_conn(qpair);
+	struct spdk_nvmf_fc_conn *fc_conn = nvmf_fc_get_conn(qpair);
 
 	if (!fc_req->req.iovcnt) {
 		return -1;
@@ -2899,12 +2899,12 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	tsend->rpi = fc_req->rpi;
 	tsend->pu = true;
 
-	if (!spdk_nvmf_fc_send_ersp_required(fc_req, (fc_conn->rsp_count + 1),
+	if (!nvmf_fc_send_ersp_required(fc_req, (fc_conn->rsp_count + 1),
 					xfer_len)) {
 		fc_conn->rsp_count++;
-		spdk_nvmf_fc_advance_conn_sqhead(qpair);
+		nvmf_fc_advance_conn_sqhead(qpair);
 		tsend->ar = true;
-		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
+		nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
 	}
 
 	tsend->command = BCM_WQE_FCP_TSEND64;
@@ -3057,7 +3057,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 	bcm_fcp_trsp64_wqe_t *trsp = (bcm_fcp_trsp64_wqe_t *)wqe;
 	struct spdk_nvmf_fc_hwqp *hwqp = fc_req->hwqp;
 
-	if (spdk_nvmf_fc_use_send_frame(&fc_req->req)) {
+	if (nvmf_fc_use_send_frame(&fc_req->req)) {
 		return nvmf_fc_sendframe_rsp(fc_req, ersp_buf, ersp_len);
 	}
 
@@ -3401,13 +3401,13 @@ nvmf_fc_dump_buffer(struct spdk_nvmf_fc_queue_dump_info *dump_info,
 		return;
 	}
 
-	spdk_nvmf_fc_dump_buf_print(dump_info, "%s type=buffer:", (char *)name);
+	nvmf_fc_dump_buf_print(dump_info, "%s type=buffer:", (char *)name);
 	dword = buffer;
 
 	for (i = 0; i < count; i++) {
-		spdk_nvmf_fc_dump_buf_print(dump_info, "%08x", *dword++);
+		nvmf_fc_dump_buf_print(dump_info, "%08x", *dword++);
 		if ((i % NVMF_TGT_FC_NEWLINE_MOD) == (NVMF_TGT_FC_NEWLINE_MOD - 1)) {
-			spdk_nvmf_fc_dump_buf_print(dump_info, "\n");
+			nvmf_fc_dump_buf_print(dump_info, "\n");
 		}
 	}
 }
@@ -3447,7 +3447,7 @@ nvmf_fc_dump_queue_entries(struct spdk_nvmf_fc_queue_dump_info *dump_info,
 			index = 0;
 		}
 	}
-	spdk_nvmf_fc_dump_buf_print(dump_info, "\n");
+	nvmf_fc_dump_buf_print(dump_info, "\n");
 }
 
 /*
@@ -3457,7 +3457,7 @@ static void
 nvmf_fc_dump_sli_queue(struct spdk_nvmf_fc_queue_dump_info *dump_info, char *name,
 		       bcm_sli_queue_t *q)
 {
-	spdk_nvmf_fc_dump_buf_print(dump_info,
+	nvmf_fc_dump_buf_print(dump_info,
 				   "\nname:%s, head:%" PRIu16 ", tail:%" PRIu16 ", used:%" PRIu16 ", "
 				   "posted_limit:%" PRIu32 ", processed_limit:%" PRIu32 ", "
 				   "type:%" PRIu16 ", qid:%" PRIu16 ", size:%" PRIu16 ", "
@@ -3549,14 +3549,14 @@ nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 	/*
 	 * Dump the LS queue.
 	 */
-	spdk_nvmf_fc_dump_buf_print(dump_info, "\nHW Queue type: LS, HW Queue ID:%d", ls_queue->hwqp_id);
+	nvmf_fc_dump_buf_print(dump_info, "\nHW Queue type: LS, HW Queue ID:%d", ls_queue->hwqp_id);
 	nvmf_fc_dump_hwqp(dump_info, (struct bcm_nvmf_hw_queues *)ls_queue->queues);
 
 	/*
 	 * Dump the IO queues.
 	 */
 	for (i = 0; i < num_io_queues; i++) {
-		spdk_nvmf_fc_dump_buf_print(dump_info, "\nHW Queue type: IO, HW Queue ID:%d",
+		nvmf_fc_dump_buf_print(dump_info, "\nHW Queue type: IO, HW Queue ID:%d",
 					   io_queues[i].hwqp_id);
 		nvmf_fc_dump_hwqp(dump_info, (struct bcm_nvmf_hw_queues *)io_queues[i].queues);
 	}
