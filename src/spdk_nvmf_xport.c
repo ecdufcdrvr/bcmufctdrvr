@@ -3581,7 +3581,7 @@ nvmf_fc_put_xchg(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri)
 	} else if (xri->aborted && xri->send_abts) {
 		/*TODO: XRI not activated but need to send ABTS */
 	} else {
-		nvmf_fc_put_xri(hwqp, xri);
+		nvmf_fc_put_xri(hwqp, xri)
 	}
 	return 0;
 }
