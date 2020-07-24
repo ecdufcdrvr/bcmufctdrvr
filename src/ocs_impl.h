@@ -127,7 +127,6 @@ static struct spdk_pci_driver ocs_rte_driver = {
 	},
 	.cb_fn = NULL,
 	.cb_arg = NULL,
-	.is_registered = false,
 };
 
 struct ocs_pci_enum_ctx {
