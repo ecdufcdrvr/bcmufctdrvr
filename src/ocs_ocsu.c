@@ -672,3 +672,21 @@ ocsu_process_events(ocs_t *ocs)
 
 	return 0;
 }
+
+static struct spdk_pci_id ocs_pci_driver_id[] = {
+	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
+	  .vendor_id = SPDK_PCI_VID_OCS,
+	  .device_id = PCI_DEVICE_ID_OCS_LANCERG5,
+	  .subvendor_id = SPDK_PCI_ANY_ID,
+	  .subdevice_id = SPDK_PCI_ANY_ID,
+	},
+	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
+	  .vendor_id = SPDK_PCI_VID_OCS,
+	  .device_id = PCI_DEVICE_ID_OCS_LANCERG6,
+	  .subvendor_id = SPDK_PCI_ANY_ID,
+	  .subdevice_id = SPDK_PCI_ANY_ID,
+	},
+};
+
+SPDK_PCI_DRIVER_REGISTER(OCSU_DRIVER_NAME_UIO_GENERIC, ocs_pci_driver_id,
+			 SPDK_PCI_DRIVER_NEED_MAPPING | SPDK_PCI_DRIVER_WC_ACTIVATE);

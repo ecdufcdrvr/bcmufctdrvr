@@ -112,22 +112,9 @@ ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_ad
 #define ocs_pcicfg_write32(handle, var, offset) spdk_pci_device_cfg_write32(handle, var, offset)
 
 #define SPDK_OCS_PCI_DEVICE(DEVICE_ID) RTE_PCI_DEVICE(SPDK_PCI_VID_OCS, DEVICE_ID)
-static struct rte_pci_id ocs_driver_id[] = {
-	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG5)},
-	{SPDK_OCS_PCI_DEVICE(PCI_DEVICE_ID_OCS_LANCERG6)},
-	{ .vendor_id = 0, /* sentinel */ },
-};
 
-static struct spdk_pci_driver ocs_rte_driver = {
-	.driver = {
-		.drv_flags = RTE_PCI_DRV_NEED_MAPPING,
-		.id_table  = ocs_driver_id,
-		.probe     = pci_device_init,
-		.driver.name = "ocs_driver",
-	},
-	.cb_fn = NULL,
-	.cb_arg = NULL,
-};
+#define OCSU_DRIVER_NAME_UIO_GENERIC		"uio_pci_generic"
+#define OCSU_DRIVER_NAME_VFIO			"vfio_pci"
 
 struct ocs_pci_enum_ctx {
 	int (*user_enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev);
@@ -168,11 +155,16 @@ static inline int
 ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev), void *enum_ctx)
 {
 	struct ocs_pci_enum_ctx ocs_enum_ctx;
+	struct spdk_pci_driver *pci_driver;
 
 	ocs_enum_ctx.user_enum_cb = enum_cb;
 	ocs_enum_ctx.user_enum_ctx = enum_ctx;
 
-	return spdk_pci_enumerate(&ocs_rte_driver, ocs_pci_enum_cb, &ocs_enum_ctx);
+	pci_driver = spdk_pci_get_driver(OCSU_DRIVER_NAME_UIO_GENERIC);
+	if (pci_driver)
+		spdk_pci_enumerate(pci_driver, ocs_pci_enum_cb, &ocs_enum_ctx);
+
+	return 0;
 }
 
 
