@@ -688,5 +688,5 @@ static struct spdk_pci_id ocs_pci_driver_id[] = {
 	},
 };
 
-SPDK_PCI_DRIVER_REGISTER(OCSU_DRIVER_NAME_UIO_GENERIC, ocs_pci_driver_id,
+SPDK_PCI_DRIVER_REGISTER(uio_pci_generic, ocs_pci_driver_id,
 			 SPDK_PCI_DRIVER_NEED_MAPPING | SPDK_PCI_DRIVER_WC_ACTIVATE);
