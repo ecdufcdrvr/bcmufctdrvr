@@ -81,6 +81,7 @@ struct ocs_spdk_fc_poller
 static TAILQ_HEAD(, ocs_spdk_device)g_devices;
 
 static struct ocs_spdk_fc_poller g_fc_port_poller[MAX_OCS_DEVICES][OCS_HAL_MAX_NUM_EQ];
+static struct ocs_spdk_fc_poller g_fc_port_delayed_start_poller;
 
 static uint32_t g_fc_lcore[RTE_MAX_LCORE];
 
@@ -598,12 +599,15 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 	return true;
 }
 
-void
-ocs_spdk_start_pollers(void)
+static int
+ocs_spdk_fc_wait_poller_init(void *arg)
 {
 	uint32_t i;
 	int rc = 0;
 	ocs_t *ocs;
+
+        /* Unregister self */
+        spdk_poller_unregister(&g_fc_port_delayed_start_poller.spdk_poller);
 
 	for_each_ocs(i, ocs) {
 		if (!ocs)
@@ -613,6 +617,16 @@ ocs_spdk_start_pollers(void)
 			ocs_log_err(ocs, "%d: unable to start pollers\n", ocs->instance_index);
 		}
 	}
+
+	return 0;
+}
+
+void
+ocs_spdk_start_pollers(void)
+{
+	g_fc_port_delayed_start_poller.spdk_poller =
+		spdk_poller_register(ocs_spdk_fc_wait_poller_init,
+				     NULL, 2*1024*1024);
 }
 
 void
