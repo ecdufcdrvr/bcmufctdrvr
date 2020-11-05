@@ -26,11 +26,9 @@ Broadcom FC LLD git master is always compatible with the spdk master branch.
 Repository also includes a compatible LLD's for various SPDK releases.
 FC driver branch information for different SPDK releases is documented below.
 
-===============================================================
-    SPDK Release            Broadcom LLD Branch
-===============================================================
+    SPDK release            Broadcom LLD branch name
+    ============           ==========================
        19.07              remotes/origin/bcm_lld_rel_v19.07.x
        20.01              remotes/origin/bcm_lld_rel_v20.01.x
        20.04              remotes/origin/bcm_lld_rel_v20.04.x
        20.07              remotes/origin/bcm_lld_rel_v20.07.x
-===============================================================
