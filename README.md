@@ -22,9 +22,10 @@ make
 
 ### SPDK Releases compatibility
 
-Broadcom FC LLD git master is always compatible with the spdk master branch.
+Broadcom FC LLD git master is always compatible with the spdk.io master.
 Repository also includes compatible LLD's for various SPDK releases.
-FC driver branch information for different SPDK releases is documented below.
+FC driver branch code that is compatible with various SPDK releases is
+documented below.
 
     SPDK release            Broadcom LLD branch name
     ============           ==========================
