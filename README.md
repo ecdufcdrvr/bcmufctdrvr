@@ -19,3 +19,18 @@ cd ../spdk
 ./configure --with-fc=../fc/build
 make
 ~~~
+
+### SPDK Releases compatibility
+
+Broadcom LLD git master is always compatible with the spdk master branch.
+Repository hosts compatible LLD's for various SPDK releases in various branches.
+Following table lists SPDK releases and the branch hosting the compatible
+LLD driver code.
+
+----------------------------------------------------------
+    SPDK Release            Broadcom LLD Branch
+----------------------------------------------------------
+    19.07              remotes/origin/bcm_lld_rel_v19.07.x
+    20.01              remotes/origin/bcm_lld_rel_v20.01.x
+    20.04              remotes/origin/bcm_lld_rel_v20.04.x
+    20.07              remotes/origin/bcm_lld_rel_v20.07.x
