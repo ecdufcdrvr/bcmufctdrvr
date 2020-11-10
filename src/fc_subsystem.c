@@ -33,7 +33,7 @@
 
 #include <inttypes.h>
 #include <unistd.h>
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk_internal/event.h"
 #include "spdk/env.h"
 #include "fc.h"

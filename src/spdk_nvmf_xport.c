@@ -43,12 +43,14 @@
 #include "spdk/event.h"
 #include "spdk/likely.h"
 #include "spdk/trace.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk_nvmf_xport.h"
 #include "fc_subsystem.h"
 #include "fc.h"
 #include "ocs.h"
 #include "spdk/barrier.h"
+
+#define SSPDK_LOG_NVMF_FC_LLD			nvmf_fc_lld
 
 /*
  * Broadcom FC SLI-4 definitions
@@ -3592,4 +3594,4 @@ nvmf_fc_get_rsvd_thread(void)
 	return ocs_get_rsvd_thread();
 }
 
-SPDK_LOG_REGISTER_COMPONENT("nvmf_fc_lld", SPDK_LOG_NVMF_FC_LLD)
+SPDK_LOG_REGISTER_COMPONENT(nvmf_fc_lld)
