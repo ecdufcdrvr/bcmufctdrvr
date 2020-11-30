@@ -305,7 +305,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	/* set args io queue size */
 	args->io_queue_size = hwq->rq_payload.num_buffers;
 
-	rc = nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_INIT, args,
+	rc = nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_INIT, args,
 			ocs_cb_hw_port_create);
 	if (rc) {
 		goto error;
@@ -367,7 +367,7 @@ ocs_nvme_process_hw_port_online(ocs_sport_t *sport)
 	args->port_handle = ocs->instance_index;
 	args->cb_ctx = args;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_ONLINE, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_ONLINE, args,
 				ocs_nvme_process_hw_port_online_cb)) {
 		ocs_log_err(ocs, "HW Port online failed.\n");
 		goto err;
@@ -408,7 +408,7 @@ ocs_nvme_process_hw_port_offline(ocs_t *ocs)
 	args->port_handle = ocs->instance_index;
 	args->cb_ctx = args;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_OFFLINE, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_OFFLINE, args,
 				ocs_nvme_process_hw_port_offline_cb)) {
 		ocs_log_err(ocs, "HW Port offline failed.\n");
 		goto err;
@@ -456,7 +456,7 @@ ocs_nvme_nport_create(ocs_sport_t *sport)
 	args->d_id		= sport->fc_id;
 	args->cb_ctx 		= args;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_NPORT_CREATE, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_NPORT_CREATE, args,
 				ocs_nvme_nport_create_cb)) {
 		ocs_log_err(ocs, "nport create failed.\n");
 		goto err;
@@ -498,7 +498,7 @@ ocs_nvme_nport_delete(ocs_t *ocs)
 	args->subsys_id		= 1;
 	args->cb_ctx 		= args;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_NPORT_DELETE, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_NPORT_DELETE, args,
 				ocs_nvme_nport_delete_cb)) {
 		ocs_log_err(ocs, "nport delete failed.\n");
 		goto err;
@@ -535,7 +535,7 @@ ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi)
 	args->rpi = rpi;
 	args->cb_ctx = args;
 
-	rc = nvmf_fc_master_enqueue_event(SPDK_FC_ABTS_RECV, args,
+	rc = nvmf_fc_main_enqueue_event(SPDK_FC_ABTS_RECV, args,
 			ocs_cb_abts_cb);
 	if (rc) {
 		goto err;
@@ -614,7 +614,7 @@ ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
 	args->target_prli_info	= node->nvme_prli_service_params;
 	args->cb_ctx = ctx;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_IT_ADD, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_IT_ADD, args,
 				ocs_nvme_process_prli_cb)) {
 		ocs_log_err(ocs, "NVME IT add failed.\n");
 		goto err;
@@ -680,7 +680,7 @@ ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id)
 	args->s_id = node->rnode.fc_id;
 	args->cb_ctx = ctx;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_IT_DELETE, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_IT_DELETE, args,
 				ocs_nvme_process_prlo_cb)) {
 		ocs_log_err(ocs, "NVME IT delete failed.\n");
 		goto err;
@@ -738,7 +738,7 @@ ocs_nvme_node_lost(ocs_node_t *node)
 	args->s_id		= node->rnode.fc_id;
 	args->cb_ctx		= ctx;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_IT_DELETE, args, ocs_nvme_node_lost_cb)) {
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_IT_DELETE, args, ocs_nvme_node_lost_cb)) {
 		ocs_log_err(ocs, "NVME IT delete failed.\n");
 		goto err;
 	}
