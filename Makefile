@@ -48,7 +48,7 @@ OCS_COMMON		= ./src
 OCS_HAL_COMMON		= ./src
 OCS_COMMON_INI_STUB	= ./src
 
-CFLAGS += -g -Wall -Werror -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations
+CFLAGS += -g -Wall -Werror -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations -Wno-error=cast-function-type
 CFLAGS += -march=native -fPIC -fstack-protector -fno-common
 CFLAGS += -Wformat -Wformat-security
 CFLAGS += -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu99

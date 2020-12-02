@@ -47,6 +47,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/uio.h>
 
 #include <sys/types.h>
 #include <netdb.h>
