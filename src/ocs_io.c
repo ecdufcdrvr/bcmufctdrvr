@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -65,6 +64,7 @@ struct ocs_io_pool_s {
 	ocs_t *ocs;			/* Pointer to device object */
 	ocs_lock_t lock;		/* IO pool lock */
 	uint32_t io_num_ios;		/* Total IOs allocated */
+	bool els_pool;
 	ocs_pool_t *pool;
 };
 
@@ -99,17 +99,17 @@ struct ocs_io_pool_s {
  */
 
 ocs_io_pool_t *
-ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl)
+ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl, bool els_pool)
 {
 	uint32_t i = 0;
 	int32_t	rc = -1;
 	ocs_io_pool_t *io_pool;
 
 	/* Allocate the IO pool */
-	io_pool = ocs_malloc(ocs, sizeof(*io_pool), OCS_M_ZERO | OCS_M_NOWAIT);
-	if (io_pool == NULL) {
-		ocs_log_err(ocs, "%s: allocate of IO pool failed\n", __func__);
-		return NULL;;
+	io_pool = ocs_malloc(ocs, sizeof(*io_pool), OCS_M_ZERO);
+	if (!io_pool) {
+		ocs_log_err(ocs, "allocation of IO pool failed\n");
+		goto free_io_pool;
 	}
 
 	io_pool->ocs = ocs;
@@ -119,49 +119,76 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl)
 	ocs_lock_init(ocs, &io_pool->lock, "io_pool lock[%d]", ocs->instance_index);
 
 	io_pool->pool = ocs_pool_alloc(ocs, sizeof(ocs_io_t), io_pool->io_num_ios, FALSE);
+	if (!io_pool->pool) {
+		ocs_log_err(ocs, "allocation of memory IO pool failed\n");
+		goto free_io_pool;
+	}
 
 	for (i = 0; i < io_pool->io_num_ios; i++) {
 		ocs_io_t *io = ocs_pool_get_instance(io_pool->pool, i);
+		if (!io) {
+			ocs_log_err(ocs, "ocs_pool_get_instance failed\n");
+			goto free_io_pool;
+		}
 
 		io->tag = i;
 		io->instance_index = i;
 		io->ocs = ocs;
 
+		ocs_lock_init(ocs, &io->bls_abort_lock, "bls_abort lock[%d]", io->instance_index);
+		ocs_rlock_init(ocs, &io->state_lock, "IO state lock");
+
+		if (els_pool) {
+			io->els_info = ocs_malloc(ocs, sizeof(ocs_io_els_t), OCS_M_ZERO);
+			if (io->els_info == NULL) {
+				ocs_log_err(ocs, "failed to allocate IO ELS info\n");
+				goto free_io_pool;
+			}
+			io_pool->els_pool = true;
+			continue;
+		}
+		io->scsi_info = ocs_malloc(ocs, sizeof(ocs_io_scsi_t), OCS_M_ZERO);
+		if (io->scsi_info == NULL) {
+			ocs_log_err(ocs, "failed to alloc IO SCSI info\n");
+			goto free_io_pool;
+		}
+
 		/* allocate a command/response dma buffer */
 		if (ocs->enable_ini) {
-			rc = ocs_dma_alloc(ocs, &io->cmdbuf, SCSI_CMD_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
+			rc = ocs_dma_alloc(ocs, &io->scsi_info->cmdbuf, SCSI_CMD_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
 			if (rc) {
-				ocs_log_err(ocs, "%s(): ocs_dma_alloc cmdbuf failed\n", __func__);
-				ocs_io_pool_free(io_pool);
-				return NULL;
+				ocs_log_err(ocs, "ocs_dma_alloc cmdbuf failed\n");
+				goto free_io_pool;
 			}
 		}
 
 		/* Allocate a response buffer */
-		rc = ocs_dma_alloc(ocs, &io->rspbuf, SCSI_RSP_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
+		rc = ocs_dma_alloc(ocs, &io->scsi_info->rspbuf, SCSI_RSP_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
 		if (rc) {
-			ocs_log_err(ocs, "%s(): ocs_dma_alloc cmdbuf failed\n", __func__);
-			ocs_io_pool_free(io_pool);
-			return NULL;
+			ocs_log_err(ocs, "ocs_dma_alloc rspbuf failed\n");
+			goto free_io_pool;
 		}
 
+		io->scsi_info->orig_io = io;
 		/* Allocate SGL */
-		io->sgl = ocs_malloc(ocs, sizeof(*io->sgl) * num_sgl, OCS_M_NOWAIT | OCS_M_ZERO);
-		if (io->sgl == NULL) {
-			ocs_log_err(ocs, "%s: malloc sgl's failed\n", __func__);
-			ocs_io_pool_free(io_pool);
-			return NULL;
+		io->scsi_info->sgl_allocated = num_sgl;
+		io->scsi_info->sgl_count = 0;
+		io->scsi_info->sgl = ocs_malloc(ocs, sizeof(*io->scsi_info->sgl) * num_sgl, OCS_M_ZERO);
+		if (!io->scsi_info->sgl) {
+			ocs_log_err(ocs, "malloc sgl's failed\n");
+			goto free_io_pool;
 		}
-		io->sgl_allocated = num_sgl;
-		io->sgl_count = 0;
 
 		/* Make IO backend call to initialize IO */
-		//:w
-		//ocs_scsi_tgt_io_init(io);
+		ocs_scsi_tgt_io_init(io);
 		ocs_scsi_ini_io_init(io);
 	}
 
 	return io_pool;
+
+free_io_pool:
+	ocs_io_pool_free(io_pool);
+	return NULL;
 }
 
 /**
@@ -177,29 +204,58 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl)
 int32_t
 ocs_io_pool_free(ocs_io_pool_t *io_pool)
 {
-	ocs_t *ocs = io_pool->ocs;
+	ocs_t *ocs;
 	uint32_t i;
 	ocs_io_t *io;
 
-	if (io_pool != NULL) {
-		for (i = 0; i < io_pool->io_num_ios; i++) {
-			io = ocs_pool_get_instance(io_pool->pool, i);
-			//ocs_scsi_tgt_io_exit(io);
-			ocs_scsi_ini_io_exit(io);
-			if (io->sgl) {
-				ocs_free(ocs, io->sgl, sizeof(*io->sgl) * io->sgl_allocated);
-			}
-			ocs_dma_free(ocs, &io->cmdbuf);
-			ocs_dma_free(ocs, &io->rspbuf);
-		}
-
-		if (io_pool->pool != NULL) {
-			ocs_pool_free(io_pool->pool);
-		}
-		ocs_lock_free(&io_pool->lock);
-		ocs_free(ocs, io_pool, sizeof(*io_pool));
+	if (!io_pool) {
+		return 0;
 	}
 
+	ocs = io_pool->ocs;
+	if (io_pool->pool) {
+		for (i = 0; i < io_pool->io_num_ios; i++) {
+			io = ocs_pool_get_instance(io_pool->pool, i);
+			if (!io) {
+				continue;
+			}
+
+			if (!io_pool->els_pool) {
+				ocs_io_scsi_t *scsi_io = io->scsi_info;
+
+				ocs_scsi_tgt_io_exit(io);
+				ocs_scsi_ini_io_exit(io);
+				if (scsi_io == NULL)
+					continue;
+
+				if (scsi_io->sgl) {
+					ocs_free(ocs, scsi_io->sgl, sizeof(*scsi_io->sgl) * scsi_io->sgl_allocated);
+					scsi_io->sgl = NULL;
+				}
+				scsi_io->sgl_allocated = 0;
+
+				ocs_dma_free(ocs, &scsi_io->cmdbuf);
+				ocs_dma_free(ocs, &scsi_io->rspbuf);
+				ocs_free(ocs, io->scsi_info, sizeof(*io->scsi_info));
+			} else if (io->els_info) {
+				ocs_free(ocs, io->els_info, sizeof(*io->els_info));
+			}
+
+			ocs_lock_free(&io->bls_abort_lock);
+			ocs_rlock_free(&io->state_lock);
+		}
+
+		ocs_pool_free(io_pool->pool);
+	}
+
+	ocs_lock_free(&io_pool->lock);
+
+	if (io_pool->els_pool)
+		ocs->xport->els_io_pool = NULL;
+	else
+		ocs->xport->io_pool = NULL;
+
+	ocs_free(ocs, io_pool, sizeof(*io_pool));
 	return 0;
 }
 
@@ -233,20 +289,28 @@ ocs_io_pool_io_alloc(ocs_io_pool_t *io_pool)
 		io->io_type = OCS_IO_TYPE_MAX;
 		io->hio_type = OCS_HAL_IO_MAX;
 		io->hio = NULL;
+		io->wqe_status = 0;
 		io->transferred = 0;
 		io->ocs = ocs;
 		io->timeout = 0;
-		io->sgl_count = 0;
-		io->tgt_task_tag = 0;
-		io->init_task_tag = 0;
+		if (io->scsi_info)
+			io->scsi_info->sgl_count = 0;
+		io->tgt_task_tag = OCS_INVALID_FC_TASK_TAG;
+		io->init_task_tag = OCS_INVALID_FC_TASK_TAG;
 		io->hw_tag = 0;
 		io->display_name = "pending";
 		io->seq_init = 0;
-		io->els_req_free = 0;
+		if (io->els_info)
+			io->els_info->els_req_free = 0;
 		io->mgmt_functions = &io_mgmt_functions;
 		io->io_free = 0;
+#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+		__percpu_counter_add(&ocs->xport->io_active_count, 1, 1000000);
+		__percpu_counter_add(&ocs->xport->io_total_alloc, 1, 1000000);
+#else
 		ocs_atomic_add_return(&ocs->xport->io_active_count, 1);
 		ocs_atomic_add_return(&ocs->xport->io_total_alloc, 1);
+#endif
 	} else {
 		ocs_unlock(&io_pool->lock);
 	}
@@ -273,37 +337,85 @@ ocs_io_pool_io_free(ocs_io_pool_t *io_pool, ocs_io_t *io)
 	ocs_lock(&io_pool->lock);
 		hio = io->hio;
 		io->hio = NULL;
-		ocs_pool_put(io_pool->pool, io);
+		io->io_free = 1;
+		ocs_pool_put_head(io_pool->pool, io);
 	ocs_unlock(&io_pool->lock);
 
 	if (hio) {
 		ocs_hal_io_free(&ocs->hal, hio);
 	}
-	io->io_free = 1;
+
+#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+	__percpu_counter_add(&ocs->xport->io_active_count, -1, 1000000);
+	__percpu_counter_add(&ocs->xport->io_total_free, 1, 1000000);
+#else
 	ocs_atomic_sub_return(&ocs->xport->io_active_count, 1);
 	ocs_atomic_add_return(&ocs->xport->io_total_free, 1);
+#endif
 }
 
 /**
  * @ingroup io_alloc
  * @brief Find an I/O given it's node and ox_id.
  *
- * @param ocs Driver instance's software context.
- * @param node Pointer to node.
+ * @param tmfio Pointer to the TMF IO object.
  * @param ox_id OX_ID to find.
  * @param rx_id RX_ID to find (0xffff for unassigned).
  */
 ocs_io_t *
-ocs_io_find_tgt_io(ocs_t *ocs, ocs_node_t *node, uint16_t ox_id, uint16_t rx_id)
+ocs_io_find_tgt_io_to_abort(ocs_io_t *tmfio, uint16_t ox_id, uint16_t rx_id)
+{
+	ocs_node_t *node = tmfio->node;
+	ocs_io_t *io = NULL;
+	bool io_found = FALSE;
+
+	ocs_lock(&node->active_ios_lock);
+		ocs_list_foreach(&node->active_ios, io) {
+			if (io->cmd_tgt && (OCS_SCSI_TMF_ABORT_TASK != io->scsi_info->tmf_cmd) &&
+			    (io->init_task_tag == ox_id) &&
+			    ((rx_id == 0xffff) || (io->tgt_task_tag == rx_id))) {
+				/* Return the original IO pointer only if the 'ref_get' succeeds */
+				if (ocs_ref_get_unless_zero(&io->ref)) {
+					/*
+					 * If we are here, it implies that we have found the original IO.
+					 * So, update the 'tmf_cmd' and 'init_task_tag' fields for tmfio
+					 * under active_ios_lock. This is to prevent an ABTS from being
+					 * looked up while searching the active_ios list.
+					 */
+					io_found = TRUE;
+					tmfio->scsi_info->tmf_cmd = OCS_SCSI_TMF_ABORT_TASK;
+					tmfio->init_task_tag = ox_id;
+					/* Don't set the tgt_task_tag to avoid confusion with XRI */
+				}
+
+				break;
+			}
+		}
+	ocs_unlock(&node->active_ios_lock);
+
+	return (io_found ? io : NULL);
+}
+
+/**
+ * @ingroup ocs_io_find_init_els_io
+ * @brief Find an els I/O given it's node and ox_id.
+ *
+ * @param ocs Driver instance's software context.
+ * @param node Pointer to node.
+ * @param ox_id OX_ID to find.
+ */
+
+ocs_io_t *
+ocs_io_find_init_els_io(ocs_t *ocs, ocs_node_t *node, uint16_t ox_id)
 {
 	ocs_io_t	*io = NULL;
 
 	ocs_lock(&node->active_ios_lock);
-		ocs_list_foreach(&node->active_ios, io)
-			if ((io->cmd_tgt && (io->init_task_tag == ox_id)) &&
-			    ((rx_id == 0xffff) || (io->tgt_task_tag == rx_id))) {
+		ocs_list_foreach(&node->els_io_active_list, io) {
+			if ((io->cmd_ini && (io->init_task_tag == ox_id))) {
 				break;
 			}
+		}
 	ocs_unlock(&node->active_ios_lock);
 	return io;
 }
@@ -351,20 +463,17 @@ ocs_ddump_io(ocs_textbuf_t *textbuf, ocs_io_t *io)
 	ocs_ddump_value(textbuf, "hio_type", "%d", io->hio_type);
 	ocs_ddump_value(textbuf, "cmd_tgt", "%d", io->cmd_tgt);
 	ocs_ddump_value(textbuf, "cmd_ini", "%d", io->cmd_ini);
-	ocs_ddump_value(textbuf, "send_abts", "%d", io->send_abts);
 	ocs_ddump_value(textbuf, "init_task_tag", "0x%x", io->init_task_tag);
 	ocs_ddump_value(textbuf, "tgt_task_tag", "0x%x", io->tgt_task_tag);
 	ocs_ddump_value(textbuf, "hw_tag", "0x%x", io->hw_tag);
 	ocs_ddump_value(textbuf, "tag", "0x%x", io->tag);
 	ocs_ddump_value(textbuf, "timeout", "%d", io->timeout);
-	ocs_ddump_value(textbuf, "tmf_cmd", "%d", io->tmf_cmd);
 	ocs_ddump_value(textbuf, "abort_rx_id", "0x%x", io->abort_rx_id);
-
 	ocs_ddump_value(textbuf, "busy", "%d", ocs_io_busy(io));
 	ocs_ddump_value(textbuf, "transferred", "%zu", io->transferred);
 	ocs_ddump_value(textbuf, "auto_resp", "%d", io->auto_resp);
 	ocs_ddump_value(textbuf, "exp_xfer_len", "%d", io->exp_xfer_len);
-	ocs_ddump_value(textbuf, "xfer_req", "%d", io->xfer_req);
+	ocs_ddump_value(textbuf, "xfer_req", "%" PRIu64, io->xfer_req);
 	ocs_ddump_value(textbuf, "seq_init", "%d", io->seq_init);
 
 	ocs_ddump_value(textbuf, "alloc_link", "%d", ocs_list_on_list(&io->io_alloc_link));
@@ -380,9 +489,15 @@ ocs_ddump_io(ocs_textbuf_t *textbuf, ocs_io_t *io)
 		ocs_ddump_value(textbuf, "hal_xri", "%s", "pending");
 		ocs_ddump_value(textbuf, "hal_type", "%s", "pending");
 	}
-
-	ocs_scsi_ini_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
-	ocs_scsi_tgt_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
+	/* dump SCSI related info */
+	if (io->scsi_info) {
+		ocs_ddump_value(textbuf, "tmf_cmd", "%d", io->scsi_info->tmf_cmd);
+#if defined(OCS_INCLUDE_SCST)
+		ocs_ddump_value(textbuf, "iostate", "%08x", ocs_scsi_tgt_io_state(io));
+#endif
+		ocs_scsi_ini_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
+		ocs_scsi_tgt_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
+	}
 
 	ocs_ddump_endsection(textbuf, "io", io->instance_index);
 }
@@ -441,7 +556,7 @@ ocs_mgmt_io_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *object)
 			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "exp_xfer_len", "%d", io->exp_xfer_len);
 			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "xfer_req") == 0) {
-			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "xfer_req", "%d", io->xfer_req);
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "xfer_req", "%" PRIu64, io->xfer_req);
 			retval = 0;
 		}
 	}
@@ -462,7 +577,7 @@ ocs_mgmt_io_get_all(ocs_textbuf_t *textbuf, void *object)
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "transferred", "%zu", io->transferred);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "auto_resp", io->auto_resp);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "exp_xfer_len", "%d", io->exp_xfer_len);
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "xfer_req", "%d", io->xfer_req);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "xfer_req", "%" PRIu64, io->xfer_req);
 
 }
 

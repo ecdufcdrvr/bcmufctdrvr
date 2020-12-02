@@ -48,11 +48,13 @@ void nvmf_fc_lld_fini(void);
 
 void nvmf_fc_lld_start(void);
 
+#ifdef _FIXME_
+int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
+
+int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
+#endif
+
 int nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp);
-
-void nvmf_fc_reinit_q(void *queues_prev, void *queues_curr);
-
-int nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp);
 
 int nvmf_fc_set_q_online_state(struct spdk_nvmf_fc_hwqp *hwqp, bool online);
 
@@ -109,7 +111,5 @@ void nvmf_fc_dump_all_queues(struct spdk_nvmf_fc_hwqp *ls_queue,
 			     struct spdk_nvmf_fc_queue_dump_info *dump_info);
 
 void nvmf_fc_get_xri_info(struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg_info *info);
-
-struct spdk_thread* nvmf_fc_get_rsvd_thread(void);
 
 #endif

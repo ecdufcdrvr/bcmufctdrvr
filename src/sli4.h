@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -45,10 +44,11 @@
 #define SLI_SUB_PAGE_MASK	(SLI_PAGE_SIZE - 1)
 #define SLI_PAGE_SHIFT		12
 #define SLI_ROUND_PAGE(b)	(((b) + SLI_SUB_PAGE_MASK) & ~SLI_SUB_PAGE_MASK)
+#define SLI_Q_DMA_CHUNKS	8
 
 #define SLI4_BMBX_TIMEOUT_MSEC		30000
 #define SLI4_FW_READY_TIMEOUT_MSEC	30000
-#define SLI4_128BYTE_WQE_SUPPORT        0x02
+#define SLI4_FW_DUMP_TIMEOUT_MSEC	60000
 
 static inline uint32_t
 sli_page_count(size_t bytes, uint32_t page_size)
@@ -79,17 +79,44 @@ sli_page_count(size_t bytes, uint32_t page_size)
 	return (bytes + mask) >> shift;
 }
 
+static inline uint32_t
+sli_get_qpage_size(size_t qmem_size)
+{
+	uint32_t num_dma_chunks;
+	uint32_t page_size_multiplier = 1;
+
+	num_dma_chunks = sli_page_count(qmem_size, SLI_PAGE_SIZE);
+	if (num_dma_chunks > SLI_Q_DMA_CHUNKS) {
+		page_size_multiplier = num_dma_chunks / SLI_Q_DMA_CHUNKS;
+	}
+
+	return (page_size_multiplier * SLI_PAGE_SIZE);
+}
+
+static inline size_t
+sli_get_qmem_size(ocs_dma_t *qmem)
+{
+	uint32_t i;
+	size_t qmem_size = 0;
+
+	for (i = 0; i < SLI_Q_DMA_CHUNKS && qmem[i].virt; i++) {
+		qmem_size += qmem[i].size;
+	}
+
+	return qmem_size;
+}
+
 /*************************************************************************
  * Common PCI configuration space register definitions
  */
 
-#define SLI4_PCI_CLASS_REVISION		0x0008	/** register offset */
+#define SLI4_PCI_CLASS_REVISION			0x0008	/* register offset */
 #define SLI4_PCI_REV_ID_SHIFT			0
 #define SLI4_PCI_REV_ID_MASK			0xff
 #define SLI4_PCI_CLASS_SHIFT			8
 #define SLI4_PCI_CLASS_MASK			0xfff
 
-#define SLI4_PCI_SOFT_RESET_CSR		0x005c	/** register offset */
+#define SLI4_PCI_SOFT_RESET_CSR			0x005c	/* register offset */
 #define SLI4_PCI_SOFT_RESET_MASK		0x0080
 
 /*************************************************************************
@@ -99,7 +126,7 @@ sli_page_count(size_t bytes, uint32_t page_size)
 /**
  * @brief SLI_INTF - SLI Interface Definition Register
  */
-#define SLI4_INTF_REG			0x0058	/** register offset */
+#define SLI4_INTF_REG				0x0058	/* register offset */
 #define SLI4_INTF_VALID_SHIFT			29
 #define SLI4_INTF_VALID_MASK			0x7
 #define SLI4_INTF_VALID				0x6
@@ -115,7 +142,8 @@ sli_page_count(size_t bytes, uint32_t page_size)
 #define SLI4_IF_TYPE_BE3_SKH_VF		1
 #define SLI4_IF_TYPE_LANCER_FC_ETH	2
 #define SLI4_IF_TYPE_LANCER_RDMA	3
-#define SLI4_MAX_IF_TYPES		4
+#define SLI4_IF_TYPE_LANCER_G7		6
+#define SLI4_MAX_IF_TYPES		7
 
 /**
  * @brief ASIC_ID - SLI ASIC Type and Revision Register
@@ -137,7 +165,7 @@ sli_page_count(size_t bytes, uint32_t page_size)
 /**
  * @brief BMBX - Bootstrap Mailbox Register
  */
-#define SLI4_BMBX_REG			0x0160	/* register offset */
+#define SLI4_BMBX_REG				0x0160	/* register offset */
 #define SLI4_BMBX_MASK_HI			0x3
 #define SLI4_BMBX_MASK_LO			0xf
 #define SLI4_BMBX_RDY				BIT(0)
@@ -146,14 +174,14 @@ sli_page_count(size_t bytes, uint32_t page_size)
 								SLI4_BMBX_HI)
 #define SLI4_BMBX_WRITE_LO(r)			(((ocs_addr32_hi(r) & SLI4_BMBX_MASK_HI) << 30) | \
 								(((r) & ~SLI4_BMBX_MASK_LO) >> 2))
+#define SLI4_BMBX_SIZE				256
 
-#define SLI4_BMBX_SIZE			256
-
+#define SLI4_PORT_MIGRATION_BIT		16
 
 /**
  * @brief EQCQ_DOORBELL - EQ and CQ Doorbell Register
  */
-#define SLI4_EQCQ_DOORBELL_REG		0x120
+#define SLI4_EQCQ_DOORBELL_REG			0x120
 #define SLI4_EQCQ_DOORBELL_CI			BIT(9)
 #define SLI4_EQCQ_DOORBELL_QT			BIT(10)
 #define SLI4_EQCQ_DOORBELL_ARM			BIT(29)
@@ -166,25 +194,30 @@ sli_page_count(size_t bytes, uint32_t page_size)
 #define SLI4_EQCQ_CQ_ID_MASK_LO			0x03ff
 #define SLI4_EQCQ_EQCQ_ID_MASK_HI		0xf800
 
+#define SLI4_IF6_EQ_DOORBELL_REG		0x120
+#define SLI4_IF6_CQ_DOORBELL_REG		0xC0
+#define SLI4_IF6_DPP_DOORBELL_REG_SET		2
 /**
  * @brief SLIPORT_CONTROL - SLI Port Control Register
  */
-#define SLI4_SLIPORT_CONTROL_REG	0x0408
+#define SLI4_SLIPORT_CONTROL_REG		0x0408
 #define SLI4_SLIPORT_CONTROL_END		BIT(30)
 #define SLI4_SLIPORT_CONTROL_LITTLE_ENDIAN	(0)
 #define SLI4_SLIPORT_CONTROL_BIG_ENDIAN		BIT(30)
 #define SLI4_SLIPORT_CONTROL_IP			BIT(27)
 #define SLI4_SLIPORT_CONTROL_IDIS		BIT(22)
+#define SLI4_SLIPORT_CONTROL_FDD		BIT(31)
 
 /**
  * @brief SLI4_SLIPORT_ERROR1 - SLI Port Error Register
  */
-#define SLI4_SLIPORT_ERROR1		0x040c
+#define SLI4_SLIPORT_ERROR1			0x040c
+#define SLI4_SLIPORT_ERROR1_RQ_EMPTY_TIMEOUT	0x52004a01
 
 /**
  * @brief SLI4_SLIPORT_ERROR2 - SLI Port Error Register
  */
-#define SLI4_SLIPORT_ERROR2		0x0410
+#define SLI4_SLIPORT_ERROR2			0x0410
 
 /**
  * @brief User error registers
@@ -259,10 +292,56 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
 	return reg;
 }
 
+static inline uint32_t sli_iftype6_eq_doorbell(uint16_t n_popped, uint16_t id, uint8_t arm)
+{
+	uint32_t	reg = 0;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	struct {
+		uint32_t	eq_id:12,
+				:4,			/* clear interrupt */
+				number_popped:13,
+				arm:1,
+				:1,
+				io:1;
+	} * eq_doorbell = (void *)&reg;
+#else
+#error big endian version not defined
+#endif
+
+	eq_doorbell->eq_id = id;
+	eq_doorbell->number_popped = n_popped;
+	eq_doorbell->arm = arm;
+
+	return reg;
+}
+
+static inline uint32_t sli_iftype6_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t arm)
+{
+	uint32_t	reg = 0;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	struct {
+		uint32_t	cq_id:16,
+				number_popped:13,
+				arm:1,
+				:1,
+				se:1;
+	} * cq_doorbell = (void *)&reg;
+#else
+#error big endian version not defined
+#endif
+
+	cq_doorbell->cq_id = id;
+	cq_doorbell->number_popped = n_popped;
+	cq_doorbell->arm = arm;
+
+	return reg;
+}
+
 /**
  * @brief MQ_DOORBELL - MQ Doorbell Register
  */
-#define SLI4_MQ_DOORBELL_REG		0x0140	/* register offset */
+#define SLI4_MQ_DOORBELL_REG			0x0140	/* register offset */
+#define SLI4_IF6_MQ_DOORBELL_REG		0x0160	/* register offset if_type = 6 */
 #define SLI4_MQ_DOORBELL_NUM_SHIFT		16
 #define SLI4_MQ_DOORBELL_NUM_MASK		0x3fff
 #define SLI4_MQ_DOORBELL_ID_MASK		0xffff
@@ -272,7 +351,8 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
 /**
  * @brief RQ_DOORBELL - RQ Doorbell Register
  */
-#define SLI4_RQ_DOORBELL_REG		0x0a0	/* register offset */
+#define SLI4_RQ_DOORBELL_REG			0x0a0	/* register offset */
+#define SLI4_IF6_RQ_DOORBELL_REG		0x0080	/* register offset of if_type = 6 */
 #define SLI4_RQ_DOORBELL_NUM_SHIFT		16
 #define SLI4_RQ_DOORBELL_NUM_MASK		0x3fff
 #define SLI4_RQ_DOORBELL_ID_MASK		0xffff
@@ -282,7 +362,8 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
 /**
  * @brief WQ_DOORBELL - WQ Doorbell Register
  */
-#define SLI4_IO_WQ_DOORBELL_REG		0x040	/* register offset */
+#define SLI4_IO_WQ_DOORBELL_REG			0x040	/* register offset */
+#define SLI4_IF6_WQ_DOORBELL_REG		0x040	/* register offset for if_type = 6 */
 #define SLI4_WQ_DOORBELL_IDX_SHIFT		16
 #define SLI4_WQ_DOORBELL_IDX_MASK		0x00ff
 #define SLI4_WQ_DOORBELL_NUM_SHIFT		24
@@ -292,12 +373,23 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
 						 (((x) & SLI4_WQ_DOORBELL_IDX_MASK) << SLI4_WQ_DOORBELL_IDX_SHIFT) | \
 						  ((i) & SLI4_WQ_DOORBELL_ID_MASK))
 
+#define SLI4_DPP_WQ_DOORBELL_NUM_SHIFT		24
+#define SLI4_DPP_WQ_DOORBELL_NUM_MASK		0x00ff
+#define SLI4_DPP_WQ_DOORBELL_DPP		BIT(23)
+#define SLI4_DPP_WQ_DOORBELL_DPP_ID_SHIFT	16
+#define SLI4_DPP_WQ_DOORBELL_DPP_ID_MASK	0x001f
+#define SLI4_DPP_WQ_DOORBELL_ID_MASK		0xffff
+#define SLI4_DPP_WQ_DOORBELL(n, x, i)		((((n) & SLI4_DPP_WQ_DOORBELL_NUM_MASK) << SLI4_DPP_WQ_DOORBELL_NUM_SHIFT) | \
+						 (SLI4_DPP_WQ_DOORBELL_DPP) | \
+						 (((x) & SLI4_DPP_WQ_DOORBELL_DPP_ID_MASK) << SLI4_DPP_WQ_DOORBELL_DPP_ID_SHIFT) | \
+						  ((i) & SLI4_WQ_DOORBELL_ID_MASK))
+
 /**
  * @brief SLIPORT_SEMAPHORE - SLI Port Host and Port Status Register
  */
-#define SLI4_PORT_SEMAPHORE_REG_0	0x00ac	/** register offset Interface Type 0 + 1 */
-#define SLI4_PORT_SEMAPHORE_REG_1	0x0180	/** register offset Interface Type 0 + 1 */
-#define SLI4_PORT_SEMAPHORE_REG_23	0x0400	/** register offset Interface Type 2 + 3 */
+#define SLI4_PORT_SEMAPHORE_REG_0		0x00ac	/** register offset Interface Type 0 + 1 */
+#define SLI4_PORT_SEMAPHORE_REG_1		0x0180	/** register offset Interface Type 0 + 1 */
+#define SLI4_PORT_SEMAPHORE_REG_236		0x0400	/** register offset Interface Type 2 + 3 + 6*/
 #define SLI4_PORT_SEMAPHORE_PORT_MASK		0x0000ffff
 #define SLI4_PORT_SEMAPHORE_PORT(r)		((r) & SLI4_PORT_SEMAPHORE_PORT_MASK)
 #define SLI4_PORT_SEMAPHORE_HOST_MASK		0x00ff0000
@@ -321,19 +413,22 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
  * @brief SLIPORT_STATUS - SLI Port Status Register
  */
 
-#define SLI4_PORT_STATUS_REG_23		0x0404	/** register offset Interface Type 2 + 3 */
+#define SLI4_PORT_STATUS_REG_236		0x0404	/** register offset Interface Type 2 + 3 + 6*/
+#define SLI4_PORT_STATUS_FDP			BIT(21)	/** function specific dump present */
 #define SLI4_PORT_STATUS_RDY			BIT(23)	/** ready */
 #define SLI4_PORT_STATUS_RN			BIT(24)	/** reset needed */
 #define SLI4_PORT_STATUS_DIP			BIT(25)	/** dump present */
+#define SLI4_PORT_STATUS_SPP			BIT(27)	/** SLI port paused */
 #define SLI4_PORT_STATUS_OTI			BIT(29) /** over temp indicator */
 #define SLI4_PORT_STATUS_END			BIT(30)	/** endianness */
 #define SLI4_PORT_STATUS_ERR			BIT(31)	/** SLI port error */
 #define SLI4_PORT_STATUS_READY(r)		((r) & SLI4_PORT_STATUS_RDY)
 #define SLI4_PORT_STATUS_ERROR(r)		((r) & SLI4_PORT_STATUS_ERR)
 #define SLI4_PORT_STATUS_DUMP_PRESENT(r)	((r) & SLI4_PORT_STATUS_DIP)
+#define SLI4_PORT_STATUS_FDP_PRESENT(r)		((r) & SLI4_PORT_STATUS_FDP)
 
 
-#define SLI4_PHSDEV_CONTROL_REG_23		0x0414	/** register offset Interface Type 2 + 3 */
+#define SLI4_PHSDEV_CONTROL_REG_236		0x0414	/** register offset Interface Type 2 + 3 + 6*/
 #define SLI4_PHYDEV_CONTROL_DRST		BIT(0)	/** physical device reset */
 #define SLI4_PHYDEV_CONTROL_FRST		BIT(1)	/** firmware reset */
 #define SLI4_PHYDEV_CONTROL_DD			BIT(2)	/** diagnostic dump */
@@ -341,6 +436,7 @@ static inline uint32_t sli_cq_doorbell(uint16_t n_popped, uint16_t id, uint8_t a
 #define SLI4_PHYDEV_CONTROL_FRL_SHIFT		4
 #define SLI4_PHYDEV_CONTROL_FRL(r)		(((r) & SLI4_PHYDEV_CONTROL_FRL_MASK) >> \
 								SLI4_PHYDEV_CONTROL_FRL_SHIFT_SHIFT)
+#define SLI4_PHYDEV_CONTROL_CFP			BIT(11)	/** continue from pause */
 
 /*************************************************************************
  * SLI-4 mailbox command formats and definitions
@@ -384,12 +480,21 @@ typedef struct sli4_mbox_command_header_s {
 #define SLI4_MBOX_COMMAND_UNREG_VFI	0xa1
 #define SLI4_MBOX_COMMAND_UNREG_VPI	0x97
 #define SLI4_MBOX_COMMAND_WRITE_NVPARMS	0x03
-#define SLI4_MBOX_COMMAND_CONFIG_AUTO_XFER_RDY	0xAD
-#define SLI4_MBOX_COMMAND_CONFIG_AUTO_XFER_RDY_HP       0xAE
+#define SLI4_MBOX_COMMAND_CONFIG_TOW	0xAD
+#define SLI4_MBOX_COMMAND_CONFIG_TOW_HP	0xAE
+#define SLI4_MBOX_COMMAND_UPDATE_CFG	0x1b
 
 #define SLI4_MBOX_STATUS_SUCCESS	0x0000
 #define SLI4_MBOX_STATUS_FAILURE	0x0001
 #define SLI4_MBOX_STATUS_RPI_NOT_REG	0x1400
+#define SLI4_MBOX_EXT_STATUS_OBJ_UNSUPPORTED_FIRMWARE 0xEB
+#define SLI4_MBOX_STATUS_RPI_NOT_REG	0x1400
+#define SLI4_MBOX_STATUS_UNSUPPORTED_FEATURE 0x0011
+#define SLI4_MBOX_STATUS_INVALID_RPI	0x0021
+#define SLI4_MBOX_STATUS_INVALID_VPI	0x0030
+#define SLI4_MBOX_STATUS_RPI_CURRENTLY_REGISTERED 0x000B
+#define SLI4_MBOX_STATUS_RPI_CONFLICT	0x00AE
+#define SLI4_MBOX_STATUS_ILLEGAL_SIZE	0x9F04
 
 /**
  * @brief Buffer Descriptor Entry (BDE)
@@ -555,6 +660,27 @@ typedef struct sli4_cmd_config_link_s {
 } sli4_cmd_config_link_t;
 
 /**
+ * @brief DUMP Type 2
+ */
+typedef struct sli4_cmd_dump2_s {
+	sli4_mbox_command_header_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	type:4,
+			:28;
+	uint32_t	region_id:16,
+			entry_idx:16;
+	uint32_t	aval_len:24,
+			rsvd:8;
+	uint32_t	phys_addr_low;
+	uint32_t	phys_addr_high;
+	uint32_t	returned_byte_cnt;
+	uint32_t	rsvd2[57];
+#else
+#error big endian version not defined
+#endif
+} sli4_cmd_dump2_t;
+
+/**
  * @brief DUMP Type 4
  */
 #define SLI4_WKI_TAG_SAT_TEM 0x1040
@@ -572,6 +698,31 @@ typedef struct sli4_cmd_dump4_s {
 #error big endian version not defined
 #endif
 } sli4_cmd_dump4_t;
+
+#define SLI4_REQ_INIT_CFG	1
+#define SLI4_REQ_UPDATE_CFG	2
+#define SLI4_REQ_DEL_CFG	3
+
+/**
+ * @brief Update configuration data
+ */
+typedef struct sli4_cmd_update_cfg_s {
+	sli4_mbox_command_header_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	req_type:4,
+			version:1,
+			di:1,
+			ack:1,
+			rsvd1:25;
+	uint32_t	region_id:16,
+			entry_len:16;
+	uint32_t	response_info;
+	uint32_t	byte_cnt;
+	sli4_bde_t	bde;
+#else
+#error big endian version not defined
+#endif
+} sli4_cmd_update_cfg_t;
 
 /**
  * @brief FW_INITIALIZE - initialize a SLI port
@@ -652,6 +803,15 @@ typedef struct sli4_cmd_init_link_s {
 			#define FC_LINK_SPEED_32G		20
 			#define FC_LINK_SPEED_AUTO_32_16_8	21
 			#define FC_LINK_SPEED_AUTO_32_16	22
+			#define FC_LINK_SPEED_64G		23
+			#define FC_LINK_SPEED_AUTO_64_32_16	24
+			#define FC_LINK_SPEED_AUTO_64_32	25
+			#define FC_LINK_SPEED_128G		26
+			#define FC_LINK_SPEED_AUTO_128_64_32	27
+			#define FC_LINK_SPEED_AUTO_128_64	28
+			#define FC_LINK_SPEED_256G		29
+			#define FC_LINK_SPEED_AUTO_256_128_64	30
+			#define FC_LINK_SPEED_AUTO_256_128	31
 #else
 #error big endian version not defined
 #endif
@@ -706,6 +866,9 @@ typedef struct sli4_cmd_post_xri_s {
 			dl:1,
 			di:1,
 			val:1;
+	uint32_t	:30,
+			pool:1,
+			:1;
 #else
 #error big endian version not defined
 #endif
@@ -751,7 +914,10 @@ typedef struct sli4_res_read_config_s {
 	uint32_t	r_a_tov:16,
 			:16;
 	uint32_t	rsvd7;
-	uint32_t	rsvd8;
+	uint32_t	bbscn_min:4,
+			bbscn_max:4,
+			bbscn_def:4,
+			:20;
 	uint32_t	lmt:16,		/** Link Module Type */
 			:16;
 	uint32_t	rsvd10;
@@ -907,7 +1073,10 @@ typedef struct sli4_cmd_read_topology_s {
 	uint32_t	attention_type:8,
 			il:1,
 			pb_recvd:1,
-			:22;
+			fec:1,
+			:2,
+			fecen:1,
+			:18;
 	uint32_t	topology:8,
 			lip_type:8,
 			lip_al_ps:8,
@@ -930,6 +1099,8 @@ typedef struct sli4_cmd_read_topology_s {
 			specified_al_pa:16;
 	uint32_t	initial_n_port_id:24,
 			:8;
+	uint32_t	trunk_config:8,
+			:24;
 #else
 #error big endian version not defined
 #endif
@@ -953,6 +1124,9 @@ typedef struct sli4_cmd_read_topology_s {
 #define SLI4_READ_TOPOLOGY_SPEED_10G	0x40
 #define SLI4_READ_TOPOLOGY_SPEED_16G	0x80
 #define SLI4_READ_TOPOLOGY_SPEED_32G	0x90
+#define SLI4_READ_TOPOLOGY_SPEED_64G	0xA0
+#define SLI4_READ_TOPOLOGY_SPEED_128G	0xB0
+#define SLI4_READ_TOPOLOGY_SPEED_256G	0xC0
 
 /**
  * @brief REG_FCFI - activate a FC Forwarder
@@ -981,9 +1155,22 @@ typedef struct sli4_cmd_reg_fcfi_s {
 #endif
 } sli4_cmd_reg_fcfi_t;
 
-//#define SLI4_CMD_REG_FCFI_MRQ_MAX_NUM_RQ	16
+#define REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME	1
+#define REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI	0
+
+/* Hash value of the S_ID/D_ID/OX_ID fields of the received frame */
+#define REG_FCFI_RQ_SELECTION_POLICY_XRI_HASH	0
+
+/* Hash value of the S_ID/D_ID fields of the received frame */
+#define REG_FCFI_RQ_SELECTION_POLICY_RPI_HASH	1
+
+/* Based on the FC-NVME CMND IU connection id, modulo the number of elements in the RQ set */
+#define REG_FCFI_RQ_SELECTION_POLICY_FC_NVME	3
+
 #define SLI4_CMD_REG_FCFI_SET_FCFI_MODE		0
 #define SLI4_CMD_REG_FCFI_SET_MRQ_MODE		1
+#define SLI4_CMD_REG_FCFI_MRQ_SET_0		0
+#define SLI4_CMD_REG_FCFI_MRQ_SET_1		1
 
 typedef struct sli4_cmd_reg_fcfi_mrq_s {
 	sli4_mbox_command_header_t	hdr;
@@ -1046,14 +1233,15 @@ typedef struct sli4_cmd_reg_rpi_s {
 	sli4_mbox_command_header_t	hdr;
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	rpi:16,
-			:16;
+			:15,
+			nsler:1;
 	uint32_t	remote_n_port_id:24,
 			upd:1,
 			:2,
 			etow:1,
 			:1,
 			terp:1,
-			:1,
+			hlm:1,
 			ci:1;
 	sli4_bde_t	bde_64;
 	uint32_t	vpi:16,
@@ -1083,7 +1271,9 @@ typedef struct sli4_cmd_reg_vfi_s {
 	uint32_t	e_d_tov;
 	uint32_t	r_a_tov;
 	uint32_t	local_n_port_id:24,	// vp=TRUE
-			:8;
+			:3,
+			bbcr:1,
+			bbscn:4;
 #else
 #error big endian version not defined
 #endif
@@ -1113,6 +1303,7 @@ typedef struct sli4_cmd_reg_vpi_s {
  */
 typedef union {
 #if BYTE_ORDER == LITTLE_ENDIAN
+#define SLI4_FEATURE_ASHDR	(1 << 17)
 	struct {
 		uint32_t	iaab:1,		/** inhibit auto-ABTS originator */
 				npiv:1,		/** NPIV support */
@@ -1131,7 +1322,8 @@ typedef union {
 				dcl2:1,		/** Disable Class 2 */
 				rsco:1,		/** Receive Sequence Coalescing Optimizations */
 				mrqp:1,		/** Multi RQ Pair Mode Support */
-				:15;
+				ashdr:1,	/** Application HDR Support */
+				:14;
 	} flag;
 	uint32_t	dword;
 #else
@@ -1158,6 +1350,7 @@ typedef struct sli4_cmd_request_features_s {
  * in a separate memory buffer (mem)
  */
 
+#define SLI4_GET_SLI_CONFIG_OFFSET(buf, offset)		((uint8_t *)buf + offset)
 
 typedef struct sli4_sli_config_pmd_s {
 	uint32_t	address_low;
@@ -1270,6 +1463,10 @@ typedef struct sli4_cmd_read_link_stats_s {
 	uint32_t	received_dropped_no_aer_count;
 	uint32_t	received_dropped_no_available_rpi_resources_count;
 	uint32_t	received_dropped_no_available_xri_resources_count;
+	uint32_t	fec_corrected_blocks_count;
+	uint32_t	fec_uncorrectable_blocks_count;
+	uint32_t	lrr_count_local;
+	uint32_t	lr_count_remote;
 
 #else
 #error big endian version not defined
@@ -1412,6 +1609,83 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #endif
 } sli4_cmd_config_auto_xfer_rdy_hp_t;
 
+/**
+ * @brief AUTO_XFER_RDY - Configure the Target Optimized Write Feature
+ */
+typedef struct sli4_cmd_config_tow_s {
+	sli4_mbox_command_header_t      hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+uint32_t        ooo:1,
+		axs:1,
+		fbs:1,
+		:3,
+		xpns:1,
+		:2,
+		axn:1,
+		fbn:1,
+		:3,
+		xpnn:1,
+		:17;
+uint32_t        scsi_max_data_len;
+uint32_t        :31,
+                version:1;
+uint32_t        rsvd4;
+uint32_t        nvme_max_data_len;
+uint32_t        pool0_xri_cnt:16,
+		pool1_xri_cnt:16;
+#else
+#error big endian version not defined
+#endif
+} sli4_cmd_config_tow_t;
+
+typedef struct sli4_cmd_config_tow_hp_s {
+	sli4_mbox_command_header_t      hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+uint32_t        ooo:1,
+		axs:1,
+		fbs:1,
+		:3,
+		xpns:1,
+		:2,
+		axn:1,
+		fbn:1,
+		:3,
+		xpnn:1,
+		:17;
+uint32_t        scsi_max_data_len;
+uint32_t        esoc:1,
+		:7,
+		esocn:1,
+		:23;
+uint32_t        scsi_block_size:16,
+		nvme_block_size:16;
+uint32_t        nvme_max_data_len;
+uint32_t        pool0_xri_cnt:16,
+		pool1_xri_cnt:16;
+#else
+#error big endian version not defined
+#endif
+} sli4_cmd_config_tow_hp_t;
+
+/**
+ * @brief RUN_BIU_DIAG
+ */
+typedef struct sli4_cmd_config_run_biu_diag_s {
+	sli4_mbox_command_header_t      hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t		 rsvd1;
+	uint32_t                 tx_buf_len:24,
+				 tx_buf_flags:8;
+	uint32_t                 tx_phy_addr_low;
+	uint32_t                 tx_phy_addr_high;
+	uint32_t                 rx_buf_len:24,
+				 rx_buf_flags:8;
+	uint32_t                 rx_phy_addr_low;
+	uint32_t                 rx_phy_addr_high;
+#else
+#error big endian version not defined
+#endif
+} sli4_cmd_config_run_biu_diag_t;
 
 /*************************************************************************
  * SLI-4 common configuration command formats and definitions
@@ -1423,9 +1697,13 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #define SLI4_CFG_STATUS_ILLEGAL_FIELD		0x03
 
 #define SLI4_MGMT_STATUS_FLASHROM_READ_FAILED	0xcb
+#define SLI4_MGMT_STATUS_FEATURE_NOT_SUPPORTED	0x44
+#define SLI4_MGMT_STATUS_COMMAND_NOT_SUPPORTED 	0x42
 
 #define SLI4_CFG_ADD_STATUS_NO_STATUS		0x00
 #define SLI4_CFG_ADD_STATUS_INVALID_OPCODE	0x1e
+#define SLI4_MGMT_ADD_STATUS_INVALID_OBJECT	0xa0
+#define SLI4_MGMT_ADD_STATUS_INVALID_OFFSET	0xa1
 
 /**
  * Subsystem values.
@@ -1436,6 +1714,8 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #define SLI4_SUBSYSTEM_DMTF			0x11
 
 #define	SLI4_OPC_LOWLEVEL_SET_WATCHDOG		0X36
+#define	SLI4_OPC_LOWLEVEL_SET_DIAG_LOG_OPTIONS	0X37
+#define	SLI4_OPC_LOWLEVEL_GET_ITCM_PARITY_STATS	0x38
 
 /**
  * Common opcode (OPC) values.
@@ -1452,6 +1732,7 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #define SLI4_OPC_COMMON_GET_CNTL_ATTRIBUTES		0x20
 #define SLI4_OPC_COMMON_NOP				0x21
 #define SLI4_OPC_COMMON_GET_RESOURCE_EXTENT_INFO	0x9a
+#define SLI4_OPC_COMMON_SET_SRIOV_DEFAULT_CONFIG	0xb0
 #define SLI4_OPC_COMMON_GET_SLI4_PARAMETERS		0xb5
 #define SLI4_OPC_COMMON_QUERY_FW_CONFIG			0x3a
 #define SLI4_OPC_COMMON_GET_PORT_NAME			0x4d
@@ -1465,6 +1746,7 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #define SLI4_OPC_COMMON_EXT_FAT_CONFIGURE_SNAPSHOT	0x7f
 #define SLI4_OPC_COMMON_EXT_FAT_RETRIEVE_SNAPSHOT	0x80
 #define SLI4_OPC_COMMON_EXT_FAT_READ_STRING_TABLE	0x82
+#define SLI4_OPC_COMMON_RUN_BIU_DIAG			0x84
 #define SLI4_OPC_COMMON_GET_FUNCTION_CONFIG		0xa0
 #define SLI4_OPC_COMMON_GET_PROFILE_CONFIG		0xa4
 #define SLI4_OPC_COMMON_SET_PROFILE_CONFIG		0xa5
@@ -1479,6 +1761,12 @@ typedef struct sli4_cmd_config_auto_xfer_rdy_hp_s {
 #define SLI4_OPC_COMMON_SET_FEATURES			0xbf
 #define SLI4_OPC_COMMON_GET_RECONFIG_LINK_INFO		0xc9
 #define SLI4_OPC_COMMON_SET_RECONFIG_LINK_ID		0xca
+
+#define SLI4_OPC_FCOE_SET_LINK_DIAG_STATE		0x22
+#define SLI4_OPC_FCOE_SET_LINK_DIAG_LOOPBACK		0x23
+#define SLI4_OPC_FCOE_SET_DPORT_MODE			0x27
+#define SLI4_OPC_FCOE_GET_DPORT_RESULTS			0x28
+#define SLI4_OPC_FC_SET_TRUNK_MODE			0x42
 
 /**
  * DMTF opcode (OPC) values.
@@ -1667,6 +1955,26 @@ typedef struct sli4_res_common_create_queue_s {
 #endif
 } sli4_res_common_create_queue_t;
 
+typedef struct sli4_res_create_wq_s {
+	sli4_res_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t q_id:16,
+		 :13,
+		 sfq:1,
+		 :1,
+		 dpp:1;
+	uint32_t wq_reg_set:4,
+		 :28;
+	uint32_t wq_db_offset;
+	uint32_t dpp_reg_set:4,
+		 :12,
+		 dpp_id:5,
+		 :11;
+	uint32_t dpp_offset;
+#else
+#error big endian version not defined
+#endif
+} sli4_res_create_wq_t;
 
 typedef struct sli4_res_common_create_queue_set_s {
 	sli4_res_hdr_t	hdr;
@@ -1677,7 +1985,6 @@ typedef struct sli4_res_common_create_queue_set_s {
 #error big endian version not defined
 #endif
 } sli4_res_common_create_queue_set_t;
-
 
 /**
  * @brief Common Destroy CQ
@@ -1721,7 +2028,8 @@ typedef struct sli4_req_common_create_eq_s {
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	num_pages:16,
 			:16;
-	uint32_t	:29,
+	uint32_t	:28,
+			autovalid:1,
 			valid:1,
 			:1,
 			eqesz:1;
@@ -1750,6 +2058,8 @@ typedef struct sli4_req_common_create_eq_s {
 
 #define SLI4_EQE_SIZE_4			0
 #define SLI4_EQE_SIZE_16		1
+
+#define SLI4_EQE_BYTES			(sizeof(uint32_t))
 
 /**
  * @brief Common Destroy EQ
@@ -1798,6 +2108,8 @@ typedef struct sli4_req_common_create_mq_ext_s {
 #define SLI4_MQE_SIZE_32		0x06
 #define SLI4_MQE_SIZE_64		0x07
 #define SLI4_MQE_SIZE_128		0x08
+
+#define SLI4_MQE_BYTES			256
 
 #define SLI4_ASYNC_EVT_LINK_STATE	BIT(1)
 #define SLI4_ASYNC_EVT_FCOE_FIP		BIT(2)
@@ -1994,6 +2306,8 @@ typedef struct sli4_res_common_get_resource_extent_info_s {
 #endif
 } sli4_res_common_get_resource_extent_info_t;
 
+#define SLI4_128BYTE_WQE_SUPPORT	0x02
+
 /**
  * @brief COMMON_GET_SLI4_PARAMETERS
  */
@@ -2100,9 +2414,21 @@ typedef struct sli4_res_common_get_sli4_parameters_s {
 			physical_rpi_max:16;
 	uint32_t	physical_vpi_max:16,
 			physical_vfi_max:16;
-	uint32_t	rsvd19;
-	uint32_t	frag_num_field_offset:16,	/* dword 20 */
-			frag_num_field_size:16;
+	uint32_t	xecb:1,
+			mdsd:1,
+			efwd:1,
+			nvme:1,
+			xib:1,
+			tow:1,
+			xpsgl:1,
+			fdb:1,
+			edr:1,
+			sriuns:1,
+			dw19rsvd:2,
+			nsler:1,
+			dw19rsvd1:19;
+	uint16_t	dw20w0;				/* dword 20 */
+	uint16_t	dw20w1;
 	uint32_t	sgl_index_field_offset:16,	/* dword 21 */
 			sgl_index_field_size:16;
 	uint32_t	chain_sge_initial_value_lo;	/* dword 22 */
@@ -2356,6 +2682,174 @@ typedef struct sli4_res_common_ext_fat_read_string_table_s {
 #endif
 } sli4_res_common_ext_fat_read_string_table_t;
 
+#define SFP_WAVELENGTH_LC1310   1310
+#define SFP_WAVELENGTH_LL1550   1550
+
+/*  SFF-8472 TABLE 3.4 */
+#define  SFF_PG0_CONNECTOR_UNKNOWN    0x00   /* Unknown  */
+#define  SFF_PG0_CONNECTOR_SC         0x01   /* SC       */
+#define  SFF_PG0_CONNECTOR_FC_COPPER1 0x02   /* FC style 1 copper connector */
+#define  SFF_PG0_CONNECTOR_FC_COPPER2 0x03   /* FC style 2 copper connector */
+#define  SFF_PG0_CONNECTOR_BNC        0x04   /* BNC / TNC */
+#define  SFF_PG0_CONNECTOR__FC_COAX   0x05   /* FC coaxial headers */
+#define  SFF_PG0_CONNECTOR_FIBERJACK  0x06   /* FiberJack */
+#define  SFF_PG0_CONNECTOR_LC         0x07   /* LC        */
+#define  SFF_PG0_CONNECTOR_MT         0x08   /* MT - RJ   */
+#define  SFF_PG0_CONNECTOR_MU         0x09   /* MU        */
+#define  SFF_PG0_CONNECTOR_SF         0x0A   /* SG        */
+#define  SFF_PG0_CONNECTOR_OPTICAL_PIGTAIL 0x0B /* Optical pigtail */
+#define  SFF_PG0_CONNECTOR_OPTICAL_PARALLEL 0x0C /* MPO Parallel Optic */
+#define  SFF_PG0_CONNECTOR_HSSDC_II   0x20   /* HSSDC II */
+#define  SFF_PG0_CONNECTOR_COPPER_PIGTAIL 0x21 /* Copper pigtail */
+#define  SFF_PG0_CONNECTOR_RJ45       0x22  /* RJ45 */
+
+/* SFF-8472 Table 3.1 Diagnostics: Data Fields Address/Page A0 */
+
+#define SSF_IDENTIFIER                  0
+#define SSF_EXT_IDENTIFIER              1
+#define SSF_CONNECTOR                   2
+#define SSF_TRANSCEIVER_CODE_B0         3
+#define SSF_TRANSCEIVER_CODE_B1         4
+#define SSF_TRANSCEIVER_CODE_B2         5
+#define SSF_TRANSCEIVER_CODE_B3         6
+#define SSF_TRANSCEIVER_CODE_B4         7
+#define SSF_TRANSCEIVER_CODE_B5         8
+#define SSF_TRANSCEIVER_CODE_B6         9
+#define SSF_TRANSCEIVER_CODE_B7         10
+#define SSF_ENCODING                    11
+#define SSF_BR_NOMINAL                  12
+#define SSF_RATE_IDENTIFIER             13
+#define SSF_LENGTH_9UM_KM               14
+#define SSF_LENGTH_9UM                  15
+#define SSF_LENGTH_50UM_OM2             16
+#define SSF_LENGTH_62UM_OM1             17
+#define SFF_LENGTH_COPPER               18
+#define SSF_LENGTH_50UM_OM3             19
+#define SSF_VENDOR_NAME                 20
+#define SSF_VENDOR_OUI                  36
+#define SSF_VENDOR_PN                   40
+#define SSF_VENDOR_REV                  56
+#define SSF_WAVELENGTH_B1               60
+#define SSF_WAVELENGTH_B0               61
+#define SSF_CC_BASE                     63
+#define SSF_OPTIONS_B1                  64
+#define SSF_OPTIONS_B0                  65
+#define SSF_BR_MAX                      66
+#define SSF_BR_MIN                      67
+#define SSF_VENDOR_SN                   68
+#define SSF_DATE_CODE                   84
+#define SSF_MONITORING_TYPEDIAGNOSTIC   92
+#define SSF_ENHANCED_OPTIONS            93
+#define SFF_8472_COMPLIANCE             94
+#define SSF_CC_EXT                      95
+#define SSF_A0_VENDOR_SPECIFIC          96
+
+/* SFF-8472 Table 3.1a Diagnostics: Data Fields Address/Page A2 */
+
+#define SSF_TEMP_HIGH_ALARM             0
+#define SSF_TEMP_LOW_ALARM              2
+#define SSF_TEMP_HIGH_WARNING           4
+#define SSF_TEMP_LOW_WARNING            6
+#define SSF_VOLTAGE_HIGH_ALARM          8
+#define SSF_VOLTAGE_LOW_ALARM           10
+#define SSF_VOLTAGE_HIGH_WARNING        12
+#define SSF_VOLTAGE_LOW_WARNING         14
+#define SSF_BIAS_HIGH_ALARM             16
+#define SSF_BIAS_LOW_ALARM              18
+#define SSF_BIAS_HIGH_WARNING           20
+#define SSF_BIAS_LOW_WARNING            22
+#define SSF_TXPOWER_HIGH_ALARM          24
+#define SSF_TXPOWER_LOW_ALARM           26
+#define SSF_TXPOWER_HIGH_WARNING        28
+#define SSF_TXPOWER_LOW_WARNING         30
+#define SSF_RXPOWER_HIGH_ALARM          32
+#define SSF_RXPOWER_LOW_ALARM           34
+#define SSF_RXPOWER_HIGH_WARNING        36
+#define SSF_RXPOWER_LOW_WARNING         38
+#define SSF_EXT_CAL_CONSTANTS           56
+#define SSF_CC_DMI                      95
+#define SFF_TEMPERATURE_B1              96
+#define SFF_TEMPERATURE_B0              97
+#define SFF_VCC_B1                      98
+#define SFF_VCC_B0                      99
+#define SFF_TX_BIAS_CURRENT_B1          100
+#define SFF_TX_BIAS_CURRENT_B0          101
+#define SFF_TXPOWER_B1                  102
+#define SFF_TXPOWER_B0                  103
+#define SFF_RXPOWER_B1                  104
+#define SFF_RXPOWER_B0                  105
+#define SSF_STATUS_CONTROL              110
+#define SSF_ALARM_FLAGS                 112
+#define SSF_WARNING_FLAGS               116
+#define SSF_EXT_TATUS_CONTROL_B1        118
+#define SSF_EXT_TATUS_CONTROL_B0        119
+#define SSF_A2_VENDOR_SPECIFIC          120
+#define SSF_USER_EEPROM                 128
+#define SSF_VENDOR_CONTROL              148
+
+/* Tranceiver codes Fibre Channel SFF-8472 Table 3.5. */
+
+struct sff_trasnceiver_codes_byte0 {
+        uint8_t inifiband:4;
+        uint8_t teng_ethernet:4;
+};
+
+struct sff_trasnceiver_codes_byte1 {
+        uint8_t  sonet:6;
+        uint8_t  escon:2;
+};
+
+struct sff_trasnceiver_codes_byte2 {
+        uint8_t  soNet:8;
+};
+
+struct sff_trasnceiver_codes_byte3 {
+        uint8_t ethernet:8;
+};
+
+struct sff_trasnceiver_codes_byte4 {
+        uint8_t fc_el_lo:1;
+        uint8_t fc_lw_laser:1;
+        uint8_t fc_sw_laser:1;
+        uint8_t fc_md_distance:1;
+        uint8_t fc_lg_distance:1;
+        uint8_t fc_int_distance:1;
+        uint8_t fc_short_distance:1;
+        uint8_t fc_vld_distance:1;
+};
+
+struct sff_trasnceiver_codes_byte5 {
+        uint8_t reserved1:1;
+        uint8_t reserved2:1;
+        uint8_t fc_sfp_active:1;  /* Active cable   */
+        uint8_t fc_sfp_passive:1; /* Passive cable  */
+        uint8_t fc_lw_laser:1;     /* Longwave laser */
+        uint8_t fc_sw_laser_sl:1;
+        uint8_t fc_sw_laser_sn:1;
+        uint8_t fc_el_hi:1;        /* Electrical enclosure high bit */
+};
+
+struct sff_trasnceiver_codes_byte6 {
+        uint8_t fc_tm_sm:1;      /* Single Mode */
+        uint8_t reserved:1;
+        uint8_t fc_tm_m6:1;       /* Multimode, 62.5um (M6) */
+        uint8_t fc_tm_tv:1;      /* Video Coax (TV) */
+        uint8_t fc_tm_mi:1;      /* Miniature Coax (MI) */
+        uint8_t fc_tm_tp:1;      /* Twisted Pair (TP) */
+        uint8_t fc_tm_tw:1;      /* Twin Axial Pair  */
+};
+
+struct sff_trasnceiver_codes_byte7 {
+        uint8_t fc_sp_100MB:1;   /*  100 MB/sec */
+        uint8_t reserve:1;
+        uint8_t fc_sp_200mb:1;   /*  200 MB/sec */
+        uint8_t fc_sp_3200MB:1;  /* 3200 MB/sec */
+        uint8_t fc_sp_400MB:1;   /*  400 MB/sec */
+        uint8_t fc_sp_1600MB:1;  /* 1600 MB/sec */
+        uint8_t fc_sp_800MB:1;   /*  800 MB/sec */
+        uint8_t fc_sp_1200MB:1;  /* 1200 MB/sec */
+};
+
 /**
  * @brief COMMON_READ_TRANSCEIVER_DATA
  *
@@ -2480,7 +2974,8 @@ typedef struct sli4_req_common_set_dump_location_s {
 	sli4_req_hdr_t	hdr;
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	buffer_length:24,
-			:6,
+			:5,
+			fdb:1,
 			blp:1,
 			qry:1;
 	uint32_t	buf_addr_low;
@@ -2493,12 +2988,31 @@ typedef struct sli4_req_common_set_dump_location_s {
 typedef struct sli4_res_common_set_dump_location_s {
 	sli4_res_hdr_t	hdr;
 #if BYTE_ORDER == LITTLE_ENDIAN
-	uint32_t	buffer_length:24,
-			:8;
+	uint32_t	buffer_length;
 #else
 #error big endian version not defined
 #endif
 }sli4_res_common_set_dump_location_t;
+
+/**
+ * @brief COMMON_SET_LOOPBACK_MODE
+ */
+typedef struct sli4_req_common_set_loopback_mode_s {
+	sli4_req_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	typ:2,
+			rsvd:14,
+			link_number:6,
+			link_type:2,
+			:8;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_loopback_mode_t;
+
+typedef struct sli4_res_common_set_loopback_mode_s {
+	sli4_res_hdr_t	hdr;
+} sli4_res_common_set_loopback_mode_t;
 
 /**
  * @brief COMMON_SET_SET_FEATURES
@@ -2510,12 +3024,15 @@ typedef struct sli4_res_common_set_dump_location_s {
 #define SLI4_SET_FEATURES_FEC				0x06
 #define SLI4_SET_FEATURES_PCIE_RECV_DETECT		0x07
 #define SLI4_SET_FEATURES_DIF_MEMORY_MODE		0x08
-#define SLI4_SET_FEATURES_DISABLE_SLI_PORT_PAUSE_STATE	0x09
+#define SLI4_SET_FEATURES_SLI_PORT_PAUSE_STATE		0x09
 #define SLI4_SET_FEATURES_ENABLE_PCIE_OPTIONS		0x0A
-#define SLI4_SET_FEATURES_SET_CONFIG_AUTO_XFER_RDY_T10PI	0x0C
+#define SLI4_SET_FEATURES_SET_CONFIG_AXR_T10PI		0x0C
+#define SLI4_SET_FEATURES_SET_CONFIG_TOW_T10PI		0x1C
 #define SLI4_SET_FEATURES_ENABLE_MULTI_RECEIVE_QUEUE	0x0D
 #define SLI4_SET_FEATURES_SET_FTD_XFER_HINT		0x0F
 #define SLI4_SET_FEATURES_SLI_PORT_HEALTH_CHECK		0x11
+#define SLI4_SET_FEATURES_AUTO_RSP_PARAM_RESET		0x19
+#define SLI4_SET_FEATURES_CONFIG_DUAL_DUMP		0x1E
 
 typedef struct sli4_req_common_set_features_s {
 	sli4_req_hdr_t	hdr;
@@ -2527,6 +3044,17 @@ typedef struct sli4_req_common_set_features_s {
 #error big endian version not defined
 #endif
 } sli4_req_common_set_features_t;
+
+typedef struct sli4_res_common_set_features_s {
+	sli4_res_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	feature;
+	uint32_t	param_len;
+	uint32_t	params[8];
+#else
+#error big endian version not defined
+#endif
+} sli4_res_common_set_features_t;
 
 typedef struct sli4_req_common_set_features_dif_seed_s {
 #if BYTE_ORDER == LITTLE_ENDIAN
@@ -2559,7 +3087,7 @@ typedef struct sli4_req_common_set_features_multirq_s {
 #endif
 } sli4_req_common_set_features_multirq_t;
 
-typedef struct sli4_req_common_set_features_xfer_rdy_t10pi_s {
+typedef struct sli4_req_common_set_features_axr_t10pi_s {
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	rtc:1,
 			atv:1,
@@ -2573,7 +3101,28 @@ typedef struct sli4_req_common_set_features_xfer_rdy_t10pi_s {
 #else
 #error big endian version not defined
 #endif
-} sli4_req_common_set_features_xfer_rdy_t10pi_t;
+} sli4_req_common_set_features_axr_t10pi_t;
+
+typedef struct sli4_req_common_set_features_tow_t10pi_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t		srti:1,
+				srtc:1,
+				sipt:1,
+				sspt:1,
+				smm:1,
+				:11,
+				nrti:1,
+				nrtc:1,
+				nipt:1,
+				nspt:1,
+				nmm:1,
+				:11;
+	sli4_diseed_sge_t	scsi_diseed_sge;
+	uint32_t		nvme_diseed_sge[4];
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_features_tow_t10pi_t;
 
 typedef struct sli4_req_common_set_features_health_check_s {
 #if BYTE_ORDER == LITTLE_ENDIAN
@@ -2592,6 +3141,62 @@ typedef struct sli4_req_common_set_features_set_fdt_xfer_hint_s {
 #error big endian version not defined
 #endif
 } sli4_req_common_set_features_set_fdt_xfer_hint_t;
+
+#define SLI4_CONFIG_FEC_LINK_TYPE_ETH	(0)
+#define SLI4_CONFIG_FEC_LINK_TYPE_FC	(1)
+
+typedef struct sli4_req_common_set_features_config_fec_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	link_number:6,
+			link_type:2,
+			:8,
+			en:1,
+			:15;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_features_config_fec_t;
+
+typedef struct sli4_req_common_set_features_pause_state_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	eps:1,
+			:31;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_features_pause_state_t;
+
+typedef struct sli4_req_common_set_features_auto_response_param_val_reset_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	pz:1,
+			:31;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_features_auto_response_param_val_reset_t;
+
+typedef struct sli4_req_common_set_features_dual_dump_param_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	dual_dump:1,
+#define SLI4_SET_FEATURES_SET_DUAL_DUMP		0
+#define SLI4_SET_FEATURES_QUERY_DUAL_DUMP	1
+			query:1,
+			:30;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_features_dual_dump_param_t;
+
+typedef struct sli4_res_common_set_features_dual_dump_param_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+#define SLI4_DUAL_DUMP_FEATURE_ENABLED		1
+#define SLI4_DUAL_DUMP_FEATURE_DISABLED		0
+	uint32_t	dual_dump:1,
+			:31;
+#else
+#error big endian version not defined
+#endif
+} sli4_res_common_set_features_dual_dump_param_t;
 
 /**
  * @brief DMTF_EXEC_CLP_CMD
@@ -2698,6 +3303,52 @@ typedef struct sli4_isap_resource_descriptor_v1_s {
 	uint32_t        rsvd3[3];
 } sli4_isap_resouce_descriptor_v1_t;
 
+typedef struct sli4_rsrc_desc_fcfcoe_v0 {
+	uint32_t desc_type:8,
+#define SLI4_RSRC_DESC_TYPE_FCFCOE			0x43
+		 rsvd0:18,
+		 vlan_valid:1,
+		 vf_template:1,
+		 qos_units:1,
+		 del_resc:1,
+		 immediate:1,
+		 no_save:1;
+	uint32_t vf_num:8,
+		 rsvd1:8,
+		 pf_num:8,
+		 rsvd1_2:8;
+	uint32_t rpi_count:16,
+#define SLI4_RSRC_DESC_KEEP_PRIOR_RESC_VALUE		0xffff
+		 xri_count:16;
+	uint32_t wq_count:16,
+		 rq_count:16;
+	uint32_t cq_count:16,
+		 vpi_count:16;
+	uint32_t fcfi_count:16,
+		 vfi_count:16;
+	uint8_t	wwnn[8];	/* word 6-7 */
+#define SLI4_RSRC_DESC_WWN_SEL_DEFAULT			0xffffffff
+	uint8_t wwpn[8];	/* word 8-9 */
+	uint8_t enode_mac[8];	/* word 10-11, msb 2 bytes are reserved */
+	uint32_t vlan:16,
+		 rsvd:16;
+	uint32_t link_num:6,
+#define SLI4_RSRC_DESC_LINK_NUM_NO_CHANGE		0x3f
+		 link_type:2,
+#define SLI4_RSRC_DESC_LINK_TYPE_ETH			0x0
+#define SLI4_RSRC_DESC_LINK_TYPE_FC			0x1
+		 link_map_changeable:1,
+		 lld:1,
+		 rsvd13:6,
+		 eq_count:16;
+	uint32_t bw_min;
+	uint32_t bw_max;
+#define SLI4_RSRC_DESC_BW_NO_CHANGE			0xffffffff
+	uint32_t iops_min;
+	uint32_t iops_max;
+#define SLI4_RSRC_DESC_IOPS_NO_CHANGE			0xffffffff
+} sli4_rsrc_desc_fcfcoe_v0_t;
+
 /**
  * @brief COMMON_GET_FUNCTION_CONFIG
  */
@@ -2746,6 +3397,17 @@ typedef struct sli4_req_common_set_profile_config_s {
 	uint32_t        desc_count;
 	uint32_t        desc[0];
 } sli4_req_common_set_profile_config_t;
+
+/**
+ * @brief COMMON_SET_PROFILE_CONFIG V0
+ */
+typedef struct sli4_req_common_set_profile_config_v0_s {
+	sli4_req_hdr_t  hdr;
+	uint32_t        profile_id:8,
+			:24;
+	uint32_t        desc_count;
+	uint32_t        desc[0];
+} sli4_req_common_set_profile_config_v0_t;
 
 typedef struct sli4_res_common_set_profile_config_s {
 	sli4_res_hdr_t  hdr;
@@ -2837,6 +3499,27 @@ typedef struct sli4_res_common_set_active_profile_s {
 } sli4_res_common_set_active_profile_t;
 
 /**
+ * @brief COMMON_SET_SRIOV_DEFAULT_CONFIG_V2
+ */
+#define SLI4_FUNC_PRIV_LINK_DEVCFG	0x200
+#define SLI4_FUNC_PRIV_LINK_DEVSEC	0x400
+typedef struct sli4_req_common_set_sriov_default_config_v2_s {
+	sli4_req_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	vf_count:8,
+			rsvd:23,
+			wwna:1;
+	uint32_t	privilege_mask;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_common_set_sriov_default_config_v2_t;
+
+typedef struct sli4_res_common_set_sriov_default_config_s {
+	sli4_res_hdr_t	hdr;
+} sli4_res_common_set_sriov_default_config_t;
+
+/**
  * @brief Link Config Descriptor for link config functions
  */
 typedef struct sli4_link_config_descriptor_s {
@@ -2898,6 +3581,37 @@ typedef struct sli4_res_common_set_reconfig_link_id_s {
 #endif
 } sli4_res_common_set_reconfig_link_id_t;
 
+#define SLI4_MAX_ULP		8
+
+typedef struct sli4_req_lowlevel_get_itcm_parity_stats_s {
+	sli4_req_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	:8,
+			clr_pbec:1,
+			clr_tpec:1,
+			:22;
+#else
+#error big endian version not defined
+#endif
+} sli4_req_lowlevel_get_itcm_parity_stats_t;
+
+typedef struct sli4_parity_err_count_s {
+	uint32_t	pbec:16,
+			tpec:16;
+} sli4_parity_err_count_t;
+
+typedef struct sli4_res_lowlevel_get_itcm_parity_stats_s {
+	sli4_res_hdr_t		hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t		num_ulp:8,
+				clr_pbec:1,
+				clr_tpec:1,
+				:22;
+	sli4_parity_err_count_t	counter[SLI4_MAX_ULP];
+#else
+#error big endian version not defined
+#endif
+} sli4_res_lowlevel_get_itcm_parity_stats_t;
 
 typedef struct sli4_req_lowlevel_set_watchdog_s {
 	sli4_req_hdr_t	hdr;
@@ -2919,6 +3633,62 @@ typedef struct sli4_res_lowlevel_set_watchdog_s {
 #error big endian version not defined
 #endif
 } sli4_res_lowlevel_set_watchdog_t;
+
+#define SLI4_TRUNK_MODE_NONE			0x0
+#define SLI4_TRUNK_MODE_2_LINKS_PER_TRUNK	0x1
+#define SLI4_TRUNK_MODE_4_LINKS_PER_TRUNK	0x2
+
+typedef struct sli4_req_set_trunk_mode_s {
+	sli4_req_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint8_t		trunk_mode;
+	uint8_t		rsvd1[3];
+	uint32_t	reserved[2];
+#else
+#error big endian version not defined
+#endif
+} sli4_req_set_trunk_mode_t;
+
+typedef struct sli4_res_set_trunk_mode_s {
+	sli4_res_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	rsvd;
+#else
+#error big endian version not defined
+#endif
+} sli4_res_set_trunk_mode_t;
+
+typedef struct sli4_req_lowlevel_set_diag_log_options_s {
+	sli4_req_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	enable:1,
+			reserved1:7,
+			log_level:4,
+			reserved2:3,
+			reset_action:1,
+			buffer_cnt:8,
+			buffer_size:8;
+	uint32_t	acqe_interval:16,
+			cq_id:16;
+	uint32_t	lwpd_addr_lo;
+	uint32_t	lwpd_addr_hi;
+	struct {
+		uint32_t addr_lo;
+		uint32_t addr_hi;
+	} buffer_desc[0];
+#else
+#error big endian version not defined
+#endif
+} sli4_req_lowlevel_set_diag_log_options_t;
+
+typedef struct sli4_res_lowlevel_set_diag_log_options_s {
+	sli4_res_hdr_t	hdr;
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	rsvd;
+#else
+#error big endian version not defined
+#endif
+} sli4_res_lowlevel_set_diag_log_options_t;
 
 /**
  * @brief Event Queue Entry
@@ -2979,22 +3749,45 @@ typedef struct sli4_acqe_s {
 #endif
 } sli4_acqe_t;
 
-#define SLI4_ACQE_EVENT_CODE_LINK_STATE		0x01
-#define SLI4_ACQE_EVENT_CODE_FCOE_FIP		0x02
-#define SLI4_ACQE_EVENT_CODE_DCBX		0x03
-#define SLI4_ACQE_EVENT_CODE_ISCSI		0x04
-#define SLI4_ACQE_EVENT_CODE_GRP_5		0x05
-#define SLI4_ACQE_EVENT_CODE_FC_LINK_EVENT	0x10
-#define SLI4_ACQE_EVENT_CODE_SLI_PORT_EVENT	0x11
-#define SLI4_ACQE_EVENT_CODE_VF_EVENT		0x12
-#define SLI4_ACQE_EVENT_CODE_MR_EVENT		0x13
+typedef struct sli4_port_event_acqe_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint8_t		p0_linkstate;
+	uint8_t		p1_linkstate;
+	uint8_t		p2_linkstate;
+	uint8_t		p3_linkstate;
+	uint32_t	event_data2;
+	uint32_t	:32;
+	uint32_t	:8,
+			event_code:8,
+			event_type:8,
+			:6,
+			ae:1,
+			val:1;
+#else
+#error big endian version not defined
+#endif
+} sli4_port_event_acqe_t;
+
+#define SLI4_ACQE_EVENT_CODE_LINK_STATE			0x01
+#define SLI4_ACQE_EVENT_CODE_FCOE_FIP			0x02
+#define SLI4_ACQE_EVENT_CODE_DCBX			0x03
+#define SLI4_ACQE_EVENT_CODE_ISCSI			0x04
+#define SLI4_ACQE_EVENT_CODE_GRP_5			0x05
+#define SLI4_ACQE_EVENT_CODE_FC_LINK_EVENT		0x10
+#define SLI4_ACQE_EVENT_CODE_SLI_PORT_EVENT		0x11
+#define SLI4_ACQE_EVENT_CODE_VF_EVENT			0x12
+#define SLI4_ACQE_EVENT_CODE_MR_EVENT			0x13
+
+#define SLI4_ACQE_PORT_EVENT_TYPE_MISCONF_PHYPORTS	0x09
+#define SLI4_ACQE_PORT_EVENT_TYPE_ITCM_PARITY_EVENT	0x0D
 
 /**
  * @brief Register name enums
  */
 typedef enum {
 	SLI4_REG_BMBX,
-	SLI4_REG_EQCQ_DOORBELL,
+	SLI4_REG_EQ_DOORBELL,
+	SLI4_REG_CQ_DOORBELL,
 	SLI4_REG_FCOE_RQ_DOORBELL,
 	SLI4_REG_IO_WQ_DOORBELL,
 	SLI4_REG_MQ_DOORBELL,
@@ -3045,7 +3838,8 @@ typedef enum {
 
 typedef struct sli4_queue_s {
 	/* Common to all queue types */
-	ocs_dma_t	dma;
+	ocs_dma_t	dma_single_chunk;
+	ocs_dma_t	dma[SLI_Q_DMA_CHUNKS];
 	ocs_lock_t	lock;
 	uint32_t	index;		/** current host entry index */
 	uint16_t	size;		/** entry size */
@@ -3060,7 +3854,11 @@ typedef struct sli4_queue_s {
 	uint32_t	posted_limit;	/** number of CQE/EQE to process before ringing doorbell */
 	uint32_t	max_num_processed;
 	time_t		max_process_time;
-
+	uint32_t	last_processed_time;
+	uint16_t	phase;		/** For if_type = 6, this value toggle for each iteration
+					    of the queue, a queue entry is valid when a cqe valid
+					    bit matches this value */
+	bool		sfq_resp;	/** WQ Create Resp state for Send Frames WQ. Valid for WQs */
 	/* Type specific gunk */
 	union {
 		uint32_t	r_idx;	/** "read" index (MQ only) */
@@ -3069,6 +3867,12 @@ typedef struct sli4_queue_s {
 					is_hdr:1,/** is a RQ for packet headers */
 					rq_batch:1;/** RQ index incremented by 8 */
 		} flag;
+		struct {
+			uint8_t		enabled;	/** dpp enabled queues */
+			uint8_t		id;		/** dpp_id associated with this queue */
+			uint16_t	db_offset;	/** reg offset for dpp aperture - Lancer G7 */
+			uint32_t	db_rset; 	/** reg set for dpp - Lancer G7 */
+		} dpp;
 	} u;
 } sli4_queue_t;
 
@@ -3084,14 +3888,14 @@ sli_queue_unlock(sli4_queue_t *q)
 	ocs_unlock(&q->lock);
 }
 
-
-#define SLI4_QUEUE_DEFAULT_CQ	UINT16_MAX /** Use the default CQ */
-
-#define SLI4_QUEUE_RQ_BATCH	8
+#define SLI4_PAUSE_ERRX_PAIR_CNT	16
+#define SLI4_QUEUE_DEFAULT_CQ		UINT16_MAX /** Use the default CQ */
+#define SLI4_QUEUE_RQ_BATCH		8
 
 typedef enum {
 	SLI4_CB_LINK,
 	SLI4_CB_FIP,
+	SLI4_CB_ERR,
 	SLI4_CB_MAX			/* must be last */
 } sli4_callback_e;
 
@@ -3099,6 +3903,8 @@ typedef enum {
 	SLI_LINK_STATUS_UP,
 	SLI_LINK_STATUS_DOWN,
 	SLI_LINK_STATUS_NO_ALPA,
+	SLI_LINK_STATUS_CHANGED,
+	SLI_LOGICAL_LINK_SPEED_CHANGED,
 	SLI_LINK_STATUS_MAX,
 } sli4_link_status_e;
 
@@ -3119,10 +3925,12 @@ typedef enum {
 } sli4_link_medium_e;
 
 typedef struct sli4_link_event_s {
-	sli4_link_status_e	status;		/* link up/down */
+	sli4_link_status_e	status;			/* link up/down */
 	sli4_link_topology_e	topology;
-	sli4_link_medium_e	medium;		/* Ethernet / FC */
-	uint32_t		speed;		/* Mbps */
+	sli4_link_medium_e	medium;			/* Ethernet / FC */
+	uint32_t		speed;			/* Mbps */
+	uint32_t		logical_link_speed;	/* Mbps */
+	uint32_t		aggregate_link_speed;	/* Mbps */
 	uint8_t			*loop_map;
 	uint32_t		fc_id;
 } sli4_link_event_t;
@@ -3167,6 +3975,9 @@ typedef enum {
 	SLI4_ASIC_TYPE_LANCER,
 	SLI4_ASIC_TYPE_CORSAIR,
 	SLI4_ASIC_TYPE_LANCERG6,
+	SLI4_ASIC_TYPE_LANCERG7,
+
+	SLI4_ASIC_TYPE_ANY = 0xFF
 } sli4_asic_type_e;
 
 typedef enum {
@@ -3177,8 +3988,17 @@ typedef enum {
 	SLI4_ASIC_REV_A3,
 	SLI4_ASIC_REV_B0,
 	SLI4_ASIC_REV_B1,
+	SLI4_ASIC_REV_B2,
+	SLI4_ASIC_REV_B3,
+	SLI4_ASIC_REV_B4,
 	SLI4_ASIC_REV_C0,
+	SLI4_ASIC_REV_C1,
+	SLI4_ASIC_REV_C2,
+	SLI4_ASIC_REV_C3,
+	SLI4_ASIC_REV_C4,
 	SLI4_ASIC_REV_D0,
+
+	SLI4_ASIC_REV_ANY = 0xFF
 } sli4_asic_rev_e;
 
 typedef struct sli4_s {
@@ -3214,12 +4034,10 @@ typedef struct sli4_s {
 		uint32_t		hw_rev[3];
 		uint8_t			port_number;
 		char			port_name[2];
+		char			modeldesc[64];
 		char			bios_version_string[32];
 		uint8_t			dual_ulp_capable;
 		uint8_t			is_ulp_fc[2];
-		char			description[64];
-		char			model[32];
-		char			serial_number[32];
 		/*
 		 * Tracks the port resources using extents metaphor. For
 		 * devices that don't implement extents (i.e.
@@ -3227,8 +4045,10 @@ typedef struct sli4_s {
 		 * a single large extent.
 		 */
 		struct {
+			ocs_lock_t	lock;	/* resource lock */
 			uint32_t	number;	/* number of extents */
 			uint32_t	size;	/* number of elements in each extent */
+			uint32_t	nvme_size; /* number of elements reserved for nvme */
 			uint32_t	n_alloc;/* number of elements allocated */
 			uint32_t	*base;
 			ocs_bitmap_t	*use_map;/* bitmap showing resources in use */
@@ -3238,6 +4058,7 @@ typedef struct sli4_s {
 		uint32_t		has_extents:1,
 					auto_reg:1,
 					auto_xfer_rdy:1,
+					tow:1,
 					hdr_template_req:1,
 					perf_hint:1,
 					perf_wq_id_association:1,
@@ -3247,12 +4068,23 @@ typedef struct sli4_s {
 					sgl_pre_registered:1,
 					sgl_pre_registration_required:1,
 					t10_dif_inline_capable:1,
-					t10_dif_separate_capable:1;
+					t10_dif_separate_capable:1,
+					fdd_present:1,
+					enable_bbcr:1,
+					xib_capable:1,
+					suppress_rsp_not_supported:1,
+					nsler_capable:1,
+					:11;
 		uint32_t		sge_supported_length;
 		uint32_t		sgl_page_sizes;
 		uint32_t		max_sgl_pages;
+		uint32_t		max_tow_xris;
 		sli4_sgl_chaining_params_t sgl_chaining_params;
-		size_t                  wqe_size;
+		size_t			wqe_size;
+		uint8_t			dpp;
+		uint8_t			bbscn_max:4,
+					bbscn_def:4;
+		uint8_t			poll_mode;
 	} config;
 
 	/*
@@ -3262,6 +4094,8 @@ typedef struct sli4_s {
 	void		*link_arg;
 	int32_t		(*fip)(void *, void *);
 	void		*fip_arg;
+	bool		(*reset_pending)(void *, bool);
+	void		*reset_pending_arg;
 
 	ocs_dma_t	bmbx;
 #if defined(OCS_INCLUDE_DEBUG)
@@ -3274,6 +4108,11 @@ typedef struct sli4_s {
 		ocs_dma_t	data;
 		uint32_t	length;
 	} vpd;
+
+	struct {
+		uint32_t	err1;
+		uint32_t	err2;
+	} pause_errx_pair[SLI4_PAUSE_ERRX_PAIR_CNT];
 } sli4_t;
 
 /**
@@ -3316,8 +4155,7 @@ sli_get_max_sgl(sli4_t *sli4)
 {
 
 	if (sli4->config.sgl_page_sizes != 1) {
-		ocs_log_test(sli4->os, "%s: unsupported SGL page sizes %#x\n", __func__,
-				sli4->config.sgl_page_sizes);
+		ocs_log_test(sli4->os, "unsupported SGL page sizes %#x\n", sli4->config.sgl_page_sizes);
 		return 0;
 	}
 
@@ -3430,6 +4268,36 @@ sli_get_auto_xfer_rdy_capable(sli4_t *sli4)
 }
 
 static inline uint32_t
+sli_get_tow_capable(sli4_t *sli4)
+{
+	return sli4->config.tow;
+}
+
+static inline uint32_t
+sli_get_tow_xris_max(sli4_t *sli4)
+{
+	return sli4->config.max_tow_xris;
+}
+
+static inline uint32_t
+sli_get_xib_capable(sli4_t *sli4)
+{
+	return sli4->config.xib_capable;
+}
+
+static inline uint32_t
+sli_get_suppress_rsp_not_supported(sli4_t *sli4)
+{
+	return sli4->config.suppress_rsp_not_supported;
+}
+
+static inline uint32_t
+sli_get_nsler_capable(sli4_t *sli4)
+{
+	return sli4->config.nsler_capable;
+}
+
+static inline uint32_t
 sli_get_dif_capable(sli4_t *sli4)
 {
 	return sli4->config.features.flag.dif;
@@ -3475,7 +4343,7 @@ static inline int32_t
 sli_set_hlm(sli4_t *sli4, uint32_t value)
 {
 	if (value && !sli4->config.features.flag.hlm) {
-		ocs_log_test(sli4->os, "%s: HLM not supported\n", __func__);
+		ocs_log_test(sli4->os, "HLM not supported\n");
 		return -1;
 	}
 
@@ -3488,6 +4356,31 @@ static inline uint32_t
 sli_get_hlm(sli4_t *sli4)
 {
 	return sli4->config.high_login_mode;
+}
+
+static inline uint32_t
+sli_get_dpp_capable(sli4_t *sli4)
+{
+	return (sli4->if_type == SLI4_IF_TYPE_LANCER_G7 ? TRUE : FALSE);
+}
+
+static inline int32_t
+sli_set_dpp(sli4_t *sli4, uint32_t value)
+{
+	if (value && (sli4->if_type != SLI4_IF_TYPE_LANCER_G7)) {
+		ocs_log_test(sli4->os, "DPP not supported\n");
+		return -1;
+	}
+
+	sli4->config.dpp = value != 0 ? TRUE : FALSE;
+
+	return 0;
+}
+
+static inline uint32_t
+sli_get_dpp(sli4_t *sli4)
+{
+	return sli4->config.dpp;
 }
 
 static inline uint32_t
@@ -3506,7 +4399,7 @@ static inline int32_t
 sli_set_sgl_preregister(sli4_t *sli4, uint32_t value)
 {
 	if ((value == 0) && sli4->config.sgl_pre_registration_required) {
-		ocs_log_test(sli4->os, "%s: SGL pre-registration required\n", __func__);
+		ocs_log_test(sli4->os, "SGL pre-registration required\n");
 		return -1;
 	}
 
@@ -3519,12 +4412,6 @@ static inline sli4_asic_type_e
 sli_get_asic_type(sli4_t *sli4)
 {
 	return sli4->asic_type;
-}
-
-static inline sli4_asic_rev_e
-sli_get_asic_rev(sli4_t *sli4)
-{
-	return sli4->asic_rev;
 }
 
 static inline int32_t
@@ -3540,7 +4427,7 @@ sli_set_topology(sli4_t *sli4, uint32_t value)
 		sli4->config.topology = value;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: unsupported topology %#x\n", __func__, value);
+		ocs_log_err(sli4->os, "Unsupported topology %#x\n", value);
 		rc = -1;
 	}
 
@@ -3553,10 +4440,10 @@ sli_get_link_module_type(sli4_t *sli4)
 	return sli4->config.link_module_type;
 }
 
-static inline char *
+static inline uint32_t
 sli_get_portnum(sli4_t *sli4)
 {
-	return sli4->config.port_name;
+	return sli4->config.port_number;
 }
 
 static inline char *
@@ -3583,7 +4470,7 @@ sli_convert_mask_to_count(uint32_t method, uint32_t mask)
 /**
  * @brief Common Create Queue function prototype
  */
-typedef int32_t (*sli4_create_q_fn_t)(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t);
+typedef int32_t (*sli4_create_q_fn_t)(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, bool);
 
 /**
  * @brief Common Destroy Queue function prototype
@@ -3595,10 +4482,14 @@ typedef int32_t (*sli4_destroy_q_fn_t)(sli4_t *, void *, size_t, uint16_t);
  * Function prototypes
  */
 extern int32_t sli_cmd_config_auto_xfer_rdy(sli4_t *, void *, size_t, uint32_t);
-extern int32_t sli_cmd_config_auto_xfer_rdy_hp(sli4_t *, void *, size_t, uint32_t, uint32_t, uint32_t);
+extern int32_t sli_cmd_config_auto_xfer_rdy_hp(sli4_t *, void *, size_t, uint32_t, uint32_t);
+extern int32_t sli_cmd_config_optimized_write(sli4_t *, void *, size_t, uint32_t, uint32_t, uint32_t);
+extern int32_t sli_cmd_config_optimized_write_hp(sli4_t *, void *, size_t, uint32_t, uint32_t, uint32_t, uint32_t);
 extern int32_t sli_cmd_config_link(sli4_t *, void *, size_t);
 extern int32_t sli_cmd_down_link(sli4_t *, void *, size_t);
 extern int32_t sli_cmd_dump_type4(sli4_t *, void *, size_t, uint16_t);
+extern int32_t sli_cmd_dump_type2(sli4_t *sli4, void *buf, size_t size, uint16_t region_id, ocs_dma_t *phys);
+extern int32_t sli_cmd_update_cfg(sli4_t *sli4, void *buf, size_t size, uint16_t region_id, ocs_dma_t *dma);
 extern int32_t sli_cmd_common_read_transceiver_data(sli4_t *, void *, size_t, uint32_t, ocs_dma_t *);
 extern int32_t sli_cmd_read_link_stats(sli4_t *, void *, size_t,uint8_t, uint8_t, uint8_t);
 extern int32_t sli_cmd_read_status(sli4_t *sli4, void *buf, size_t size, uint8_t clear_counters);
@@ -3609,8 +4500,10 @@ extern int32_t sli_cmd_post_xri(sli4_t *, void *, size_t,  uint16_t, uint16_t);
 extern int32_t sli_cmd_release_xri(sli4_t *, void *, size_t,  uint8_t);
 extern int32_t sli_cmd_read_sparm64(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t);
 extern int32_t sli_cmd_read_topology(sli4_t *, void *, size_t, ocs_dma_t *);
+extern int32_t sli_cmd_read_config(sli4_t *, void *, size_t);
 extern int32_t sli_cmd_read_nvparms(sli4_t *, void *, size_t);
 extern int32_t sli_cmd_write_nvparms(sli4_t *, void *, size_t, uint8_t *, uint8_t *, uint8_t, uint32_t);
+
 typedef struct {
 	uint16_t rq_id;
 	uint8_t r_ctl_mask;
@@ -3628,8 +4521,10 @@ typedef struct {
 
 extern int32_t sli_cmd_reg_fcfi(sli4_t *, void *, size_t, uint16_t,
 				sli4_cmd_rq_cfg_t rq_cfg[SLI4_CMD_REG_FCFI_NUM_RQ_CFG], uint16_t);
-extern int32_t sli_cmd_reg_fcfi_mrq(sli4_t *, void *, size_t, uint8_t, uint16_t, uint16_t, sli4_cmd_rq_cfg_t *);
-extern int32_t sli_cmd_reg_rpi(sli4_t *, void *, size_t, uint32_t, uint16_t, uint16_t, ocs_dma_t *, uint8_t, uint8_t);
+extern int32_t sli_cmd_reg_fcfi_mrq(sli4_t *, void *, size_t, uint8_t, uint16_t, uint16_t, sli4_cmd_rq_cfg_t *, int32_t);
+extern int32_t sli_cmd_reg_rpi(sli4_t *, void *, size_t, uint32_t,
+			       uint16_t, uint16_t, ocs_dma_t *,
+			       uint8_t, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_cmd_reg_vfi(sli4_t *, void *, size_t, ocs_domain_t *);
 extern int32_t sli_cmd_reg_vpi(sli4_t *, void *, size_t, ocs_sli_port_t *, uint8_t);
 extern int32_t sli_cmd_sli_config(sli4_t *, void *, size_t, uint32_t, ocs_dma_t *);
@@ -3650,8 +4545,14 @@ extern int32_t sli_cmd_dmtf_exec_clp_cmd(sli4_t *sli4, void *buf, size_t size,
 		ocs_dma_t *resp);
 extern int32_t sli_cmd_common_set_dump_location(sli4_t *sli4, void *buf, size_t size,
 						uint8_t query, uint8_t is_buffer_list,
-						ocs_dma_t *buffer);
+						ocs_dma_t *buffer, uint8_t fdb);
+extern int32_t sli_cmd_config_run_biu_diag(sli4_t *sli4, void *buf, size_t size,
+					   ocs_dma_t *tx_buffer, size_t tx_buf_len,
+					   ocs_dma_t *rx_buffer, size_t rx_buf_len);
+extern int32_t sli_cmd_fcoe_set_loopback_mode(sli4_t *sli4, void *buf, size_t size, int type);
+extern int32_t sli_cmd_fc_set_trunk_mode(sli4_t *sli4, void *buf, size_t size, uint32_t trunk_mode);
 extern int32_t sli_cmd_common_set_features(sli4_t *, void *, size_t, uint32_t, uint32_t, void*);
+extern int32_t sli_parse_fw_dual_dump_state(sli4_t *sli4, void *buf, size_t size, bool *dd_state);
 extern int32_t sli_cmd_common_get_profile_list(sli4_t *sli4, void *buf,
 		size_t size, uint32_t start_profile_index, ocs_dma_t *dma);
 extern int32_t sli_cmd_common_get_active_profile(sli4_t *sli4, void *buf,
@@ -3673,22 +4574,31 @@ extern int32_t sli_cmd_common_set_profile_config(sli4_t *sli4, void *buf,
 		size_t size, ocs_dma_t *dma,
 		uint8_t profile_id, uint32_t descriptor_count,
 		uint8_t isap);
-
+extern int32_t sli_cmd_common_set_profile_config_v0(sli4_t *sli4, void *buf, size_t size,
+		ocs_dma_t *dma, uint8_t profile_id, uint32_t descriptor_count);
+extern int32_t sli_sriov_set_default_config(sli4_t *sli4, uint16_t nr_vfs, bool wwna, uint32_t priv_mask);
+extern int32_t sli_cmd_common_set_sriov_default_config_v2(sli4_t *sli4, void *buf, size_t size,
+							  uint8_t nr_vfs, bool wwna, uint32_t priv_mask);
 extern int32_t sli_cqe_mq(void *);
 extern int32_t sli_cqe_async(sli4_t *, void *);
 
 extern int32_t sli_setup(sli4_t *, ocs_os_handle_t, sli4_port_type_e);
 extern void sli_calc_max_qentries(sli4_t *sli4);
+extern bool sli_feature_enabled(sli4_t *sli4, uint32_t feature);
+extern void sli_config_set_features(sli4_t *sli4, uint32_t features);
+extern uint32_t sli_config_get_features(sli4_t *sli4);
 extern int32_t sli_init(sli4_t *);
 extern int32_t sli_reset(sli4_t *);
 extern int32_t sli_fw_reset(sli4_t *);
+extern int32_t sli_port_migration(sli4_t *);
 extern int32_t sli_teardown(sli4_t *);
 extern int32_t sli_callback(sli4_t *, sli4_callback_e, void *, void *);
 extern int32_t sli_bmbx_command(sli4_t *);
+extern int32_t sli_queue_dma_free(sli4_t *, sli4_queue_t *);
 extern int32_t __sli_queue_init(sli4_t *, sli4_queue_t *, uint32_t, size_t, uint32_t, uint32_t);
 extern int32_t __sli_create_queue(sli4_t *, sli4_queue_t *);
 extern int32_t sli_eq_modify_delay(sli4_t *sli4, sli4_queue_t *eq, uint32_t num_eq, uint32_t shift, uint32_t delay_mult);
-extern int32_t sli_queue_alloc(sli4_t *, uint32_t, sli4_queue_t *, uint32_t, sli4_queue_t *, uint16_t);
+extern int32_t sli_queue_alloc(sli4_t *, uint32_t, sli4_queue_t *, uint32_t, sli4_queue_t *, uint16_t, bool);
 extern int32_t sli_cq_alloc_set(sli4_t *, sli4_queue_t *qs[], uint32_t, uint32_t, sli4_queue_t *eqs[]);
 extern int32_t sli_get_queue_entry_size(sli4_t *, uint32_t);
 extern int32_t sli_queue_free(sli4_t *, sli4_queue_t *, uint32_t, uint32_t);
@@ -3717,6 +4627,9 @@ extern int32_t sli_fw_ready(sli4_t *);
 extern uint32_t sli_reg_read(sli4_t *, sli4_regname_e);
 extern void sli_reg_write(sli4_t *, sli4_regname_e, uint32_t);
 extern int32_t sli_link_is_configurable(sli4_t *);
+extern int32_t sli_is_paused(sli4_t *sli4);
+extern void sli_validate_pause_errors(sli4_t *slit, uint32_t *skip_dump);
+extern void sli4_decode_link_speed(uint32_t in_link_speed, uint32_t *out_link_speed);
 
 #endif /* !_SLI4_H */
 

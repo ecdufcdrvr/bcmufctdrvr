@@ -49,17 +49,17 @@
 
 #include "ocs_os.h"
 #include "ocs_driver.h"
+#include "ocs_impl_spdk.h"
 #include "ocs_scsi_force_free_stub.h"
+#include "ocs_spdk_nvmet.h"
 
-#define OCS_DRIVE_MAX_EVENT_THREADS	16
 typedef struct {
 	uint32_t uspace_thread_per_port:1;
 	uint32_t uspace_threads_block:1;
-	ocs_thread_t event_thr[OCS_DRIVE_MAX_EVENT_THREADS];
-	uint32_t event_thr_count;
 	ocs_thread_t ioctl_thr;
 	dslab_dir_t *slabdir;				/*>> dma slab allocator */
         uint32_t attached;
+	bool shutting_down;				/*>> target shutdown initiated */
 } ocs_drv_t;
 
 #include "ocs_drv_fc.h"

@@ -1,49 +1,39 @@
 /*
- *  BSD LICENSE
+ * Copyright (c) 2011-2015, Emulex
+ * All rights reserved.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
  * @file
  * userspace specific headers common to the driver
  */
-
-#include <rte_config.h>
-#include <rte_cycles.h>
-#include <rte_debug.h>
-#include <rte_mempool.h>
-#include <rte_ring.h>
-#include "spdk/env.h"
-#include "spdk/event.h"
-
 #ifndef _OCS_OS_H
 #define _OCS_OS_H
 
@@ -89,6 +79,7 @@ typedef struct ocs_s ocs_t;
 #include <poll.h>
 #include <semaphore.h>
 #include <execinfo.h>
+#include <linux/types.h>
 //TODO: include when user space NUMA is implemented
 //#include <numa.h>
 
@@ -96,6 +87,7 @@ typedef struct ocs_s ocs_t;
 
 #include "ocs_list.h"
 #include "ocs_uspace.h"
+#include "ocsu_ioctl.h"
 #include "dslab.h"
 #include <stdbool.h>
 
@@ -110,15 +102,28 @@ typedef struct ocs_s ocs_t;
  */
 typedef void * ocs_os_handle_t;
 
+#include "ocsu_ioctl.h"
+#ifdef OCS_USPACE_SPDK
+#include "ocs_impl_spdk.h"
+#else
+#include "ocs_impl_uspace.h"
+#endif
 #include "ocs_debug.h"
+
 #ifndef UINT16_MAX
-#define UINT16_MAX             (65535U)
+#define UINT16_MAX		(65535U)
 #endif
+
 #ifndef INT32_MAX
-#define INT32_MAX              (2147483647)
+#define INT32_MAX		(2147483647)
 #endif
+
 #ifndef UINT32_MAX
-#define UINT32_MAX             (4294967295U)
+#define UINT32_MAX		(4294967295U)
+#endif
+
+#ifndef ULONG_MAX
+#define ULONG_MAX		(0xFFFFFFFFFFFFFFFF)
 #endif
 
 #define KERN_ERR		"Error: "
@@ -130,17 +135,15 @@ typedef void * ocs_os_handle_t;
 #define TRUE			1
 #define FALSE			0
 
-//typedef uint8_t bool;
-
-/* OCS_OS_MAX_ISR_TIME_MSEC -  maximum time driver code should spend in an interrupt
- * or kernel thread context without yielding
- */
-#define OCS_OS_MAX_ISR_TIME_MSEC	100
+#ifndef OCS_USPACE
+#define OCS_USPACE
+#endif
 
 /* Linux driver specific definitions */
 
 #define OCS_MIN_DMA_ALIGNMENT		16
 #define OCS_MAX_DMA_ALLOC		(64*1024)	/* maxium DMA allocation that is expected to reliably succeed  */
+#define OCS_FW_DUMP_CHUNK_SIZE		(16*1024)       /* FW dump DMA allocation size */
 
 #define OCS_MAX_LUN			256
 #define OCS_NUM_UNSOLICITED_FRAMES	1024
@@ -154,6 +157,44 @@ extern void ocs_print_stack(void);
 
 #define ocs_abort(...)			exit(-1)
 
+/* These datatypes are used prolifically in the linux kernel */
+typedef uint8_t		u8;
+typedef uint16_t	u16;
+typedef uint32_t	u32;
+typedef uint64_t	u64;
+
+/* Crypto lib API - not supported currently in uspace */
+/*
+ *  MPI - multi precision integer (aka BN - big number) arithmetic API helper
+ */
+static inline int
+ocs_mpi_powm(u8 *base, u32 base_len, u8 *exp, u32 exp_len,
+	     u8 *mod, u32 mod_len, u8 *ans, u32 ans_len)
+{
+	return -EOPNOTSUPP;
+}
+
+
+/*
+ * Hash digest API
+ */
+static inline int
+ocs_hash(char *alg, u8 *val1, u32 val1_len, u8 *val2, u32 val2_len,
+	 u8 *val3, u32 val3_len, u8 *result, u32 result_len)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline bool
+ocs_gpl_api_enabled(void)
+{
+#ifdef OCS_CONFIG_GPL_API
+	return true;
+#else
+	return false;
+#endif
+}
+
 /*
  * Macros used to size the CQ hash table. We want to round up to the next
  * power of 2 for the hash.
@@ -165,12 +206,6 @@ extern void ocs_print_stack(void);
 #define B32(x)  (B16(x) | (B16(x) >>16) )
 #define B32_NEXT_POWER_OF_2(x)      (B32((x)-1) + 1)
 
-
-/*
- * likely/unlikely - branch prediction hint
- */
-//#define likely(x)		__builtin_expect(!!(x), 1)
-//#define unlikely(x)		__builtin_expect(!!(x), 0)
 
 /***************************************************************************
  * OS abstraction
@@ -342,16 +377,6 @@ static inline uint32_t ocs_swap16(uint16_t val)
 #define ocs_htobe64(val)	ocs_swap64(val)
 #define ocs_be64toh(val)	ocs_swap64(val)
 
-/**
- * @ingroup os
- * @brief Delay execution by the given number of micro-seconds
- *
- * @param usec number of micro-seconds to "busy-wait"
- *
- * @note The value of usec may be greater than 1,000,000
- */
-#define ocs_udelay(usec) usleep(usec)
-#define ocs_msleep(msec) usleep(msec*1000)
 
 /**
  * @ingroup os
@@ -366,11 +391,16 @@ static inline uint32_t ocs_swap16(uint16_t val)
 #define ocs_memcpy(dst, src, len)	memcpy(dst, src, len)
 #define ocs_memcmp(dst, src, len)	memcmp(dst, src, len)
 #define ocs_strlen(src)			strlen((char*)src)
+#define ocs_strnlen(src, len)		strnlen((char*)src, len)
 #define ocs_strcmp(dst,src)		strcmp((char*)dst, (char*)src)
 #define ocs_strncmp(dst, src, n)	strncmp((char*)dst, (char*)src, n)
 #define ocs_strcasecmp(dst, src)	strcasecmp((char*)dst, (char*)src)
 #define ocs_strcpy(dst,src)		strcpy((char*)dst, (char*)src)
-#define ocs_strncpy(dst,src, n)		strncpy((char*)dst, (char*)src, n)
+#define ocs_strncpy(dst, src, n)	do{\
+					strncpy((char*)dst, (char*)src, n); \
+					if(dst[n-1] != '\0')\
+						ocs_log_warn(NULL, "Not a NULL-terminated string!\n"); \
+					}while(0)
 #define ocs_strcat(dst, src)		strcat((char*)dst, (char*)src)
 #define ocs_strstr(h,n)			strstr(h,n)
 #define ocs_strsep(h, n)		strsep(h, n)
@@ -380,7 +410,7 @@ static inline uint32_t ocs_swap16(uint16_t val)
 #define ocs_atoi(s)			strtol(s, 0, 0)
 #define ocs_copy_from_user(dst, src, n) (memcpy((char*)dst, (char*)src, n), 0)
 #define ocs_copy_to_user(dst, src, n)	(memcpy((char*)dst, (char*)src, n), 0)
-#define ocs_snprintf(buf, n, fmt, ...)	snprintf((char*)buf, n, fmt, ##__VA_ARGS__)
+#define ocs_snprintf(buf, n, fmt, ...)	ocs_safe_snprintf((char*)buf, n, fmt, ##__VA_ARGS__)
 #define ocs_vsnprintf(buf, n, fmt, ap)	vsnprintf(((char*)buf), n, fmt, ap)
 #define ocs_sscanf(buf,fmt, ...)	sscanf(buf, fmt, ##__VA_ARGS__)
 #define ocs_printf			printf
@@ -390,6 +420,7 @@ static inline uint32_t ocs_swap16(uint16_t val)
 #define ocs_strdup			strdup
 
 extern uint64_t ocs_get_tsc(void);
+char *ocs_get_options(const char *str, int nints, int *ints);
 
 /**
  * @ingroup os
@@ -403,36 +434,49 @@ extern uint64_t ocs_get_tsc(void);
  */
 #define ocs_memset(mem, c, len) memset(mem, c, len)
 
-#if 0 // TODO: NEW SPDK - These #defines (except for LOG_TEST) are in /usr/include/sys/syslog.h
-#define LOG_CRIT        0
-#define LOG_ERR         1
-#define LOG_WARN        2
-#define LOG_INFO        3
+#if !defined(OCS_USPACE_SPDK_UPSTREAM)
+/*
+ * SPDK Upsream picks these defines (except for LOG_TEST)
+ * from /usr/include/sys/syslog.h
+ */
+#define LOG_CRIT	0
+#define LOG_ERR		1
+#define LOG_WARN	2
+#define LOG_INFO	3
 #define LOG_TEST	4
-#define LOG_DEBUG       5
+#define LOG_DEBUG	5
+#else
+#define LOG_WARN        LOG_WARNING
+#define LOG_TEST	LOG_WARNING
 #endif
-#define LOG_TEST        LOG_WARNING
 
 extern const char *ocs_display_name(void *os);
 extern uint32_t ocs_instance(void *os);
 extern int logdest;
 extern int loglevel;
 
-extern void _ocs_log(void *os, const char *fmt, ...) __attribute__((format(printf,2,3)));
+extern void _ocs_log(void *os, const char *func, int line, const char *fmt, ...);
 
-#define ocs_log_crit(os, fmt, ...)	ocs_log(os, LOG_CRIT, "CRIT: " fmt, ##__VA_ARGS__);
-#define ocs_log_err(os, fmt, ...)	ocs_log(os, LOG_ERR, "ERR: " fmt, ##__VA_ARGS__);
-#define ocs_log_warn(os, fmt, ...)	ocs_log(os, LOG_WARNING, "WARN: " fmt, ##__VA_ARGS__);
-#define ocs_log_info(os, fmt, ...)	ocs_log(os, LOG_INFO, fmt, ##__VA_ARGS__);
-#define ocs_log_test(os, fmt, ...)	ocs_log(os, LOG_TEST, "TEST: " fmt, ##__VA_ARGS__);
-#define ocs_log_debug(os, fmt, ...)	ocs_log(os, LOG_DEBUG, "DEBUG: " fmt, ##__VA_ARGS__);
+#define ocs_log_crit(os, fmt, ...)      ocs_log(os, LOG_CRIT, "CRIT: " fmt, ##__VA_ARGS__);
+#define ocs_log_err(os, fmt, ...)       ocs_log(os, LOG_ERR, "ERR: " fmt, ##__VA_ARGS__);
+#define ocs_log_warn(os, fmt, ...)      ocs_log(os, LOG_WARN, "WARN: " fmt, ##__VA_ARGS__);
+#define ocs_log_info(os, fmt, ...)      ocs_log(os, LOG_INFO, fmt, ##__VA_ARGS__);
+#define ocs_log_test(os, fmt, ...)      ocs_log(os, LOG_TEST, "TEST: " fmt, ##__VA_ARGS__);
+#define ocs_log_debug(os, fmt, ...)     ocs_log(os, LOG_DEBUG, "DEBUG: " fmt, ##__VA_ARGS__);
 
 #define ocs_log(os, level, fmt, ...) \
 	do { \
 		if (level <= loglevel) { \
-			_ocs_log(os, fmt, ##__VA_ARGS__); \
+			 _ocs_log(os, __func__, __LINE__, fmt, ##__VA_ARGS__); \
 		} \
 	} while(0)
+
+#define ocs_log_crit_ratelimited(os, fmt, ...)  ocs_log_crit(os, fmt, ##__VA_ARGS__);
+#define ocs_log_err_ratelimited(os, fmt, ...)   ocs_log_err(os, fmt, ##__VA_ARGS__);
+#define ocs_log_warn_ratelimited(os, fmt, ...)  ocs_log_warn(os, fmt, ##__VA_ARGS__);
+#define ocs_log_info_ratelimited(os, fmt, ...)  ocs_log_info(os, fmt, ##__VA_ARGS__);
+#define ocs_log_test_ratelimited(os, fmt, ...)  ocs_log_test(os, fmt, ##__VA_ARGS__);
+#define ocs_log_debug_ratelimited(os, fmt, ...) ocs_log_debug(os, fmt, ##__VA_ARGS__);
 
 static inline uint32_t ocs_roundup(uint32_t x, uint32_t y)
 {
@@ -465,7 +509,18 @@ typedef struct {
 	ocs_lock_t locklist_lock;
 	ocs_list_t locklist;
 #endif
-	uint8_t numa_node;
+	int32_t numa_node;
+
+#ifdef OCS_USPACE_SPDK
+	uint64_t lcore_mask;
+	struct spdk_pci_device  *spdk_pdev;
+	char queue_topology[256];
+	uint32_t dmabuf_next_instance;
+#endif
+
+#if defined(OCS_USPACE_SPDK_UPSTREAM)
+	uint32_t num_cores;
+#endif
 } ocs_os_t;
 
 /***************************************************************************
@@ -474,6 +529,7 @@ typedef struct {
 
 #define OCS_M_ZERO	BIT(0)
 #define OCS_M_NOWAIT	BIT(1)
+#define OCS_M_NONUMA	BIT(2)
 
 #ifdef OCS_DEBUG_MEMORY
 void ocs_track_memory_allocation(void* ptr, size_t size, uint8_t isDma, void*);
@@ -534,6 +590,18 @@ ocs_free(ocs_os_handle_t os, void *addr, size_t size)
 	ocs_track_memory_free(addr, size, FALSE);
 #endif
 	free(addr);
+}
+
+static inline void *
+ocs_vmalloc(ocs_os_handle_t os, size_t size, int32_t flags)
+{
+	return ocs_malloc(os, size, flags);
+}
+
+static inline void
+ocs_vfree(ocs_os_handle_t os, void *addr, size_t size)
+{
+	ocs_free(os, addr, size);
 }
 
 /**
@@ -608,6 +676,7 @@ extern int32_t ocs_dma_alloc(ocs_os_handle_t os, ocs_dma_t *dma, size_t size, si
  * @return 0 if memory is de-allocated, non-zero otherwise
  */
 extern int32_t ocs_dma_free(ocs_os_handle_t os, ocs_dma_t *dma);
+extern int32_t ocs_dma_free_unbound(ocs_dma_t *dma);
 extern int32_t ocs_dma_copy_in(ocs_dma_t *dma, void *buffer, uint32_t buffer_length);
 extern int32_t ocs_dma_copy_out(ocs_dma_t *dma, void *buffer, uint32_t buffer_length);
 static inline int32_t ocs_dma_valid(ocs_dma_t *dma)
@@ -747,7 +816,7 @@ ocs_lock(ocs_lock_t *lock)
 {
 #if defined(ENABLE_LOCK_DEBUG)
         if (lock->inuse && (lock->pid.pid == ocs_mkpid().pid)) {
-                ocs_log_debug(NULL, "ERROR: %s: lock '%s' is inuse, owner called from %p\n", __func__, lock->name,
+                ocs_log_debug(NULL, "ERROR: %s: lock '%s' is inuse, owner called from %p\n", lock->name,
                         lock->caller[0]);
                 ocs_print_stack();
                 return;
@@ -794,7 +863,7 @@ ocs_unlock(ocs_lock_t *lock)
 {
 #if defined(ENABLE_LOCK_DEBUG)
 	if (!lock->inuse) {
-		ocs_log_debug(NULL, "ERROR: %s: lock '%s' is not in use\n", __func__, lock->name);
+		ocs_log_debug(NULL, "ERROR: %s: lock '%s' is not in use\n", lock->name);
 		ocs_print_stack();
 		return;
 	}
@@ -868,6 +937,7 @@ ocs_sem_v(ocs_sem_t *sem)
 extern void ocs_rlock_init(ocs_t *ocs, ocs_rlock_t *lock, const char *name);
 extern void ocs_rlock_free(ocs_rlock_t *lock);
 extern int32_t ocs_rlock_try(ocs_rlock_t *lock);
+extern int32_t ocs_rlock_try_timeout(ocs_rlock_t *lock, uint32_t timeout_ms);
 extern void ocs_rlock_acquire(ocs_rlock_t *lock);
 extern void ocs_rlock_release(ocs_rlock_t *lock);
 
@@ -1004,61 +1074,6 @@ ocs_bitmap_find(ocs_bitmap_t *bitmap, uint32_t n_bits)
 
 extern int32_t ocs_get_property(const char *prop_name, char *buffer, uint32_t buffer_len);
 
-/***************************************************************************
- * Timer Routines
- *
- * Functions for setting, querying and canceling timers.
- */
-typedef struct {
-	void (*timer_cb)(void *arg);
-	void *timer_cb_arg;
-	struct spdk_poller *timer;
-} ocs_timer_t;
-
-int ocs_spdk_timer_cb(void *arg);
-
-/**
- * @ingroup os
- * @brief Initialize and set a timer
- *
- * @param os OS handle
- * @param timer    pointer to the structure allocated for this timer
- * @param func     the function to call when the timer expires
- * @param data     Data to pass to the provided timer function when the timer
- *                 expires.
- * @param timeout_ms the timeout in milliseconds
- */
-extern int32_t ocs_setup_timer(ocs_os_handle_t os, ocs_timer_t *timer,
-		void(*func)(void *arg), void *data, uint32_t timeout_ms);
-
-/**
- * @ingroup os
- * @brief Modify a timer's expiration
- *
- * @param timer    pointer to the structure allocated for this timer
- * @param timeout_msec    the timeout in milliseconds
- */
-extern int32_t ocs_mod_timer(ocs_timer_t *timer, uint32_t timeout_ms);
-
-
-/**
- * @ingroup os
- * @brief Queries to see if a timer is pending.
- *
- * @param timer    pointer to the structure allocated for this timer
- *
- * @return non-zero if the timer is pending
- */
-extern int32_t ocs_timer_pending(ocs_timer_t *timer);
-
-/**
- * @ingroup os
- * @brief Remove a pending timer
- *
- * @param timer    pointer to the structure allocated for this timer
- *                 expires.
- */
-extern int32_t ocs_del_timer(ocs_timer_t *timer);
 
 /***************************************************************************
  * Time Routines
@@ -1079,6 +1094,21 @@ ocs_msectime(void)
 
 	gettimeofday(&tv, NULL);
 	return (tv.tv_sec*1000) + (tv.tv_usec / 1000);
+}
+
+/**
+ * @ingroup os
+ * @brief Get time of day in usec
+ *
+ * @return time of day in usec
+ */
+static inline time_t
+ocs_usectime(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return (tv.tv_sec*1000000) + (tv.tv_usec);
 }
 
 /***************************************************************************
@@ -1276,12 +1306,13 @@ typedef struct ocs_mqueue_s {
  */
 
 static inline int32_t
-ocs_mqueue_init(ocs_mqueue_t *q)
+ocs_mqueue_init(ocs_os_handle_t os, ocs_mqueue_t *q)
 {
 	ocs_memset(q, 0, sizeof(*q));
 	ocs_lock_init(NULL, &q->lock, "mqueue_lock");
 	ocs_sem_init(&q->prod_sem, 0, "mqueue_prod");
 	ocs_list_init(&q->queue, ocs_mqueue_hdr_t, link);
+	q->os = os;
 	return 0;
 }
 
@@ -1305,7 +1336,7 @@ ocs_mqueue_put(ocs_mqueue_t *q, void *msgdata)
 	hdr = ocs_malloc(q->os, sizeof(*hdr), OCS_M_NOWAIT | OCS_M_ZERO);
 
 	if (hdr == NULL) {
-		ocs_log_err(NULL, "%s: ocs_malloc() failed\n", __func__);
+		ocs_log_err(NULL, "ocs_malloc() failed\n");
 		return -1;
 	}
 
@@ -1340,7 +1371,7 @@ ocs_mqueue_get(ocs_mqueue_t *q, int32_t timeout_usec)
 	void *msgdata = NULL;
 
 	if (q == NULL) {
-		ocs_log_err(NULL, "%s: q is NULL\n", __func__);
+		ocs_log_err(NULL, "q is NULL\n");
 		return NULL;
 	}
 
@@ -1440,7 +1471,6 @@ enum {	OCS_THREAD_PRIORITY_HIGH,
 extern int32_t ocs_thread_join(ocs_thread_t *thread);
 extern int32_t ocs_thread_set_priority(ocs_thread_t *thread, uint32_t priority);
 extern int32_t ocs_thread_setcpu(ocs_thread_t *thread, uint32_t cpu);
-extern int32_t ocs_thread_getcpu(void);
 extern void *ocs_thread_get_arg(ocs_thread_t *thread);
 extern int32_t ocs_thread_terminate(ocs_thread_t *thread);
 extern int32_t ocs_thread_terminate_requested(ocs_thread_t *thread);
@@ -1469,6 +1499,8 @@ static inline void ocs_get_random_bytes (uint8_t *buff, uint32_t nbytes)
 		}
 	}
 }
+
+#define	ocs_rand()				rand()
 
 /***************************************************************************
  * PCI
@@ -1521,29 +1553,6 @@ static inline void ocs_get_random_bytes (uint8_t *buff, uint32_t nbytes)
 extern int32_t
 ocs_get_bus_dev_func(ocs_t *ocs, uint8_t* bus, uint8_t* dev, uint8_t* func);
 
-/**
- * @ingroup os
- * @brief Read a 32 bit value from the specified configuration register
- *
- * @param os OS specific handle or driver context
- * @param reg register offset
- *
- * @return The 32 bit value
- */
-extern uint32_t ocs_config_read32(ocs_os_handle_t os, uint32_t reg);
-
-/**
- * @ingroup os
- * @brief Write a 32 bit value to the specified configuration
- *        register
- *
- * @param os OS specific handle or driver context
- * @param reg register offset
- * @param val value to write
- *
- * @return None
- */
-extern void ocs_config_write32(ocs_os_handle_t os, uint32_t reg, uint32_t val);
 
 /**
  * @ingroup os
@@ -1613,6 +1622,7 @@ extern void ocs_reg_write16(ocs_os_handle_t os, uint32_t rset, uint32_t off, uin
  * @param val  8-bit value to write
  */
 extern void ocs_reg_write8(ocs_os_handle_t os, uint32_t rset, uint32_t off, uint8_t val);
+
 
 /**
  * @ingroup os
@@ -1780,19 +1790,6 @@ ocs_ref_put_release(ocs_ref_t *ref, ocs_ref_release_t release, void *arg)
 	return rc;
 }
 
-/*****************************************************************************
- *
- * CPU topology API
- */
-
-typedef struct {
-	uint32_t num_cpus;	/* Number of CPU cores */
-	bool hyper;		/* TRUE if threaded CPUs */
-} ocs_cpuinfo_t;
-
-extern int32_t ocs_get_cpuinfo(ocs_cpuinfo_t *cpuinfo);
-extern uint32_t ocs_get_num_cpus(void);
-
 /**
  * @ingroup os
  * @brief Get the OS system ticks
@@ -1812,6 +1809,33 @@ ocs_get_os_ticks(void)
 
 /**
  * @ingroup os
+ * @brief Convert the OS system ticks to ms.
+ *
+ * @param number of ticks that have occured since the system booted.
+ *
+ * @return the milisecond value for the number of ticks that have occurred since the system
+ * booted.
+ */
+static inline uint64_t ocs_ticks_to_ms(uint64_t t)
+{
+        return t;
+}
+
+/**
+ * @ingroup os
+ * @brief Convert the OS system ms to ticks
+ *
+ *
+ * @return the ticks value for the number of ms
+ */
+static inline uint64_t ocs_ms_to_ticks(uint64_t msec)
+{
+	return msec;
+}
+
+
+/**
+ * @ingroup os
  * @brief Get the OS system tick frequency
  *
  * @return frequency of system ticks.
@@ -1826,9 +1850,84 @@ ocs_get_os_tick_freq(void)
 	return 1000;
 }
 
+/*
+ * @brief Return HW completion context mode
+ *
+ * @return true for interrupt context mode, false for thread context mode.
+ */
+static inline bool ocs_in_interrupt_context(void)
+{
+	return FALSE;
+}
+
+#ifndef OCS_USPACE_SPDK
+/**
+ * @ingroup os
+ * @brief Delay execution by the given number of micro-seconds
+ *
+ * @param usec number of micro-seconds to "busy-wait"
+ *
+ * @note The value of usec may be greater than 1,000,000
+ */
+#define ocs_udelay(usec) usleep(usec)
+#define ocs_msleep(msec) usleep(msec*1000)
+#define ocs_delay_msec(msec) ocs_msleep(msec)
+
+/**
+ * @ocs_delay_usec
+ * @brief Do delay/sleep based on the atomic context
+ *
+ * @param Pointer to ocs context
+ * @param delay in usec
+ */
+static inline void ocs_delay_usec(unsigned int udelay)
+{
+	if (ocs_in_interrupt_context())
+		ocs_udelay(udelay);
+	else
+		ocs_msleep(udelay/1000);
+}
+#endif
+
+extern int ocs_drain_shutdown_events(ocs_t *ocs, ocs_sem_t *sem);
+
+static inline int
+ocs_safe_snprintf(char *buf, int n, const char *format, ...)
+{
+	va_list args;
+	int length;
+
+	va_start(args, format);
+
+	length = vsnprintf(buf, n, format, args);
+	if(length < 0)
+		 ocs_log_err(NULL, "vsnprintf failed \n");
+
+	va_end(args);
+	return (length);
+
+}
+
 #include "ocs_pool.h"
 #include "ocs_cbuf.h"
 #include "ocs_common.h"
+
+#if defined(__GNUC__) && __GNUC__ >= 7
+#define FALL_THROUGH __attribute__ ((fallthrough))
+#else
+#define FALL_THROUGH ((void)0)
+#endif /* __GNUC__ >= 7 */
+
+#define FD_INVALID -1
+
+#define OCS_FD_CLOSE(fd) \
+	do { \
+		if (close(fd) < 0) { \
+			ocs_log_warn(NULL, "fd close failed"); \
+		} else { \
+			(fd) = FD_INVALID; \
+		} \
+	} while (0)
 
 #endif /* !_OCS_OS_H */
 

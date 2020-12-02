@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #include "ocs.h"
@@ -94,7 +93,12 @@ int32_t ocs_textbuf_ext_get_written(ocs_textbuf_t *textbuf, uint32_t idx)
 uint32_t
 ocs_textbuf_initialized(ocs_textbuf_t *textbuf)
 {
-	return (textbuf->ocs != NULL);
+	uint32_t rc = false;
+
+	if (textbuf)
+		rc = (textbuf->ocs != NULL);
+
+	return rc;
 }
 
 int32_t
@@ -111,14 +115,46 @@ ocs_textbuf_alloc(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t length)
 		textbuf->allocation_length = length;
 	}
 
-	/* mark as extendable */
-	textbuf->extendable = TRUE;
+	/* save maximum allocation length */
+	textbuf->max_allocation_length = length;
+
+	textbuf->current_seg = ocs_textbuf_segment_alloc(textbuf);
+
+	/* Add first segment */
+	return (textbuf->current_seg == NULL) ? -1 : 0;
+}
+
+int32_t
+ocs_textbuf_pool_alloc(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t length)
+{
+	uint32_t remaining_len = length;
+
+	ocs_memset(textbuf, 0, sizeof(*textbuf));
+	textbuf->ocs = ocs;
+	ocs_list_init(&textbuf->segment_list, ocs_textbuf_segment_t, link);
 
 	/* save maximum allocation length */
 	textbuf->max_allocation_length = length;
 
-	/* Add first segment */
-	return (ocs_textbuf_segment_alloc(textbuf) == NULL) ? -1 : 0;
+	while (remaining_len) {
+		textbuf->allocation_length = (remaining_len > OCS_TEXTBUF_MAX_ALLOC_LEN) ?
+						OCS_TEXTBUF_MAX_ALLOC_LEN : remaining_len;
+
+		if (ocs_textbuf_segment_alloc(textbuf) == NULL)
+			goto fail;
+
+		if (remaining_len <= OCS_TEXTBUF_MAX_ALLOC_LEN)
+			break;
+
+		remaining_len -= textbuf->allocation_length;
+	}
+
+	textbuf->current_seg = ocs_list_get_head(&textbuf->segment_list);
+	return 0;
+
+fail:
+	ocs_textbuf_free(ocs, textbuf);
+	return -1;
 }
 
 static ocs_textbuf_segment_t *
@@ -126,27 +162,27 @@ ocs_textbuf_segment_alloc(ocs_textbuf_t *textbuf)
 {
 	ocs_textbuf_segment_t *segment = NULL;
 
-	if (textbuf->extendable) {
-		segment = ocs_malloc(textbuf->ocs, sizeof(*segment), OCS_M_ZERO | OCS_M_NOWAIT);
-		if (segment != NULL) {
-			segment->buffer = ocs_malloc(textbuf->ocs, textbuf->allocation_length, OCS_M_ZERO | OCS_M_NOWAIT);
-			if (segment->buffer != NULL) {
-				segment->buffer_length = textbuf->allocation_length;
-				segment->buffer_written = 0;
-				ocs_list_add_tail(&textbuf->segment_list, segment);
-				textbuf->total_allocation_length += textbuf->allocation_length;
+	if (textbuf->pre_allocated)
+		return NULL;
 
-				/* If we've allocated our limit, then mark as not extendable */
-				if (textbuf->total_allocation_length >= textbuf->max_allocation_length) {
-					textbuf->extendable = 0;
-				}
+	segment = ocs_malloc(textbuf->ocs, sizeof(*segment), OCS_M_ZERO | OCS_M_NONUMA);
+	if (segment != NULL) {
+		segment->buffer = ocs_malloc(textbuf->ocs, textbuf->allocation_length, OCS_M_ZERO | OCS_M_NONUMA);
+		if (segment->buffer != NULL) {
+			segment->buffer_length = textbuf->allocation_length;
+			segment->buffer_written = 0;
+			ocs_list_add_tail(&textbuf->segment_list, segment);
+			textbuf->total_allocation_length += textbuf->allocation_length;
 
-			} else {
-				ocs_textbuf_segment_free(textbuf->ocs, segment);
-				segment = NULL;
-			}
+			/* If we've allocated our limit, then mark as not extendable */
+			if (textbuf->total_allocation_length >= textbuf->max_allocation_length)
+				textbuf->pre_allocated = 1;
+		} else {
+			ocs_textbuf_segment_free(textbuf->ocs, segment);
+			segment = NULL;
 		}
 	}
+
 	return segment;
 }
 
@@ -179,29 +215,6 @@ ocs_textbuf_get_segment(ocs_textbuf_t *textbuf, uint32_t idx)
 	return NULL;
 }
 
-int32_t
-ocs_textbuf_init(ocs_t *ocs, ocs_textbuf_t *textbuf, void *buffer, uint32_t length)
-{
-	int32_t rc = -1;
-	ocs_textbuf_segment_t *segment;
-
-	ocs_memset(textbuf, 0, sizeof(*textbuf));
-
-	textbuf->ocs = ocs;
-	ocs_list_init(&textbuf->segment_list, ocs_textbuf_segment_t, link);
-	segment = ocs_malloc(ocs, sizeof(*segment), OCS_M_ZERO | OCS_M_NOWAIT);
-	if (segment) {
-		segment->buffer = buffer;
-		segment->buffer_length = length;
-		segment->buffer_written = 0;
-		segment->user_allocated = 1;
-		ocs_list_add_tail(&textbuf->segment_list, segment);
-		rc = 0;
-	}
-
-	return rc;
-}
-
 void
 ocs_textbuf_free(ocs_t *ocs, ocs_textbuf_t *textbuf)
 {
@@ -218,16 +231,29 @@ ocs_textbuf_free(ocs_t *ocs, ocs_textbuf_t *textbuf)
 	}
 }
 
+/**
+ * @brief Helper function to dump message
+ *
+ * @param textbuf pointer to driver dump text buffer.
+ * If valid, dump message to textbuf
+ * If NULL, dump message to kernel dmesg
+ *
+ * @return none
+ */
 void
 ocs_textbuf_printf(ocs_textbuf_t *textbuf, const char *fmt, ...)
 {
 	va_list ap;
+	char valuebuf[256];
 
-	if (ocs_textbuf_initialized(textbuf)) {
-		va_start(ap, fmt);
+	va_start(ap, fmt);
+	if (textbuf && ocs_textbuf_initialized(textbuf)) {
 		ocs_textbuf_vprintf(textbuf, fmt, ap);
-		va_end(ap);
+	} else {
+		ocs_vsnprintf(valuebuf, sizeof(valuebuf), fmt, ap);
+		ocs_log_info(NULL, "%s", valuebuf);
 	}
+	va_end(ap);
 }
 
 void
@@ -244,8 +270,8 @@ ocs_textbuf_vprintf(ocs_textbuf_t *textbuf, const char *fmt, va_list ap)
 
 	va_copy(save_ap, ap);
 
-	/* fetch last segment */
-	segment = ocs_list_get_tail(&textbuf->segment_list);
+	/* fetch last written segment */
+	segment = textbuf->current_seg;
 
 	avail = ocs_segment_remaining(segment);
 	if (avail == 0) {
@@ -259,24 +285,27 @@ ocs_textbuf_vprintf(ocs_textbuf_t *textbuf, const char *fmt, va_list ap)
 
 	/* See if data was truncated */
 	if (written >= avail) {
-
 		written = avail;
+		/* revert the partially written data */
+		*(segment->buffer + segment->buffer_written) = 0;
 
-		if (textbuf->extendable) {
-
-			/* revert the partially written data */
-			*(segment->buffer + segment->buffer_written) = 0;
-
+		if (textbuf->pre_allocated) {
+			segment = ocs_list_next(&textbuf->segment_list, textbuf->current_seg);
+		} else {
 			/* Allocate a new segment */
-			if ((segment = ocs_textbuf_segment_alloc(textbuf)) == NULL) {
-				ocs_log_err(textbuf->ocs, "%s: alloc segment failed\n", __func__);
-				goto out;
-			}
-			avail = ocs_segment_remaining(segment);
-
-			/* Retry the write */
-			written = ocs_vsnprintf(segment->buffer + segment->buffer_written, avail, fmt, save_ap);
+			segment = ocs_textbuf_segment_alloc(textbuf);
 		}
+
+		if (segment == NULL) {
+			ocs_log_err(textbuf->ocs, "alloc segment failed\n");
+			goto out;
+		}
+
+		textbuf->current_seg = segment;
+		avail = ocs_segment_remaining(segment);
+
+		/* Retry the write */
+		written = ocs_vsnprintf(segment->buffer + segment->buffer_written, avail, fmt, save_ap);
 	}
 	segment->buffer_written += written;
 
@@ -375,6 +404,9 @@ ocs_textbuf_remaining(ocs_textbuf_t *textbuf)
 static int32_t
 ocs_segment_remaining(ocs_textbuf_segment_t *segment)
 {
+	if (!segment)
+		return 0;
+
 	return segment->buffer_length - segment->buffer_written;
 }
 
@@ -386,9 +418,10 @@ ocs_textbuf_reset(ocs_textbuf_t *textbuf)
 	ocs_textbuf_segment_t *n;
 
 	if (ocs_textbuf_initialized(textbuf)) {
-		/* zero written on the first segment, free the rest */
+		textbuf->current_seg = ocs_list_get_head(&textbuf->segment_list);
+		/* Mark the 'buffer_written' as zero for pre_allocated / first segment and free the rest */
 		ocs_list_foreach_safe(&textbuf->segment_list, segment, n) {
-			if (i++ == 0) {
+			if (textbuf->pre_allocated || (i++ == 0)) {
 				segment->buffer_written = 0;
 			} else {
 				ocs_list_remove(&textbuf->segment_list, segment);

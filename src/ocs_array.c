@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -39,7 +38,7 @@
 #include "ocs.h"
 #include "ocs_array.h"
 
-#define DEFAULT_SLAB_LEN		(64*1024)
+#define DEFAULT_SLAB_LEN		(16*1024)
 
 struct ocs_array_s {
 	ocs_os_handle_t os;
@@ -94,11 +93,11 @@ ocs_array_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count)
 	 * or not use this API.
 	 */
 	if (size > slab_len) {
-		ocs_log_err(NULL, "%s: Error: size exceeds slab length\n", __func__);
+		ocs_log_err(NULL, "Error: size exceeds slab length\n");
 		return NULL;
 	}
 
-	array = ocs_malloc(os, sizeof(*array), OCS_M_ZERO | OCS_M_NOWAIT);
+	array = ocs_malloc(os, sizeof(*array), OCS_M_ZERO);
 	if (array == NULL) {
 		return NULL;
 	}
@@ -111,13 +110,13 @@ ocs_array_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count)
 	array->bytes_per_row = array->elems_per_row * array->size;
 
 	array->array_rows_len = array->n_rows * sizeof(*array->array_rows);
-	array->array_rows = ocs_malloc(os, array->array_rows_len, OCS_M_ZERO | OCS_M_NOWAIT);
+	array->array_rows = ocs_malloc(os, array->array_rows_len, OCS_M_ZERO);
 	if (array->array_rows == NULL) {
 		ocs_array_free(array);
 		return NULL;
 	}
 	for (i = 0; i < array->n_rows; i++) {
-		array->array_rows[i] = ocs_malloc(os, array->bytes_per_row, OCS_M_ZERO | OCS_M_NOWAIT);
+		array->array_rows[i] = ocs_malloc(os, array->bytes_per_row, OCS_M_ZERO);
 		if (array->array_rows[i] == NULL) {
 			ocs_array_free(array);
 			return NULL;
@@ -240,11 +239,11 @@ ocs_varray_alloc(ocs_os_handle_t os, uint32_t array_count)
 {
 	ocs_varray_t *va;
 
-	va = ocs_malloc(os, sizeof(*va), OCS_M_ZERO | OCS_M_NOWAIT);
+	va = ocs_malloc(os, sizeof(*va), OCS_M_ZERO);
 	if (va != NULL) {
 		va->os = os;
 		va->array_count = array_count;
-		va->array = ocs_malloc(os, sizeof(*va->array) * va->array_count, OCS_M_ZERO | OCS_M_NOWAIT);
+		va->array = ocs_malloc(os, sizeof(*va->array) * va->array_count, OCS_M_ZERO);
 		if (va->array != NULL) {
 			va->next_index = 0;
 			ocs_lock_init(os, &va->lock, "varray:%p", va);

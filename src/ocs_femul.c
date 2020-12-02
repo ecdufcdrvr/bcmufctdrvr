@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -66,7 +65,6 @@ void *__ocs_sport_femul_fabric_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void 
 void *__ocs_node_femul_fabric_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 
 static int32_t ocs_femul_process_rft_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len);
-static int32_t ocs_femul_process_da_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len);
 static int32_t ocs_femul_process_gnn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len);
 static int32_t ocs_femul_process_gpn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len);
 static int32_t ocs_femul_process_gfpn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len);
@@ -216,7 +214,7 @@ ocs_femul_process_flogi(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t 
 	 */
 	nsrec = ocs_ns_find_port_name(domain->ocs_ns, port_name);
 	if (nsrec != NULL) {
-		ocs_log_debug(ocs, "%s: Found existing NS record, send FLOGI acc\n", __func__);
+		ocs_log_debug(ocs, "Found existing NS record, send FLOGI acc\n");
 		ocs_send_flogi_acc(io, ocs_be16toh(hdr->ox_id), TRUE, NULL, NULL);
 		return 0;
 	}
@@ -224,7 +222,7 @@ ocs_femul_process_flogi(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t 
 	/* Allocate the physical port id */
 	portid = ocs_femul_portid_alloc(domain);
 	if (portid < 0) {
-		ocs_log_err(ocs, "%s: ocs_femul_portid_alloc() failed: %d\n", __func__, portid);
+		ocs_log_err(ocs, "ocs_femul_portid_alloc() failed: %d\n", portid);
 		return -1;
 	}
 
@@ -287,14 +285,14 @@ ocs_femul_process_fdisc(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t 
 	/* Allocate the physical port id */
 	portid = ocs_femul_portid_alloc(io->node->sport->domain);
 	if (portid < 0) {
-		ocs_log_err(ocs, "%s: ocs_femul_portid_alloc() failed: %d\n", __func__, portid);
+		ocs_log_err(ocs, "ocs_femul_portid_alloc() failed: %d\n", portid);
 		return -1;
 	}
 
         /* Allocate a node */
         rspnode = ocs_node_alloc(io->node->sport, portid, FALSE, FALSE);
         if (rspnode == NULL) {
-                ocs_log_err(ocs, "%s: ocs_node_alloc failed\n", __func__);
+                ocs_log_err(ocs, "ocs_node_alloc failed\n");
                 return -1;
         }
         ocs_node_transition(rspnode, __ocs_d_init, NULL);
@@ -302,7 +300,7 @@ ocs_femul_process_fdisc(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t 
 	/* Allocate an IO for the response */
         rspio = ocs_els_io_alloc(rspnode, sizeof(fc_plogi_payload_t), OCS_ELS_ROLE_RESPONDER);
         if (rspio == NULL) {
-                ocs_log_err(ocs, "%s/OCS_EVT_FDISC_RCVD: ocs_els_io_alloc failed\n", __func__);
+                ocs_log_err(ocs, "OCS_EVT_FDISC_RCVD: ocs_els_io_alloc failed\n");
                 ocs_node_free(rspnode);
                 return -1;
         }
@@ -339,10 +337,10 @@ ocs_femul_sport_attach(ocs_sport_t *sport)
 
 	nsrec = ocs_ns_alloc(domain->ocs_ns, sport->fc_id);
 	if (nsrec == NULL) {
-		ocs_log_err(ocs, "%s: failed to allocate nsrec for fc_id 0x%x\n",
-			__func__, sport->fc_id);
+		ocs_log_err(ocs, "failed to allocate nsrec for fc_id 0x%x\n", sport->fc_id);
 		return;
 	}
+
 	nsrec->fc4_types = (1 << FC_GS_TYPE_BIT(FC_TYPE_FCP));
 	nsrec->fc4_features = ((sport->enable_ini ? FC4_FEATURE_INITIATOR : 0) |
 			       (sport->enable_tgt ? FC4_FEATURE_TARGET : 0));
@@ -375,11 +373,11 @@ int32_t ocs_femul_ports_attached(ocs_domain_t *domain)
 
 	ocs = domain->ocs;
 	ocs_assert(ocs != NULL, -1);
-	ocs_log_debug(ocs, "%s all sports attached\n", __func__);
+	ocs_log_debug(ocs, "all sports attached\n");
 
 	fabric = ocs_sport_find(domain, FC_ADDR_FABRIC);
 	if (fabric == NULL) {
-		ocs_log_warn(ocs, "%s: ocs_sport_find(FC_ADD_FABRIC) failed\n", __func__);
+		ocs_log_warn(ocs, "ocs_sport_find(FC_ADD_FABRIC) failed\n");
 		return -1;
 	}
 
@@ -389,7 +387,7 @@ int32_t ocs_femul_ports_attached(ocs_domain_t *domain)
 	/* Allocate a node */
 	node = ocs_node_alloc(fabric, fc_id, 0, 0);
 	if (node == NULL) {
-		ocs_log_err(ocs, "%s: ocs_node_alloc() failed\n", __func__);
+		ocs_log_err(ocs, "ocs_node_alloc() failed\n");
 		ocs_femul_portid_free(domain, fc_id);
 		return -1;
 	}
@@ -398,7 +396,7 @@ int32_t ocs_femul_ports_attached(ocs_domain_t *domain)
 	/* Allocate an IO */
 	rspio = ocs_els_io_alloc(node, sizeof(fc_plogi_payload_t), OCS_ELS_ROLE_RESPONDER);
 	if (rspio == NULL) {
-		ocs_log_err(ocs, "%s: ocs_els_io_alloc() failed\n", __func__);
+		ocs_log_err(ocs, "ocs_els_io_alloc() failed\n");
 		ocs_node_free(node);
 		ocs_femul_portid_free(domain, fc_id);
 		return -1;
@@ -449,7 +447,7 @@ ocs_femul_process_rft_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 	/* Allocate a name services record */
 	nsrec = ocs_ns_alloc(io->node->sport->domain->ocs_ns, port_id);
 	if (nsrec == NULL) {
-		ocs_log_err(io->ocs, "%s: ocs_ns_alloc failed\n", __func__);
+		ocs_log_err(io->ocs, "ocs_ns_alloc failed\n");
 		return -1;
 	}
 
@@ -492,33 +490,6 @@ ocs_femul_process_rff_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 	return ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_ACCEPT, 0, 0);
 }
 
-/**
- * @brief Process and DA_ID FCGS request
- *
- * An DA_ID request is processed while in Fabric Emulation mode.   In this case, the
- * payload contains the Port ID and fc4_typess of the requester which is added
- * to the directory services database.
- *
- * @param io Pointer to IO object
- * @param hdr Pointer to FC header
- * @param payload Address of payload
- * @param payload_len Length of payload in bytes
- *
- * @return returns 0 for success, a negative error code value for failure.
- */
-int32_t
-ocs_femul_process_da_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len)
-{
-	fcgs_da_id_t *da_id = payload;
-	uint32_t port_id = ocs_be32toh(da_id->port_id);
-	ocs_ns_t *ns = io->node->sport->domain->ocs_ns;
-
-	if (ns != NULL) {
-		ocs_ns_free(ns, port_id);
-	}
-	
-	return ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_ACCEPT, 0, 0);
-}
 /**
  * @brief Process RPN_ID request
  *
@@ -651,9 +622,9 @@ ocs_femul_process_rsnn_nn(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_
 		return -1;
 	}
 
-	nsrec->sym_node_name = ocs_malloc(ocs, rsnnnn->name_len + 1, OCS_M_ZERO | OCS_M_NOWAIT);
+	nsrec->sym_node_name = ocs_malloc(ocs, rsnnnn->name_len + 1, OCS_M_ZERO);
 	if (nsrec->sym_node_name == NULL) {
-		ocs_log_err(io->ocs, "%s: ocs_malloc sym_node_name failed\n", __func__);
+		ocs_log_err(io->ocs, "ocs_malloc sym_node_name failed\n");
 		ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_REJECT, FCCT_UNABLE_TO_PERFORM,
 			FCCT_NO_ADDITIONAL_EXPLANATION);
 		return -1;
@@ -739,7 +710,7 @@ ocs_femul_process_gnn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 {
 	fcct_gnnid_req_t *gnnid = payload;
 	uint32_t port_id = fc_be24toh(gnnid->port_id);
-	fcct_gnnid_acc_t *acc = io->els_rsp.virt;
+	fcct_gnnid_acc_t *acc = io->els_info->els_rsp.virt;
 	ocs_ns_record_t *nsrec = NULL;
 	uint32_t cmd_rsp_code = FCCT_HDR_CMDRSP_ACCEPT;
 	uint32_t reason_code = 0;
@@ -751,12 +722,12 @@ ocs_femul_process_gnn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 		acc->node_name = ocs_htobe64(nsrec->node_name);
 		io->wire_len += sizeof(acc->node_name);
 	} else {
-		ocs_log_test(io->ocs, "%s port_id 0x%x not found\n",
-			__func__, port_id);
+		ocs_log_test(io->ocs, "port_id 0x%x not found\n", port_id);
 		cmd_rsp_code = FCCT_HDR_CMDRSP_REJECT;
 		reason_code = FCCT_UNABLE_TO_PERFORM;
 		reason_code_explanation = FCCT_DEVICES_NOT_IN_COMMON_ZONE;
 	}
+
 	return ocs_send_ct_rsp(io, hdr->ox_id, payload, cmd_rsp_code,
 			       reason_code, reason_code_explanation);
 }
@@ -778,7 +749,7 @@ ocs_femul_process_gpn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 {
 	fcct_gpnid_req_t *gpnid = payload;
 	uint32_t port_id = fc_be24toh(gpnid->port_id);
-	fcct_gpnid_acc_t *acc = io->els_rsp.virt;
+	fcct_gpnid_acc_t *acc = io->els_info->els_rsp.virt;
 	ocs_ns_record_t *nsrec = NULL;
 	uint32_t cmd_rsp_code = FCCT_HDR_CMDRSP_ACCEPT;
 	uint32_t reason_code = 0;
@@ -790,12 +761,12 @@ ocs_femul_process_gpn_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 		acc->port_name = ocs_htobe64(nsrec->port_name);
 		io->wire_len += sizeof(acc->port_name);
 	} else {
-		ocs_log_test(io->ocs, "%s port_id 0x%x not found\n",
-			__func__, port_id);
+		ocs_log_test(io->ocs, "port_id 0x%x not found\n", port_id);
 		cmd_rsp_code = FCCT_HDR_CMDRSP_REJECT;
 		reason_code = FCCT_UNABLE_TO_PERFORM;
 		reason_code_explanation = FCCT_DEVICES_NOT_IN_COMMON_ZONE;
 	}
+
 	return ocs_send_ct_rsp(io, hdr->ox_id, payload, cmd_rsp_code,
 			       reason_code, reason_code_explanation);
 }
@@ -836,7 +807,7 @@ ocs_femul_process_gff_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 {
 	fcct_gffid_req_t *gffid = payload;
 	uint32_t port_id = fc_be24toh(gffid->port_id);
-	fcct_gffid_acc_t *acc = io->els_rsp.virt;
+	fcct_gffid_acc_t *acc = io->els_info->els_rsp.virt;
 	ocs_ns_record_t *nsrec = NULL;
 	uint32_t cmd_rsp_code = FCCT_HDR_CMDRSP_ACCEPT;
 	uint32_t reason_code = 0;
@@ -848,12 +819,12 @@ ocs_femul_process_gff_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 		acc->fc4_feature_bits = nsrec->fc4_features;
 		io->wire_len += sizeof(acc->fc4_feature_bits);
 	} else {
-		ocs_log_test(io->ocs, "%s port_id 0x%x not found\n",
-			__func__, port_id);
+		ocs_log_test(io->ocs, "port_id 0x%x not found\n", port_id);
 		cmd_rsp_code = FCCT_HDR_CMDRSP_REJECT;
 		reason_code = FCCT_UNABLE_TO_PERFORM;
 		reason_code_explanation = FCCT_DEVICES_NOT_IN_COMMON_ZONE;
 	}
+
 	return ocs_send_ct_rsp(io, hdr->ox_id, payload, cmd_rsp_code,
 			       reason_code, reason_code_explanation);
 }
@@ -873,14 +844,14 @@ ocs_femul_process_gff_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 static int32_t
 ocs_femul_process_gid_ft(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len)
 {
-	fcct_gidft_acc_t *gidft = io->els_rsp.virt;
+	fcct_gidft_acc_t *gidft = io->els_info->els_rsp.virt;
 	uint32_t reqid = fc_be24toh(hdr->s_id);
 	uint32_t idx;
 	uint32_t max_entries;
 	ocs_ns_record_t *nsrec = NULL;
 
 	/* Compute maximum entries, given the response payload size */
-	max_entries = (io->els_rsp.size - sizeof(gidft->hdr)) / sizeof(uint32_t);
+	max_entries = (io->els_info->els_rsp.size - sizeof(gidft->hdr)) / sizeof(uint32_t);
 
 	/* enumerate all nodes that are in the domain to which the requestor belongs */
 	idx = 0;
@@ -888,7 +859,7 @@ ocs_femul_process_gid_ft(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 		nsrec = ocs_ns_enumerate(io->node->sport->domain->ocs_ns, nsrec)) {
 
 		if (idx >= max_entries) {
-			ocs_log_test(io->ocs, "%s: overflowed GID_FT response buffer\n", __func__);
+			ocs_log_test(io->ocs, "overflowed GID_FT response buffer\n");
 			break;
 		}
 		/* Skip this entry if it blocks to the requestor */
@@ -921,14 +892,14 @@ ocs_femul_process_gid_ft(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 static int32_t
 ocs_femul_process_gid_pt(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len)
 {
-	fcct_gidpt_acc_t *gidpt = io->els_rsp.virt;
+	fcct_gidpt_acc_t *gidpt = io->els_info->els_rsp.virt;
 	uint32_t reqid = fc_be24toh(hdr->s_id);
 	uint32_t idx;
 	uint32_t max_entries;
 	ocs_ns_record_t *nsrec = NULL;
 
 	/* Compute maximum entries, given the response payload size */
-	max_entries = (io->els_rsp.size - sizeof(gidpt->hdr)) / sizeof(uint32_t);
+	max_entries = (io->els_info->els_rsp.size - sizeof(gidpt->hdr)) / sizeof(uint32_t);
 
 	/* enumerate all nodes that are in the domain to which the requestor belongs */
 	idx = 0;
@@ -936,7 +907,7 @@ ocs_femul_process_gid_pt(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 		nsrec = ocs_ns_enumerate(io->node->sport->domain->ocs_ns, nsrec)) {
 
 		if (idx >= max_entries) {
-			ocs_log_test(io->ocs, "%s: overflowed GID_PT response buffer\n", __func__);
+			ocs_log_test(io->ocs, "overflowed GID_PT response buffer\n");
 			break;
 		}
 		/* Skip this entry if it blocks to the requestor */
@@ -970,27 +941,28 @@ static int32_t
 ocs_femul_process_ga_nxt(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t payload_len)
 {
 	fcct_ganxt_req_t *ganxt_req = payload;
-	fcct_ganxt_acc_t *ganxt_resp = io->els_rsp.virt;
+	fcct_ganxt_acc_t *ganxt_resp = io->els_info->els_rsp.virt;
 	uint32_t port_id = ganxt_req->port_id;
 	ocs_ns_record_t *nsrec = NULL, *tmp_nsrec = NULL;
 
-	ocs_memset(io->els_rsp.virt, 0, sizeof(ganxt_resp));
-	while ((nsrec = ocs_ns_enumerate(io->node->sport->domain->ocs_ns, nsrec)) != NULL) { 
+	ocs_memset(io->els_info->els_rsp.virt, 0, sizeof(ganxt_resp));
+	while ((nsrec = ocs_ns_enumerate(io->node->sport->domain->ocs_ns, nsrec)) != NULL) {
 		if (nsrec->port_id > port_id) {
-			if (!tmp_nsrec || (tmp_nsrec->port_id > nsrec->port_id)) {
+			if (!tmp_nsrec || (tmp_nsrec->port_id > nsrec->port_id))
 				tmp_nsrec = nsrec;
-			}
 		}
-
 	}
-	
+
 	if (tmp_nsrec) {
 		ganxt_resp->port_id 		= tmp_nsrec->port_id;
 		ganxt_resp->port_name	 	= tmp_nsrec->port_name;
 		ganxt_resp->sym_node_name_len 	= tmp_nsrec->sym_node_name_len;
+
 		ocs_memcpy(ganxt_resp->sym_node_name, tmp_nsrec->sym_node_name, MIN(tmp_nsrec->sym_node_name_len, 255));
+
 		ganxt_resp->class_of_serv	= tmp_nsrec->class_of_srvc;
 		ganxt_resp->node_name	 	= tmp_nsrec->node_name;
+
 		return ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_ACCEPT, 0, 0);
 	}
 
@@ -1021,13 +993,13 @@ ocs_femul_process_scr(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t pa
 	nsrec = ocs_ns_alloc(io->node->sport->domain->ocs_ns, port_id);
 
 	if (nsrec == NULL) {
-		ocs_log_test(io->ocs, "%s: port_id %x not found\n", __func__, port_id);
+		ocs_log_test(io->ocs, "port_id %x not found\n", port_id);
 		/* caller will send failure response */
 		return -1;
 	}
 	nsrec->scr_requested = TRUE;
 	nsrec->node = io->node;
-	ocs_log_debug(io->ocs, "%s: SCR accepted from %x\n", __func__, port_id);
+	ocs_log_debug(io->ocs, "SCR accepted from %x\n", port_id);
 
 	/* Clear the ns_event_list */
 	ocs_ns_event_clear(ns);
@@ -1108,9 +1080,6 @@ ocs_femul_process_fc_gs(const char *funcname, ocs_io_t *io, ocs_sm_event_t evt, 
 	case OCS_EVT_RFT_ID_RCVD:
 		rc = ocs_femul_process_rft_id(io, hdr, payload, payload_len);
 		break;
-	case OCS_EVT_DA_ID_RCVD:
-		rc = ocs_femul_process_da_id(io, hdr, payload, payload_len);
-		break;
 	case OCS_EVT_RHBA_RCVD:
 		rc = ocs_femul_process_rhba(io, hdr, payload, payload_len);
 		break;
@@ -1118,8 +1087,8 @@ ocs_femul_process_fc_gs(const char *funcname, ocs_io_t *io, ocs_sm_event_t evt, 
 		rc = ocs_femul_process_rpa(io, hdr, payload, payload_len);
 		break;
 	default: {
-		ocs_log_test(ocs, "[%s] %s (%s) %s sending CT_REJECT\n",
-			node->display_name, __func__, funcname, ocs_sm_event_name(evt));
+		ocs_log_test(ocs, "[%s] (%s) %s sending CT_REJECT\n",
+			     node->display_name, funcname, ocs_sm_event_name(evt));
 		ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_REJECT, FCCT_COMMAND_NOT_SUPPORTED, 0);
 		break;
 	}
@@ -1144,23 +1113,23 @@ ocs_ns_attach(ocs_domain_t *domain, uint32_t max_ports)
 	ocs_ns_t *ns;
 	ocs_t *ocs = domain->ocs;
 
-	ns = ocs_malloc(ocs, sizeof(*ns), OCS_M_ZERO | OCS_M_NOWAIT);
+	ns = ocs_malloc(ocs, sizeof(*ns), OCS_M_ZERO);
 	if (ns == NULL) {
-		ocs_log_err(ocs, "%s: ocs_malloc ns failed\n", __func__);
+		ocs_log_err(ocs, "ocs_malloc ns failed\n");
 		return NULL;
 	}
-	ns->ns_records = ocs_malloc(ocs, sizeof(*ns->ns_records)*max_ports, OCS_M_ZERO | OCS_M_NOWAIT);
+	ns->ns_records = ocs_malloc(ocs, sizeof(*ns->ns_records)*max_ports, OCS_M_ZERO);
 	ns->ns_record_count = max_ports;
 	if (ns->ns_records == NULL) {
-		ocs_log_err(ocs, "%s: ocs_malloc ns records failed\n", __func__);
+		ocs_log_err(ocs, "ocs_malloc ns records failed\n");
 		ocs_free(ocs, ns, sizeof(*ns));
 		return NULL;
 	}
 	ocs_lock_init(ocs, &ns->ns_event_lock, "ns_event_list lock[%d]", domain->instance_index);
 	ns->ns_event_list_len = sizeof(*ns->ns_event_list)*max_ports;
-	ns->ns_event_list = ocs_malloc(ocs, sizeof(*ns->ns_event_list)*max_ports, OCS_M_ZERO | OCS_M_NOWAIT);
+	ns->ns_event_list = ocs_malloc(ocs, sizeof(*ns->ns_event_list)*max_ports, OCS_M_ZERO);
 	if (ns->ns_event_list == NULL) {
-		ocs_log_err(ocs, "%s: ocs_malloc ns_event_list failed\n", __func__);
+		ocs_log_err(ocs, "ocs_malloc ns_event_list failed\n");
 		ocs_free(ocs, ns->ns_records, sizeof(*ns->ns_records)*max_ports);
 		ocs_free(ocs, ns, sizeof(*ns));
 		return NULL;
@@ -1184,30 +1153,35 @@ ocs_ns_attach(ocs_domain_t *domain, uint32_t max_ports)
 void
 ocs_ns_detach(ocs_ns_t *ns)
 {
-	ocs_t *ocs = ns->domain->ocs;
-	ocs_ns_record_t *nsrec;
+	ocs_t *ocs = NULL; 
+	ocs_ns_record_t *nsrec = NULL;
+
+	if (!ns) {
+		ocs_log_err(NULL, "invalid argument\n");
+		return;
+	}
+
+	ocs = ns->domain->ocs;
 
 	if (ocs_timer_pending(&ns->rscn_timer)) {
 		ocs_del_timer(&ns->rscn_timer);
 	}
 
-	if (ns != NULL) {
-		for (nsrec = NULL; (nsrec = ocs_ns_enumerate(ns, nsrec)) != NULL; ) {
-			if (nsrec->sym_node_name != NULL) {
-				ocs_free(ocs, nsrec->sym_node_name, nsrec->sym_node_name_len);
-				nsrec->sym_node_name = NULL;
-			}
+	for (nsrec = NULL; (nsrec = ocs_ns_enumerate(ns, nsrec)) != NULL; ) {
+		if (nsrec->sym_node_name != NULL) {
+			ocs_free(ocs, nsrec->sym_node_name, nsrec->sym_node_name_len);
+			nsrec->sym_node_name = NULL;
 		}
-
-		if (ns->ns_records != NULL) {
-			ocs_free(ocs, ns->ns_records, sizeof(*ns->ns_records) * ns->ns_record_count);
-		}
-		if (ns->ns_event_list != NULL) {
-			ocs_free(ocs, ns->ns_event_list, ns->ns_event_list_len);
-		}
-		ocs_lock_free(&ns->ns_event_lock);
-		ocs_free(ocs, ns, sizeof(*ns));
 	}
+
+	if (ns->ns_records != NULL) {
+		ocs_free(ocs, ns->ns_records, sizeof(*ns->ns_records) * ns->ns_record_count);
+	}
+	if (ns->ns_event_list != NULL) {
+		ocs_free(ocs, ns->ns_event_list, ns->ns_event_list_len);
+	}
+	ocs_lock_free(&ns->ns_event_lock);
+	ocs_free(ocs, ns, sizeof(*ns));
 }
 
 /**
@@ -1257,7 +1231,7 @@ ocs_ns_alloc(ocs_ns_t *ns, uint32_t port_id)
 		if (ocs_timer_pending(&ns->rscn_timer)) {
 			ocs_del_timer(&ns->rscn_timer);
 		}
-		ocs_setup_timer(ocs, &ns->rscn_timer, ocs_ns_rscn_timeout, ns, 1000);
+		ocs_setup_timer(ocs, &ns->rscn_timer, ocs_ns_rscn_timeout, ns, 1000, false);
 	}
 	return nsrec;
 }
@@ -1402,9 +1376,9 @@ ocs_ns_rscn_timeout(void *arg)
 
 		/* Build the payload */
 		port_ids_buf_len = sizeof(*port_ids_buf) * ns->ns_event_list_count;
-		port_ids_buf = ocs_malloc(ocs, port_ids_buf_len, OCS_M_ZERO | OCS_M_NOWAIT);
+		port_ids_buf = ocs_malloc(ocs, port_ids_buf_len, OCS_M_ZERO);
 		if (port_ids_buf == NULL) {
-			ocs_log_err(ocs, "%s: ocs_malloc port_ids failed\n", __func__);
+			ocs_log_err(ocs, "ocs_malloc port_ids failed\n");
 			ocs_unlock(&ns->ns_event_lock);
 			return;
 		}
@@ -1456,7 +1430,7 @@ ocs_ns_event_add(ocs_ns_t *ns, uint32_t port_id)
 		}
 
 		if (ns->ns_event_list_count >= ns->ns_record_count) {
-			ocs_log_test(ocs, "%s: ns_event_list is full\n", __func__);
+			ocs_log_test(ocs, "ns_event_list is full\n");
 			ocs_unlock(&ns->ns_event_lock);
 			return -1;
 		}
@@ -1498,6 +1472,9 @@ int32_t
 ocs_ddump_ns(ocs_textbuf_t *textbuf, ocs_ns_t *ns)
 {
 	ocs_ns_record_t *nsrec = NULL;
+
+	if (!textbuf)
+		return 0;
 
 	if (textbuf->ocs->domain && textbuf->ocs->domain->femul_enable) {
 		ocs_ddump_section(textbuf, "nameserver", 0);

@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -90,6 +89,15 @@ ocs_sm_disable(ocs_sm_ctx_t *ctx)
 	ctx->current_state = NULL;
 }
 
+/**
+ * @brief Get state machine current state
+ */
+ocs_sm_function_t
+ocs_sm_state(ocs_sm_ctx_t *ctx)
+{
+	return ctx->current_state;
+}
+
 const char *ocs_sm_event_name(ocs_sm_event_t evt)
 {
 	switch (evt) {
@@ -109,6 +117,9 @@ const char *ocs_sm_event_name(ocs_sm_event_t evt)
 	RETEVT(OCS_EVT_SRRS_ELS_REQ_RJT)
 	RETEVT(OCS_EVT_NODE_ATTACH_OK)
 	RETEVT(OCS_EVT_NODE_ATTACH_FAIL)
+	RETEVT(OCS_EVT_NODE_AUTH_OK)
+	RETEVT(OCS_EVT_NODE_AUTH_FAIL)
+	RETEVT(OCS_EVT_NODE_AUTH_RETRY)
 	RETEVT(OCS_EVT_NODE_FREE_OK)
 	RETEVT(OCS_EVT_ELS_REQ_TIMEOUT)
 	RETEVT(OCS_EVT_ELS_REQ_ABORTED)
@@ -162,9 +173,13 @@ const char *ocs_sm_event_name(ocs_sm_event_t evt)
 	RETEVT(OCS_EVT_ADISC_RCVD)
 	RETEVT(OCS_EVT_RSCN_RCVD)
 	RETEVT(OCS_EVT_SCR_RCVD)
+	RETEVT(OCS_EVT_RDP_RCVD)
 	RETEVT(OCS_EVT_ELS_RCVD)
+	RETEVT(OCS_EVT_AUTH_RCVD)
 	RETEVT(OCS_EVT_LAST)
 	RETEVT(OCS_EVT_FCP_CMD_RCVD)
+	RETEVT(OCS_EVT_NVME_CMD_RCVD)
+	RETEVT(OCS_EVT_TOW_DATA_RCVD)
 
 	RETEVT(OCS_EVT_RFT_ID_RCVD)
 	RETEVT(OCS_EVT_RFF_ID_RCVD)
@@ -182,22 +197,29 @@ const char *ocs_sm_event_name(ocs_sm_event_t evt)
 	RETEVT(OCS_EVT_RHBA_RCVD)
 	RETEVT(OCS_EVT_RPA_RCVD)
 
-	RETEVT(OCS_EVT_GIDFT_DELAY_EXPIRED)
+	RETEVT(OCS_EVT_GIDPT_DELAY_EXPIRED)
 
 	RETEVT(OCS_EVT_ABORT_IO)
 	RETEVT(OCS_EVT_ABORT_IO_NO_RESP)
+	RETEVT(OCS_EVT_IO_DELAY_TIMER_EXPIRY)
 	RETEVT(OCS_EVT_IO_CMPL)
 	RETEVT(OCS_EVT_IO_CMPL_ERRORS)
 	RETEVT(OCS_EVT_RESP_CMPL)
 	RETEVT(OCS_EVT_ABORT_CMPL)
 	RETEVT(OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY)
+	RETEVT(OCS_EVT_NODE_LAST_ACTIVE_IO)
 	RETEVT(OCS_EVT_NODE_DEL_INI_COMPLETE)
 	RETEVT(OCS_EVT_NODE_DEL_TGT_COMPLETE)
+	RETEVT(OCS_EVT_NODE_SESS_REG_OK)
+	RETEVT(OCS_EVT_NODE_SESS_REG_FAIL)
 	RETEVT(OCS_EVT_IO_ABORTED_BY_TMF)
 	RETEVT(OCS_EVT_IO_ABORT_IGNORED)
 	RETEVT(OCS_EVT_IO_FIRST_BURST)
 	RETEVT(OCS_EVT_IO_FIRST_BURST_ERR)
 	RETEVT(OCS_EVT_IO_FIRST_BURST_ABORTED)
+
+	RETEVT(OCS_EVT_CT_LOOPBACK_RCVD)
+	RETEVT(OCS_EVT_CT_LOOPBACK_RCVD_NO_IO)
 
 	default:
 		break;

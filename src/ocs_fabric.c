@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -51,15 +50,42 @@
 #include "ocs_fabric.h"
 #include "ocs_els.h"
 #include "ocs_device.h"
+#include "ocs_compat.h"
 
 static void ocs_fabric_initiate_shutdown(ocs_node_t *node);
 static void * __ocs_fabric_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 static int32_t ocs_start_ns_node(ocs_sport_t *sport);
+static int32_t ocs_start_fdmi_node(ocs_sport_t *sport);
 static int32_t ocs_start_fabctl_node(ocs_sport_t *sport);
-static int32_t ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gidft_len);
+static int32_t ocs_process_gidpt_payload(ocs_node_t *node, fcct_gidpt_acc_t *gidpt, uint32_t gidpt_len);
 static void ocs_process_rscn(ocs_node_t *node, ocs_node_cb_t *cbdata);
 static uint64_t ocs_get_wwpn(fc_plogi_payload_t *sp);
-static void gidft_delay_timer_cb(void *arg);
+static void gidpt_delay_timer_cb(void *arg);
+static void *__ocs_fdmi_get_cmd_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
+
+#define FDMI_ATTR_TYPE_LEN_SIZE	4
+#define OCS_MAX_CT_SIZE (60 * 4096)
+
+/* FDMI Port Speed definitions - FC-GS-8 */
+#define OCS_PORTSPEED_1GFC              0x00000001      /* 1G FC */
+#define OCS_PORTSPEED_2GFC              0x00000002      /* 2G FC */
+#define OCS_PORTSPEED_4GFC              0x00000008      /* 4G FC */
+#define OCS_PORTSPEED_8GFC              0x00000010      /* 8G FC */
+#define OCS_PORTSPEED_16GFC             0x00000020      /* 16G FC */
+#define OCS_PORTSPEED_32GFC             0x00000040      /* 32G FC */
+#define OCS_PORTSPEED_64GFC             0x00000400      /* 64G FC */
+#define OCS_PORTSPEED_128GFC            0x00000200      /* 128G FC */
+#define OCS_PORTSPEED_256GFC            0x00000800      /* 256G FC */
+#define OCS_PORTSPEED_UNKNOWN           0x00008000      /* Unknown */
+
+/* Defines for PORT port type attribute */
+#define OCS_FDMI_PORTTYPE_UNKNOWN      0
+#define OCS_FDMI_PORTTYPE_NPORT        1
+#define OCS_FDMI_PORTTYPE_NLPORT       2
+
+/* Defines for PORT port state attribute */
+#define OCS_FDMI_PORTSTATE_OFFLINE     1
+#define OCS_FDMI_PORTSTATE_ONLINE      2
 
 /**
  * @ingroup fabric_sm
@@ -86,9 +112,18 @@ __ocs_fabric_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_log_debug(node->ocs, ">>> reenter !!\n");
 		// fall through
 	case OCS_EVT_ENTER:
+		ocs_node_auth_init(node);
+
 		// sm: / send FLOGI
-		ocs_send_flogi(node, OCS_FC_FLOGI_TIMEOUT_SEC, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_fabric_flogi_wait_rsp, NULL);
+		node->ocs->sw_feature_cap = 0;
+		if (ocs_send_flogi(node, OCS_FC_FLOGI_TIMEOUT_SEC,
+				   OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL) == NULL) {
+			node_printf(node, "[%s] Failed to send FLOGI req. Shutting down the node\n",
+				   node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		} else {
+			ocs_node_transition(node, __ocs_fabric_flogi_wait_rsp, NULL);
+		}
 		break;
 
 	default:
@@ -117,7 +152,6 @@ ocs_fabric_set_topology(ocs_node_t *node, ocs_sport_topology_e topology)
 	node->sport->topology = topology;
 }
 
-
 /**
  * @ingroup fabric_sm
  * @brief Notify sport topology.
@@ -138,14 +172,13 @@ ocs_fabric_notify_topology(ocs_node_t *node)
 
 	/* now loop through the nodes in the sport and send topology notification */
 	ocs_sport_lock(node->sport);
-		ocs_list_foreach_safe(&node->sport->node_list, tmp_node, next) {
-			if (tmp_node != node) {
-				ocs_node_post_event(tmp_node, OCS_EVT_SPORT_TOPOLOGY_NOTIFY, (void *)topology);
-			}
+	ocs_list_foreach_safe(&node->sport->node_list, tmp_node, next) {
+		if (tmp_node != node) {
+			ocs_node_post_event(tmp_node, OCS_EVT_SPORT_TOPOLOGY_NOTIFY, (void *)topology);
 		}
+	}
 	ocs_sport_unlock(node->sport);
 }
-
 
 /**
  * @ingroup fabric_sm
@@ -178,13 +211,13 @@ __ocs_fabric_flogi_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 
-		ocs_domain_save_sparms(node->sport->domain, cbdata->els->els_rsp.virt);
+		ocs_domain_save_sparms(node->sport->domain, cbdata->els->els_info->els_rsp.virt);
 
 		ocs_display_sparams(node->display_name, "flogi rcvd resp", 0, NULL,
-			((uint8_t*)cbdata->els->els_rsp.virt) + 4);
+			((uint8_t*)cbdata->els->els_info->els_rsp.virt) + 4);
 
 		/* Check to see if the fabric is an F_PORT or and N_PORT */
-		if (ocs_rnode_is_nport(cbdata->els->els_rsp.virt)) {
+		if (ocs_rnode_is_nport(cbdata->els->els_info->els_rsp.virt)) {
 			// sm: if nport and p2p_winner / ocs_domain_attach
 			ocs_fabric_set_topology(node, OCS_SPORT_TOPOLOGY_P2P);
 			if (ocs_p2p_setup(node->sport)) {
@@ -211,8 +244,23 @@ __ocs_fabric_flogi_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 				}
 			}
 		} else {
+			fc_plogi_payload_t *flogi_acc = cbdata->els->els_info->els_rsp.virt;
+
+			/* Store FLOGI.LS_ACC.fcsp value for later use */
+			node->auth.dhchap.flogi_acc_fcsp =
+				ocs_be32toh(flogi_acc->common_service_parameters[1]) &
+				FC_FLOGI_CSP_W1_FCSP;
+
 			// sm: if not nport / ocs_domain_attach
 			/* ext_status has the fc_id, attach domain */
+			if (ocs_rnode_is_npiv_capable(cbdata->els->els_info->els_rsp.virt)) {
+				ocs_log_debug(NULL, "NPIV is enabled at switch side\n");
+				node->ocs->sw_feature_cap |= (OCS_FLOGI_FINISH | OCS_SUPPORT_NPIV);
+			} else {
+				ocs_log_debug(NULL, "NPIV is not supported at switch side\n");
+				node->ocs->sw_feature_cap |= OCS_FLOGI_FINISH;
+			}
+
 			ocs_fabric_set_topology(node, OCS_SPORT_TOPOLOGY_FABRIC);
 			ocs_fabric_notify_topology(node);
 
@@ -274,8 +322,14 @@ __ocs_vport_fabric_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		//sm: / send FDISC
-		ocs_send_fdisc(node, OCS_FC_FLOGI_TIMEOUT_SEC, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_fabric_fdisc_wait_rsp, NULL);
+		if (ocs_send_fdisc(node, OCS_FC_FLOGI_TIMEOUT_SEC,
+				   OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL) == NULL) {
+			node_printf(node, "[%s] Failed to send FDISC req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		} else {
+			ocs_node_transition(node, __ocs_fabric_fdisc_wait_rsp, NULL);
+		}
 		break;
 
 	default:
@@ -315,10 +369,11 @@ __ocs_fabric_fdisc_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		}
 
 		ocs_display_sparams(node->display_name, "fdisc rcvd resp", 0, NULL,
-			((uint8_t*)cbdata->els->els_rsp.virt) + 4);
+			((uint8_t*)cbdata->els->els_info->els_rsp.virt) + 4);
 
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
+		ocs_fabric_set_topology(node, OCS_SPORT_TOPOLOGY_FABRIC);
 		//sm: / ocs_sport_attach
 		ocs_sport_attach(node->sport, cbdata->ext_status);
 		ocs_node_transition(node, __ocs_fabric_wait_domain_attach, NULL);
@@ -347,6 +402,56 @@ __ocs_fabric_fdisc_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
+static void
+ocs_fabric_setup(ocs_node_t *node)
+{
+	int rc;
+
+	rc = ocs_start_ns_node(node->sport);
+	if (rc)
+		return;
+
+	/* Instantiate the fabric controller (sends SCR) */
+	if (node->sport->enable_rscn) {
+		rc = ocs_start_fabctl_node(node->sport);
+		if (rc)
+			return;
+	}
+
+	rc = ocs_start_fdmi_node(node->sport);
+	if (rc)
+		return;
+}
+
+static void *
+__ocs_fabric_wait_auth_finish(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_NODE_AUTH_OK:
+		ocs_fabric_setup(node);
+		ocs_node_transition(node, __ocs_fabric_idle, NULL);
+		break;
+	case OCS_EVT_NODE_AUTH_FAIL:
+		/* Don't bother calling ocs_fabric_setup().
+		 * The fabric would have blocked us anyway.
+		 */
+		ocs_node_transition(node, __ocs_fabric_idle, NULL);
+		break;
+	case OCS_EVT_AUTH_RCVD:
+		ocs_auth_els_recv(node, arg);
+		break;
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		break;
+	}
+	return NULL;
+}
+
+
 /**
  * @ingroup fabric_sm
  * @brief Fabric node state machine: Wait for a domain/sport attach event.
@@ -363,6 +468,7 @@ __ocs_fabric_fdisc_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 void *
 __ocs_fabric_wait_domain_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
+	int rc;
 	std_node_state_decl();
 
 	node_sm_trace();
@@ -375,24 +481,24 @@ __ocs_fabric_wait_domain_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg
 	case OCS_EVT_EXIT:
 		ocs_node_accept_frames(node);
 		break;
+
 	case OCS_EVT_DOMAIN_ATTACH_OK:
-	case OCS_EVT_SPORT_ATTACH_OK: {
-		int rc;
-
-		rc = ocs_start_ns_node(node->sport);
-		if (rc)
-			return NULL;
-
-		//sm: if enable_ini / start fabctl node
-		/* Instantiate the fabric controller (sends SCR) */
-		if (node->sport->enable_rscn) {
-			rc = ocs_start_fabctl_node(node->sport);
+	case OCS_EVT_SPORT_ATTACH_OK:
+		/* TODO: check why fabric is not mandating authentication. */
+		if (node->auth.dhchap.flogi_acc_fcsp ||
+		    ocs_node_auth_enabled(node)) {
+			ocs_node_transition(node, __ocs_fabric_wait_auth_finish,
+					    NULL);
+			rc = ocs_node_auth_start(node, OCS_AUTH_ROLE_INITIATOR,
+						 OCS_AUTH_EVT_START, NULL);
 			if (rc)
-				return NULL;
+				ocs_node_post_event(node,
+						OCS_EVT_NODE_AUTH_FAIL, NULL);
+		} else {
+			ocs_fabric_setup(node);
+			ocs_node_transition(node, __ocs_fabric_idle, NULL);
 		}
-		ocs_node_transition(node, __ocs_fabric_idle, NULL);
 		break;
-	}
 	default:
 		__ocs_fabric_common(__func__, ctx, evt, arg);
 		return NULL;
@@ -422,6 +528,14 @@ __ocs_fabric_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	node_sm_trace();
 
 	switch(evt) {
+	/* The fabric may initiate re-auth even after successful auth */
+	case OCS_EVT_AUTH_RCVD:
+		ocs_auth_els_recv(node, arg);
+		break;
+	case OCS_EVT_NODE_AUTH_OK:
+	case OCS_EVT_NODE_AUTH_FAIL:
+		break;
+
 	case OCS_EVT_DOMAIN_ATTACH_OK:
 		break;
 	default:
@@ -455,8 +569,14 @@ __ocs_ns_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		//sm: / send PLOGI
-		ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_ns_plogi_wait_rsp, NULL);
+		if (ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_ns_plogi_wait_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send PLOGI req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
 	default:
 		__ocs_fabric_common(__func__, ctx, evt, arg);
@@ -495,12 +615,13 @@ __ocs_ns_plogi_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_fabric_common, __func__)) {
 			return NULL;
 		}
+
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		//sm: / save sparams, ocs_node_attach
-		ocs_node_save_sparms(node, cbdata->els->els_rsp.virt);
+		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
 		ocs_display_sparams(node->display_name, "plogi rcvd resp", 0, NULL,
-			((uint8_t*)cbdata->els->els_rsp.virt) + 4);
+			((uint8_t*)cbdata->els->els_info->els_rsp.virt) + 4);
 		rc = ocs_node_attach(node);
 		ocs_node_transition(node, __ocs_ns_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
@@ -549,8 +670,14 @@ __ocs_ns_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_NODE_ATTACH_OK:
 		node->attached = TRUE;
 		//sm: / send RFTID
-		ocs_ns_send_rftid(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_ns_rftid_wait_rsp, NULL);
+		if (ocs_ns_send_rftid(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_ns_rftid_wait_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send RFTID req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
 
 	case OCS_EVT_NODE_ATTACH_FAIL:
@@ -567,8 +694,181 @@ __ocs_ns_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_node_transition(node, __ocs_fabric_wait_attach_evt_shutdown, NULL);
 		break;
 
-	/* if receive RSCN just ignore, we haven't sent GID_FT yet (ACC sent by fabctl node) */
+	/* if receive RSCN just ignore, we haven't sent GID_PT yet (ACC sent by fabctl node) */
 	case OCS_EVT_RSCN_RCVD:
+		break;
+
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * @ingroup fdmi_sm
+ * @brief FDMI node state machine: Initialize.
+ *
+ * @par Description
+ * A PLOGI is sent to the well-known FDMI node.
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_ENTER:
+		//sm: / send PLOGI
+		if (ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_fdmi_plogi_wait_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send PLOGI req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
+		break;
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		break;
+	}
+
+	return NULL;
+}
+
+/**
+ * @ingroup fdmi_sm
+ * @brief FDMI node state machine: Wait for a PLOGI response.
+ *
+ * @par Description
+ * Waits for a response from PLOGI to name services node, then issues a
+ * node attach request to the HAL.
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_plogi_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	int32_t rc;
+	ocs_node_cb_t *cbdata = arg;
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK: {
+		/* Save service parameters */
+		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_fabric_common, __func__)) {
+			return NULL;
+		}
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+		//sm: / save sparams, ocs_node_attach
+		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
+		ocs_display_sparams(node->display_name, "plogi rcvd resp", 0, NULL,
+			((uint8_t*)cbdata->els->els_info->els_rsp.virt) + 4);
+		rc = ocs_node_attach(node);
+		ocs_node_transition(node, __ocs_fdmi_wait_node_attach, NULL);
+		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		}
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief FDMI node state machine: Wait for a node attach completion.
+ *
+ * @par Description
+ * Waits for a node attach completion, then issues RHAT/RPRT registration
+ * requests to FDMI server.
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_ENTER:
+		ocs_node_hold_frames(node);
+		break;
+
+	case OCS_EVT_EXIT:
+		ocs_node_accept_frames(node);
+		break;
+
+	case OCS_EVT_NODE_ATTACH_OK:
+		node->attached = TRUE;
+		/* SM transaction
+		 * Physical Port: DHBA -> DPRT -> RHBA -> RPA
+		 * Virtual Port: DPRT -> RPRT
+		 */
+		node->sport->fdmi_port_mask = FDMI_PORT_MASK_V2;
+		if (node->sport->is_vport) {
+			if (ocs_fdmi_send_dereg_cmd(node, FC_GS_FDMI_DPRT,
+						OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_fdmi_dprt_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to FDMI DPRT req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+		} else {
+			node->sport->fdmi_hba_mask = FDMI_RHBA_MASK_V2;
+			if (ocs_fdmi_send_dereg_cmd(node, FC_GS_FDMI_DHBA,
+						OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_fdmi_dhba_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to FDMI DHBA req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+		}
+		break;
+
+	case OCS_EVT_NODE_ATTACH_FAIL:
+		/* node attach failed, shutdown the node */
+		node->attached = FALSE;
+		node_printf(node, "Node attach failed\n");
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
+		ocs_fabric_initiate_shutdown(node);
+		break;
+
+	case OCS_EVT_SHUTDOWN:
+		node_printf(node, "Shutdown event received\n");
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
+		ocs_node_transition(node, __ocs_fabric_wait_attach_evt_shutdown, NULL);
 		break;
 
 	default:
@@ -642,7 +942,7 @@ __ocs_fabric_wait_attach_evt_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, voi
  *
  * @par Description
  * Waits for an RFTID response event; if configured for an initiator operation,
- * a GIDFT name services request is issued.
+ * a GIDPT name services request is issued.
  *
  * @param ctx Remote node state machine context.
  * @param evt Event to process.
@@ -659,25 +959,39 @@ __ocs_ns_rftid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_SRRS_ELS_REQ_OK:
-		if (node_check_ns_req(ctx, evt, arg, FC_GS_NAMESERVER_RFT_ID, __ocs_fabric_common, __func__)) {
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_NAMESERVER_RFT_ID, __ocs_fabric_common, __func__)) {
 			return NULL;
 		}
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
-		
+
 		//sm: / send RFFID
-		if (ocs->enable_nvme_tgt) {
-			ocs_ns_send_rffid(node, FC_TYPE_NVME, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-			ocs_node_transition(node, __ocs_ns_nvme_rffid_wait_rsp, NULL);
+		if (ocs_tgt_nvme_enabled(node->ocs) || ocs_ini_nvme_enabled(node->ocs)) {
+			if (ocs_ns_send_rffid(node, FC_TYPE_NVME, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_ns_nvme_rffid_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to send RFFID req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+		} else if (ocs_tgt_scsi_enabled(node->ocs) || ocs_ini_scsi_enabled(node->ocs)) {
+			if (ocs_ns_send_rffid(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_ns_rffid_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to send RFFID req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
 		} else {
-			ocs_ns_send_rffid(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-			ocs_node_transition(node, __ocs_ns_rffid_wait_rsp, NULL);
+			ocs_log_err(node->ocs, "No protocol support enabled\n");
+			ocs_assert(0, NULL);
 		}
+
 		break;
 
-	/* if receive RSCN just ignore, we haven't sent GID_FT yet (ACC sent by fabctl node) */
+	/* if receive RSCN just ignore, we haven't sent GID_PT yet (ACC sent by fabctl node) */
 	case OCS_EVT_RSCN_RCVD:
 		break;
 
@@ -689,7 +1003,6 @@ __ocs_ns_rftid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
-
 void *
 __ocs_ns_nvme_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
@@ -699,26 +1012,36 @@ __ocs_ns_nvme_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_SRRS_ELS_REQ_OK:	{
-		if (node_check_ns_req(ctx, evt, arg, FC_GS_NAMESERVER_RFF_ID, __ocs_fabric_common, __func__)) {
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_NAMESERVER_RFF_ID, __ocs_fabric_common, __func__))
 			return NULL;
-		}
+
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 
-		/* Check if we need to send RFFID for scsi. */
-		if (ocs->enable_scsi_tgt) {
-			ocs_ns_send_rffid(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-			ocs_node_transition(node, __ocs_ns_rffid_wait_rsp, NULL);
+		if (ocs_tgt_scsi_enabled(node->ocs) || ocs_ini_scsi_enabled(node->ocs)) {
+			if (ocs_ns_send_rffid(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_ns_rffid_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to send RFFID req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
 		} else {
 			if (node->sport->enable_rscn) {
 				//sm: if enable_rscn / send GIDFT
-				ocs_ns_send_gidft(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-				ocs_node_transition(node, __ocs_ns_gidft_wait_rsp, NULL);
+				if (ocs_ns_send_gidpt(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+							OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+					ocs_node_transition(node, __ocs_ns_gidpt_wait_rsp, NULL);
+				} else {
+					node_printf(node, "[%s] Failed to send GIDPT req. Shutting down the node\n",
+							node->display_name);
+					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+				}
 			} else {
 				/* if 'T' only, we're done, go to idle */
 				ocs_node_transition(node, __ocs_ns_idle, NULL);
-			} 
+			}
 		}
 
 		break;
@@ -742,7 +1065,7 @@ __ocs_ns_nvme_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
  *
  * @par Description
  * Waits for an RFFID response event; if configured for an initiator operation,
- * a GIDFT name services request is issued.
+ * a GIDPT name services request is issued.
  *
  * @param ctx Remote node state machine context.
  * @param evt Event to process.
@@ -759,22 +1082,28 @@ __ocs_ns_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_SRRS_ELS_REQ_OK:	{
-		if (node_check_ns_req(ctx, evt, arg, FC_GS_NAMESERVER_RFF_ID, __ocs_fabric_common, __func__)) {
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_NAMESERVER_RFF_ID, __ocs_fabric_common, __func__)) {
 			return NULL;
 		}
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		if (node->sport->enable_rscn) {
-			//sm: if enable_rscn / send GIDFT
-			ocs_ns_send_gidft(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-			ocs_node_transition(node, __ocs_ns_gidft_wait_rsp, NULL);
+			//sm: if enable_rscn / send GIDPT
+			if (ocs_ns_send_gidpt(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_ns_gidpt_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to send GIDPT req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
 		} else {
 			/* if 'T' only, we're done, go to idle */
 			ocs_node_transition(node, __ocs_ns_idle, NULL);
 		}
 		break;
 	}
-	/* if receive RSCN just ignore, we haven't sent GID_FT yet (ACC sent by fabctl node) */
+	/* if receive RSCN just ignore, we haven't sent GID_PT yet (ACC sent by fabctl node) */
 	case OCS_EVT_RSCN_RCVD:
 		break;
 
@@ -788,10 +1117,10 @@ __ocs_ns_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 /**
  * @ingroup ns_sm
- * @brief Name services node state machine: Wait for a GIDFT response.
+ * @brief Name services node state machine: Wait for a GIDPT response.
  *
  * @par Description
- * Wait for a GIDFT response from the name server. Process the FC_IDs that are
+ * Wait for a GIDPT response from the name server. Process the FC_IDs that are
  * reported by creating new remote ports, as needed.
  *
  * @param ctx Remote node state machine context.
@@ -801,7 +1130,7 @@ __ocs_ns_rffid_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
  * @return Returns NULL.
  */
 void *
-__ocs_ns_gidft_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+__ocs_ns_gidpt_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	ocs_node_cb_t *cbdata = arg;
 	std_node_state_decl();
@@ -810,30 +1139,30 @@ __ocs_ns_gidft_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_SRRS_ELS_REQ_OK:	{
-		if (node_check_ns_req(ctx, evt, arg, FC_GS_NAMESERVER_GID_FT, __ocs_fabric_common, __func__)) {
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_NAMESERVER_GID_PT, __ocs_fabric_common, __func__)) {
 			return NULL;
 		}
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
-		//sm: / process GIDFT payload
-		ocs_process_gidft_payload(node, cbdata->els->els_rsp.virt, cbdata->els->els_rsp.len);
-//TODO: should we logout at this point or just go idle
+		//sm: / process GIDPT payload
+		ocs_process_gidpt_payload(node, cbdata->els->els_info->els_rsp.virt, cbdata->els->els_info->els_rsp.len);
+		/* TODO: should we logout at this point or just go idle */
 		ocs_node_transition(node, __ocs_ns_idle, NULL);
 		break;
 	}
 
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:	{
 		/* not much we can do; will retry with the next RSCN */
-		node_printf(node, "GID_FT failed to complete\n");
+		node_printf(node, "GID_PT failed to complete\n");
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		ocs_node_transition(node, __ocs_ns_idle, NULL);
 		break;
 	}
 
-	/* if receive RSCN here, queue up another discovery processing */
+	/* If we receive an RSCN here, queue up another discovery processing */
 	case OCS_EVT_RSCN_RCVD: {
-		node_printf(node, "RSCN received during GID_FT processing\n");
+		node_printf(node, "RSCN received during GID_PT processing\n");
 		node->rscn_pending = 1;
 		break;
 	}
@@ -845,7 +1174,6 @@ __ocs_ns_gidft_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	return NULL;
 }
-
 
 void *
 __ocs_ns_ganxt_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
@@ -856,9 +1184,9 @@ __ocs_ns_ganxt_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_SRRS_ELS_REQ_OK:	{
-		if (node_check_ns_req(ctx, evt, arg, FC_GS_NAMESERVER_GA_NXT, __ocs_fabric_common, __func__)) {
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_NAMESERVER_GA_NXT, __ocs_fabric_common, __func__))
 			return NULL;
-		}
+
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		ocs_node_transition(node, __ocs_ns_idle, NULL);
@@ -885,14 +1213,13 @@ __ocs_ns_ganxt_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
-
 /**
  * @ingroup ns_sm
  * @brief Name services node state machine: Idle state.
  *
  * @par Description
  * Idle. Waiting for RSCN received events (posted from the fabric controller), and
- * restarts the GIDFT name services query and processing.
+ * restarts the GIDPT name services query and processing.
  *
  * @param ctx Remote node state machine context.
  * @param evt Event to process.
@@ -918,16 +1245,22 @@ __ocs_ns_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			/* fall through */
 
 	case OCS_EVT_RSCN_RCVD: {
-		//sm: / send GIDFT
+		//sm: / send GIDPT
 		/* If target RSCN processing is enabled, and this is target only (not initiator),
-		 * and tgt_rscn_delay is non-zero, then we delay issuing the GID_FT
+		 * and tgt_rscn_delay is non-zero, then we delay issuing the GID_PT
 		 */
 		if ((ocs->tgt_rscn_delay_msec != 0) && !node->sport->enable_ini && node->sport->enable_tgt &&
 			enable_target_rscn(ocs)) {
-			ocs_node_transition(node, __ocs_ns_gidft_delay, NULL);
+			ocs_node_transition(node, __ocs_ns_gidpt_delay, NULL);
 		} else {
-			ocs_ns_send_gidft(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-			ocs_node_transition(node, __ocs_ns_gidft_wait_rsp, NULL);
+			if (ocs_ns_send_gidpt(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_ns_gidpt_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to send GIDPT req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
 		}
 		break;
 	}
@@ -941,34 +1274,11 @@ __ocs_ns_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 }
 
 /**
- * @brief Handle GIDFT delay timer callback
+ * @ingroup fdmi_sm
+ * @brief FDMI node state machine: FDMI node is idle.
  *
  * @par Description
- * Post an OCS_EVT_GIDFT_DEIALY_EXPIRED event to the passed in node.
- *
- * @param arg Pointer to node.
- *
- * @return None.
- */
-static void
-gidft_delay_timer_cb(void *arg)
-{
-	ocs_node_t *node = arg;
-	int32_t rc;
-
-	ocs_del_timer(&node->gidft_delay_timer);
-	rc = ocs_xport_control(node->ocs->xport, OCS_XPORT_POST_NODE_EVENT, node, OCS_EVT_GIDFT_DELAY_EXPIRED, NULL);
-	if (rc) {
-		ocs_log_err(node->ocs, "%s: ocs_xport_control(OCS_XPORT_POST_NODE_EVENT) failed: %d\n", __func__, rc);
-	}
-}
-
-/**
- * @ingroup ns_sm
- * @brief Name services node state machine: Delayed GIDFT.
- *
- * @par Description
- * Waiting for GIDFT delay to expire before submitting GIDFT to name server.
+ * Wait for fdmi node events.
  *
  * @param ctx Remote node state machine context.
  * @param evt Event to process.
@@ -977,7 +1287,60 @@ gidft_delay_timer_cb(void *arg)
  * @return Returns NULL.
  */
 void *
-__ocs_ns_gidft_delay(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+__ocs_fdmi_idle(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_DOMAIN_ATTACH_OK:
+		break;
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * @brief Handle GIDPT delay timer callback
+ *
+ * @par Description
+ * Post an OCS_EVT_GIDPT_DEIALY_EXPIRED event to the passed in node.
+ *
+ * @param arg Pointer to node.
+ *
+ * @return None.
+ */
+static void
+gidpt_delay_timer_cb(void *arg)
+{
+	ocs_node_t *node = arg;
+	int32_t rc;
+
+	ocs_del_timer(&node->gidpt_delay_timer);
+	rc = ocs_xport_control(node->ocs->xport, OCS_XPORT_POST_NODE_EVENT, node, OCS_EVT_GIDPT_DELAY_EXPIRED, NULL);
+	if (rc)
+		ocs_log_err(node->ocs, "ocs_xport_control(OCS_XPORT_POST_NODE_EVENT) failed: %d\n", rc);
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief Name services node state machine: Delayed GIDPT.
+ *
+ * @par Description
+ * Waiting for GIDPT delay to expire before submitting GIDPT to name server.
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_ns_gidpt_delay(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	std_node_state_decl();
 
@@ -990,28 +1353,33 @@ __ocs_ns_gidft_delay(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(ocs->tgt_rscn_delay_msec != 0, NULL);
 
 		/*
-		 * Compute the delay time.   Set to tgt_rscn_delay, if the time since last GIDFT
+		 * Compute the delay time.   Set to tgt_rscn_delay, if the time since last GIDPT
 		 * is less than tgt_rscn_period, then use tgt_rscn_period.
 		 */
 		delay_msec = ocs->tgt_rscn_delay_msec;
-		if ((ocs_msectime() - node->time_last_gidft_msec) < ocs->tgt_rscn_period_msec) {
+		if ((ocs_msectime() - node->time_last_gidpt_msec) < ocs->tgt_rscn_period_msec) {
 			delay_msec = ocs->tgt_rscn_period_msec;
 		}
 
-		ocs_setup_timer(ocs, &node->gidft_delay_timer, gidft_delay_timer_cb, node, delay_msec);
+		ocs_setup_timer(ocs, &node->gidpt_delay_timer, gidpt_delay_timer_cb, node, delay_msec, false);
 
 		break;
 	}
 
-	case OCS_EVT_GIDFT_DELAY_EXPIRED: {
-		node->time_last_gidft_msec = ocs_msectime();
-		ocs_ns_send_gidft(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_ns_gidft_wait_rsp, NULL);
+	case OCS_EVT_GIDPT_DELAY_EXPIRED:
+		node->time_last_gidpt_msec = ocs_msectime();
+		if (ocs_ns_send_gidpt(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_ns_gidpt_wait_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send GIDPT req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
-	}
 
 	case OCS_EVT_RSCN_RCVD: {
-		ocs_log_debug(ocs, "RSCN received while in GIDFT delay - no action\n");
+		ocs_log_debug(ocs, "RSCN received while in GIDPT delay - no action\n");
 		break;
 	}
 
@@ -1046,8 +1414,14 @@ __ocs_fabctl_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		/* no need to login to fabric controller, just send SCR */
-		ocs_send_scr(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_fabctl_wait_scr_rsp, NULL);
+		if (ocs_send_scr(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_fabctl_wait_scr_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send SCR req. Shutting down the node\n",
+                                   node->display_name);
+                        ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
 
 	case OCS_EVT_NODE_ATTACH_OK:
@@ -1097,8 +1471,14 @@ __ocs_fabctl_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_NODE_ATTACH_OK:
 		node->attached = TRUE;
 		//sm: / send SCR
-		ocs_send_scr(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_fabctl_wait_scr_rsp, NULL);
+		if (ocs_send_scr(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_fabctl_wait_scr_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send SCR req. Shutting down the node\n",
+                                   node->display_name);
+                        ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
 
 	case OCS_EVT_NODE_ATTACH_FAIL:
@@ -1188,7 +1568,7 @@ __ocs_fabctl_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_RSCN_RCVD: {
-		fc_header_t *hdr = cbdata->header->dma.virt;
+		fc_header_t *hdr = cbdata->header;
 
 		//sm: / process RSCN (forward to name services node), send LS_ACC
 		ocs_process_rscn(node, cbdata);
@@ -1261,7 +1641,7 @@ __ocs_fabctl_wait_ls_acc_cmpl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 static void
 ocs_fabric_initiate_shutdown(ocs_node_t *node)
 {
-	ocs_hal_rtn_e rc;
+	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
 	ocs_t *ocs = node->ocs;
 	ocs_scsi_io_alloc_disable(node);
 
@@ -1339,6 +1719,23 @@ int32_t
 ocs_rnode_is_nport(fc_plogi_payload_t *remote_sparms)
 {
 	return (ocs_be32toh(remote_sparms->common_service_parameters[1]) & (1U << 28)) == 0;
+}
+
+/**
+ * @brief Return TRUE if the remote node is NPIV capable
+ *
+ * @par Description
+ * Examines the service parameters. Returns TRUE if the node reports itself as
+ * an NPIV feature capable.
+ *
+ * @param remote_sparms Remote node service parameters.
+ *
+ * @return Returns TRUE if NPIV supported.
+ */
+int32_t
+ocs_rnode_is_npiv_capable(fc_plogi_payload_t *remote_sparms)
+{
+	return (ocs_be32toh(remote_sparms->common_service_parameters[1]) & (1U << 29));
 }
 
 /**
@@ -1453,12 +1850,11 @@ __ocs_p2p_wait_domain_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			/* create new node (SID=1, DID=2) from which to send PLOGI */
 			rnode = ocs_node_alloc(sport, sport->p2p_remote_port_id, FALSE, FALSE);
 			if (rnode == NULL) {
-				ocs_log_err(ocs, "%s: node alloc failed\n", __func__);
+				ocs_log_err(ocs, "node alloc failed\n");
 				return NULL;
 			}
 
 			ocs_fabric_notify_topology(node);
-
 			//sm: / allocate p2p remote node
 			ocs_node_transition(rnode, __ocs_p2p_rnode_init, NULL);
 		}
@@ -1512,13 +1908,19 @@ __ocs_p2p_rnode_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		//sm: / send PLOGI
-		ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
-		ocs_node_transition(node, __ocs_p2p_wait_plogi_rsp, NULL);
+		if (ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_p2p_wait_plogi_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to send PLOGI req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
 		break;
 
 	case OCS_EVT_ABTS_RCVD:
 		//sm: send BA_ACC
-		ocs_bls_send_acc_hdr(cbdata->io, cbdata->header->dma.virt);
+		ocs_bls_send_acc_hdr(cbdata->io, cbdata->header);
 		break;
 
 	default:
@@ -1567,10 +1969,8 @@ __ocs_p2p_wait_flogi_acc_cmpl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		//sm: if p2p_winner / domain_attach
 		if (node->sport->p2p_winner) {
 			ocs_node_transition(node, __ocs_p2p_wait_domain_attach, NULL);
-			if (!node->sport->domain->attached) {
-				node_printf(node, "Domain not attached\n");
-				ocs_domain_attach(node->sport->domain, node->sport->p2p_port_id);
-			} else {
+			if (node->sport->domain->attached &&
+			    !(node->sport->domain->domain_notify_pend)) {
 				node_printf(node, "Domain already attached\n");
 				ocs_node_post_event(node, OCS_EVT_DOMAIN_ATTACH_OK, NULL);
 			}
@@ -1596,7 +1996,7 @@ __ocs_p2p_wait_flogi_acc_cmpl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_ABTS_RCVD: {
 		//sm: / send BA_ACC
-		ocs_bls_send_acc_hdr(cbdata->io, cbdata->header->dma.virt);
+		ocs_bls_send_acc_hdr(cbdata->io, cbdata->header);
 		break;
 	}
 
@@ -1642,7 +2042,7 @@ __ocs_p2p_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		//sm: / save sparams, ocs_node_attach
-		ocs_node_save_sparms(node, cbdata->els->els_rsp.virt);
+		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
 		rc = ocs_node_attach(node);
 		ocs_node_transition(node, __ocs_p2p_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
@@ -1663,7 +2063,7 @@ __ocs_p2p_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	}
 
 	case OCS_EVT_PLOGI_RCVD: {
-		fc_header_t *hdr = cbdata->header->dma.virt;
+		fc_header_t *hdr = cbdata->header;
 		/* if we're in external loopback mode, just send LS_ACC */
 		if (node->ocs->external_loopback) {
 			ocs_send_plogi_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
@@ -1682,8 +2082,8 @@ __ocs_p2p_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		 * Save OXID so PRLI can be sent after the attach and continue
 		 * to wait for PLOGI response
 		 */
-		ocs_process_prli_payload(node, cbdata->payload->dma.virt);
-		ocs_send_ls_acc_after_attach(cbdata->io, cbdata->header->dma.virt, OCS_NODE_SEND_LS_ACC_PRLI);
+		ocs_process_prli_payload(node, cbdata->payload);
+		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PRLI);
 		ocs_node_transition(node, __ocs_p2p_wait_plogi_rsp_recvd_prli, NULL);
 		break;
 	default:
@@ -1748,9 +2148,9 @@ __ocs_p2p_wait_plogi_rsp_recvd_prli(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void 
 		ocs_assert(node->els_req_cnt, NULL);
 		node->els_req_cnt--;
 		//sm: / save sparams, ocs_node_attach
-		ocs_node_save_sparms(node, cbdata->els->els_rsp.virt);
+		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
 		ocs_display_sparams(node->display_name, "plogi rcvd resp", 0, NULL,
-			((uint8_t*)cbdata->els->els_rsp.virt) + 4);
+			((uint8_t*)cbdata->els->els_info->els_rsp.virt) + 4);
 		rc = ocs_node_attach(node);
 		ocs_node_transition(node, __ocs_p2p_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
@@ -1796,6 +2196,8 @@ __ocs_p2p_wait_plogi_rsp_recvd_prli(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void 
 void *
 __ocs_p2p_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
+	ocs_node_cb_t *cbdata = arg;
+	ocs_io_t *ls_rsp_io = NULL;
 	std_node_state_decl();
 
 	node_sm_trace();
@@ -1811,15 +2213,16 @@ __ocs_p2p_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_NODE_ATTACH_OK:
 		node->attached = TRUE;
-		switch (node->send_ls_acc) {
-		case OCS_NODE_SEND_LS_ACC_PRLI: {
-			ocs_d_send_prli_rsp(node->ls_acc_io, node->ls_acc_oxid, FC_TYPE_FCP);
-			node->send_ls_acc = OCS_NODE_SEND_LS_ACC_NONE;
-			node->ls_acc_io = NULL;
+		switch (node->send_ls_rsp) {
+		case OCS_NODE_SEND_LS_RSP_PRLI: {
+			ls_rsp_io = node->ls_rsp_io;
+			node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
+			node->ls_rsp_io = NULL;
+			ocs_d_send_prli_rsp(ls_rsp_io, node->ls_rsp_oxid, node->ls_rsp_fctype);
 			break;
 		}
-		case OCS_NODE_SEND_LS_ACC_PLOGI: /* Can't happen in P2P */
-		case OCS_NODE_SEND_LS_ACC_NONE:
+		case OCS_NODE_SEND_LS_RSP_PLOGI: /* Can't happen in P2P */
+		case OCS_NODE_SEND_LS_RSP_NONE:
 		default:
 			/* Normal case for I */
 			//sm: send_plogi_acc is not set / send PLOGI acc
@@ -1840,6 +2243,12 @@ __ocs_p2p_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
 		ocs_node_transition(node, __ocs_fabric_wait_attach_evt_shutdown, NULL);
+		break;
+
+	case OCS_EVT_PRLI_RCVD:
+		node_printf(node, "%s: PRLI received before node is attached\n", ocs_sm_event_name(evt));
+		ocs_process_prli_payload(node, cbdata->payload);
+		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PRLI);
 		break;
 
 	default:
@@ -1886,6 +2295,34 @@ ocs_start_ns_node(ocs_sport_t *sport)
 }
 
 /**
+ * @brief Start up the FDMI node.
+ *
+ * @par Description
+ * Allocates and starts up the FDMI node.
+ *
+ * @param sport Pointer to the sport structure.
+ *
+ * @return Returns 0 on success, or a negative error value on failure.
+ */
+
+static int32_t
+ocs_start_fdmi_node(ocs_sport_t *sport)
+{
+	ocs_node_t *fdmi;
+
+	/* Instantiate a fdmi node */
+	fdmi = ocs_node_find(sport, FC_ADDR_FDMI);
+	if (fdmi == NULL) {
+		fdmi = ocs_node_alloc(sport, FC_ADDR_FDMI, FALSE, FALSE);
+		if (fdmi == NULL) {
+			return -1;
+		}
+	}
+	ocs_node_transition(fdmi, __ocs_fdmi_init, NULL);
+	return 0;
+}
+
+/**
  * @brief Start up the fabric controller node.
  *
  * @par Description
@@ -1916,20 +2353,20 @@ ocs_start_fabctl_node(ocs_sport_t *sport)
 }
 
 /**
- * @brief Process the GIDFT payload.
+ * @brief Process the GIDPT payload.
  *
  * @par Description
- * The GIDFT payload is parsed, and new nodes are created, as needed.
+ * The GIDPT payload is parsed, and new nodes are created, as needed.
  *
  * @param node Pointer to the node structure.
- * @param gidft Pointer to the GIDFT payload.
- * @param gidft_len Payload length
+ * @param gidpt Pointer to the GIDPT payload.
+ * @param gidpt_len Payload length
  *
  * @return Returns 0 on success, or a negative error value on failure.
  */
 
 static int32_t
-ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gidft_len)
+ocs_process_gidpt_payload(ocs_node_t *node, fcct_gidpt_acc_t *gidpt, uint32_t gidpt_len)
 {
 	uint32_t i;
 	uint32_t j;
@@ -1943,19 +2380,18 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 	uint32_t portlist_count;
 	uint16_t residual;
 
-	residual = ocs_be16toh(gidft->hdr.max_residual_size);
+	residual = ocs_be16toh(gidpt->hdr.max_residual_size);
 
-	if (residual != 0) {
-		ocs_log_debug(node->ocs, "%s: residual is %u words\n", __func__, residual);
-	}
+	if (residual)
+		ocs_log_debug(node->ocs, "residual is %u words\n", residual);
 
-	if (ocs_be16toh(gidft->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
-		node_printf(node, "GIDFT request failed: rsn x%x rsn_expl x%x\n",
-			gidft->hdr.reason_code, gidft->hdr.reason_code_explanation);
+	if (ocs_be16toh(gidpt->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
+		node_printf(node, "GIDPT request failed: rsn %#x rsn_expl %#x\n",
+			gidpt->hdr.reason_code, gidpt->hdr.reason_code_explanation);
 		return -1;
 	}
 
-	portlist_count = (gidft_len - sizeof(fcct_iu_header_t)) / sizeof(gidft->port_list);
+	portlist_count = (gidpt_len - sizeof(fcct_iu_header_t)) / sizeof(gidpt->port_list);
 
 	/* Count the number of nodes */
 	port_count = 0;
@@ -1965,7 +2401,7 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 		}
 
 		/* Allocate a buffer for all nodes */
-		active_nodes = ocs_malloc(node->ocs, port_count * sizeof(*active_nodes), OCS_M_NOWAIT | OCS_M_ZERO);
+		active_nodes = ocs_malloc(node->ocs, port_count * sizeof(*active_nodes), OCS_M_ZERO);
 		if (active_nodes == NULL) {
 			node_printf(node, "ocs_malloc failed\n");
 			ocs_sport_unlock(sport);
@@ -1991,7 +2427,7 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 
 		/* update the active nodes buffer */
 		for (i = 0; i < portlist_count; i ++) {
-			port_id = fc_be24toh(gidft->port_list[i].port_id);
+			port_id = fc_be24toh(gidpt->port_list[i].port_id);
 
 			for (j = 0; j < port_count; j ++) {
 				if ((active_nodes[j] != NULL) && (port_id == active_nodes[j]->rnode.fc_id)) {
@@ -1999,7 +2435,7 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 				}
 			}
 
-			if (gidft->port_list[i].ctl & FCCT_GID_FT_LAST_ID)
+			if (gidpt->port_list[i].ctl & FCCT_GID_PT_LAST_ID)
 				break;
 		}
 
@@ -2010,11 +2446,11 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 			 * target RSCN, then post the node missing event.
 			 */
 			if (active_nodes[i] != NULL) {
-				if ((node->sport->enable_ini && active_nodes[i]->targ) ||
+				if ((node->sport->enable_ini && (active_nodes[i]->targ || active_nodes[i]->nvme_tgt)) ||
 				    (node->sport->enable_tgt && enable_target_rscn(ocs))) {
 					ocs_node_post_event(active_nodes[i], OCS_EVT_NODE_MISSING, NULL);
 				} else {
-					node_printf(node, "GID_FT: skipping non-tgt port_id x%06x\n",
+					node_printf(node, "GID_PT: skipping non-tgt port_id x%06x\n",
 						active_nodes[i]->rnode.fc_id);
 				}
 			}
@@ -2022,16 +2458,16 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 		ocs_free(ocs, active_nodes, port_count * sizeof(*active_nodes));
 
 		for(i = 0; i < portlist_count; i ++) {
-			uint32_t port_id = fc_be24toh(gidft->port_list[i].port_id);
+			uint32_t port_id = fc_be24toh(gidpt->port_list[i].port_id);
 
-			/* node_printf(node, "GID_FT: port_id x%06x\n", port_id); */
+			/* node_printf(node, "GID_PT: port_id x%06x\n", port_id); */
 
-			/* Don't create node for ourselves */
-			if (port_id != node->rnode.sport->fc_id) {
+			/* Don't create node for ourselves or the associated NPIV ports */
+			if (port_id != node->rnode.sport->fc_id && !ocs_sport_find(sport->domain, port_id)) {
 				newnode = ocs_node_find(sport, port_id);
 				if (newnode) {
 					// TODO: what if node deleted here??
-					if (node->sport->enable_ini && newnode->targ) {
+					if (node->sport->enable_ini && (newnode->targ || newnode->nvme_tgt)) {
 						ocs_node_post_event(newnode, OCS_EVT_NODE_REFOUND, NULL);
 					}
 					// original code sends ADISC, has notion of "refound"
@@ -2039,7 +2475,7 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 					if (node->sport->enable_ini) {
 						newnode = ocs_node_alloc(sport, port_id, 0, 0);
 						if (newnode == NULL) {
-							ocs_log_err(ocs, "%s(%d): ocs_node_alloc() failed\n", __func__, __LINE__);
+							ocs_log_err(ocs, "ocs_node_alloc() failed\n");
 							ocs_sport_unlock(sport);
 							return -1;
 						}
@@ -2049,7 +2485,7 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 				}
 			}
 
-			if (gidft->port_list[i].ctl & FCCT_GID_FT_LAST_ID) {
+			if (gidpt->port_list[i].ctl & FCCT_GID_PT_LAST_ID) {
 				break;
 			}
 		}
@@ -2057,6 +2493,418 @@ ocs_process_gidft_payload(ocs_node_t *node, fcct_gidft_acc_t *gidft, uint32_t gi
 	return 0;
 }
 
+/**
+ * @brief Process the GRHL acc payload.
+ *
+ * @par Description
+ * The GRHL payload is parsed, and new nodes are created, as needed.
+ *
+ * @param node Pointer to the node structure.
+ * @param grhl Pointer to the GRHL payload.
+ * @param grhl_len Payload length
+ * @param buf destination buffer to copy the HBA list info
+ *
+ * @return Returns 0 on success, or a negative error value on failure.
+ */
+int32_t
+ocs_process_fdmi_grhl_payload(ocs_node_t *node, fcct_fdmi_grhl_rsp_t *grhl,
+			      uint32_t grhl_len, void *buf)
+{
+	uint32_t hostlist_count;
+	uint16_t residual;
+	ocs_fdmi_hba_list_info_t *hba_list_buf = buf;
+	uint32_t offset;
+	int i = 0;
+
+	residual = ocs_be16toh(grhl->hdr.max_residual_size);
+
+	if (residual != 0) {
+		ocs_log_debug(node->ocs, "residual is %u words\n", residual);
+	}
+
+	if (ocs_be16toh(grhl->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
+		node_printf(node, "GRHL request failed: rsn x%x rsn_expl x%x\n",
+			grhl->hdr.reason_code, grhl->hdr.reason_code_explanation);
+		return -1;
+	}
+
+	hba_list_buf->entry_count = ocs_be32toh(grhl->hba_list.entry_count);
+	hostlist_count = MIN(hba_list_buf->entry_count, MAX_FDMI_HBA_COUNT);
+
+	offset = 0;
+	while (hostlist_count) {
+		ocs_memcpy(&hba_list_buf->hba_identifier[i], (uint8_t *)&grhl->hba_list.port_entry[0] + offset,
+			   sizeof(uint64_t));
+		hba_list_buf->hba_identifier[i] = ocs_be64toh(hba_list_buf->hba_identifier[i]);
+		i++;
+		offset += sizeof(uint64_t);
+		hostlist_count--;
+	}
+
+	return 0;
+}
+/**
+ * @brief Process the GRPL acc payload.
+ *
+ * @par Description
+ * The GRPL payload is parsed, and new nodes are created, as needed.
+ *
+ * @param node Pointer to the node structure.
+ * @param grpl Pointer to the GRPL payload.
+ * @param grpl_len Payload length
+ * @param buf destination buffer to copy the Port list info
+ *
+ * @return Returns 0 on success, or a negative error value on failure.
+ */
+int32_t
+ocs_process_fdmi_grpl_payload(ocs_node_t *node, fcct_fdmi_grpl_rsp_t *grpl,
+			      uint32_t grpl_len, void *buf)
+{
+	uint32_t portlist_count;
+	uint16_t residual;
+	ocs_fdmi_port_list_info_t *port_list_buf = buf;
+	uint32_t offset;
+	int i = 0;
+
+	residual = ocs_be16toh(grpl->hdr.max_residual_size);
+
+	if (residual != 0) {
+		ocs_log_debug(node->ocs, "residual is %u words\n", residual);
+	}
+
+	if (ocs_be16toh(grpl->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
+		node_printf(node, "GRPL request failed: rsn x%x rsn_expl x%x\n",
+			grpl->hdr.reason_code, grpl->hdr.reason_code_explanation);
+		return -1;
+	}
+
+	port_list_buf->entry_count = ocs_be32toh(grpl->port_list.entry_count);
+	portlist_count = MIN(port_list_buf->entry_count, MAX_FDMI_HBA_COUNT);
+
+	offset = 0;
+	while (portlist_count) {
+		ocs_memcpy(&port_list_buf->port_identifier[i],
+			(uint8_t *)&grpl->port_list.port_entry[0] + offset, sizeof(uint64_t));
+		port_list_buf->port_identifier[i] = ocs_be64toh(port_list_buf->port_identifier[i]);
+		i++;
+		offset += sizeof(uint64_t);
+		portlist_count--;
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Process the GHAT acc payload.
+ *
+ * @par Description
+ * The GHAT payload is parsed, and new nodes are created, as needed.
+ *
+ * @param node Pointer to the node structure.
+ * @param ghat Pointer to the GHAT payload.
+ * @param ghat_len Payload length
+ * @param buf destination buffer to copy the HBA attributes info
+ *
+ * @return Returns 0 on success, or a negative error value on failure.
+ */
+int32_t
+ocs_process_fdmi_ghat_payload(ocs_node_t *node, fcct_fdmi_ghat_rsp_t *ghat,
+			      uint32_t ghat_len, void *buf)
+{
+	uint32_t portlist_count;
+	uint16_t residual;
+	ocs_fdmi_hba_attr_info_t *hba_attr_info = buf;
+	ocs_fdmi_attr_block_t *hba_attr_block = NULL;
+	ocs_fdmi_attr_def_t   *attr_def;
+	ocs_fdmi_attr_entry_t *ae;
+	uint16_t attr_type, attr_len;
+	uint32_t offset, num_attr_entries;
+	int i = 0;
+
+	residual = ocs_be16toh(ghat->hdr.max_residual_size);
+	if (residual != 0) {
+		ocs_log_debug(node->ocs, "residual is %u words\n", residual);
+	}
+
+	if (ocs_be16toh(ghat->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
+		node_printf(node, "GHAT request failed: rsn x%x rsn_expl x%x\n",
+			ghat->hdr.reason_code, ghat->hdr.reason_code_explanation);
+		return -1;
+	}
+
+	hba_attr_info->num_port_entries = MIN(ocs_be32toh(ghat->port_list.entry_count),
+						MAX_FDMI_PORT_COUNT);
+
+	portlist_count = hba_attr_info->num_port_entries;
+	offset = 0;
+	while (portlist_count) {
+		ocs_memcpy(&hba_attr_info->port_identifier[i],
+			(uint8_t *)&ghat->port_list.port_entry[0] + offset, sizeof(uint64_t));
+		hba_attr_info->port_identifier[i] = ocs_be64toh(hba_attr_info->port_identifier[i]);
+		i++;
+		offset += sizeof(uint64_t);
+		portlist_count--;
+	}
+
+	offset = sizeof(ghat->hdr) + sizeof(hba_attr_info->num_port_entries);
+	offset += hba_attr_info->num_port_entries * sizeof(uint64_t);
+	/* Point to HBA attribute block */
+	hba_attr_block = (ocs_fdmi_attr_block_t *)(((uint8_t *)ghat + offset));
+	num_attr_entries = ocs_be32toh(hba_attr_block->num_entries);
+
+	offset += sizeof(hba_attr_block->num_entries);
+	/* Walk through all attribute entries and copy the same to user buf */
+	while (num_attr_entries) {
+		/* Point to HBA attribute entry */
+		attr_def = (ocs_fdmi_attr_def_t *)(((uint8_t *)ghat + offset));
+		attr_type = ocs_be16toh(attr_def->attr_type);
+		attr_len  = ocs_be16toh(attr_def->attr_len);
+		ae = (ocs_fdmi_attr_entry_t *)&attr_def->attr_value;
+		switch (attr_type) {
+		case RHBA_NODENAME:
+			hba_attr_info->node_name_valid = true;
+			hba_attr_info->node_name = ocs_be64toh(ae->attr_wwn);
+			break;
+		case RHBA_MANUFACTURER:
+			hba_attr_info->manufacturer_valid = true;
+			ocs_strncpy(hba_attr_info->manufacturer, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->manufacturer)));
+			break;
+		case RHBA_SERIAL_NUMBER:
+			hba_attr_info->serial_num_valid = true;
+			ocs_strncpy(hba_attr_info->serial_num, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->serial_num)));
+			break;
+		case RHBA_MODEL:
+			hba_attr_info->model_name_valid = true;
+			ocs_strncpy(hba_attr_info->model_name, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->model_name)));
+			break;
+		case RHBA_MODEL_DESCRIPTION:
+			hba_attr_info->model_desc_valid = true;
+			ocs_strncpy(hba_attr_info->model_desc, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->model_desc)));
+			break;
+		case RHBA_HARDWARE_VERSION:
+			hba_attr_info->hw_ver_valid = true;
+			ocs_strncpy(hba_attr_info->hw_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->hw_ver)));
+			break;
+		case RHBA_DRIVER_VERSION:
+			hba_attr_info->driver_ver_valid = true;
+			ocs_strncpy(hba_attr_info->driver_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->driver_ver)));
+			break;
+		case RHBA_OPTION_ROM_VERSION:
+			hba_attr_info->opt_rom_ver_valid = true;
+			ocs_strncpy(hba_attr_info->opt_rom_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->opt_rom_ver)));
+			break;
+		case RHBA_FIRMWARE_VERSION:
+			hba_attr_info->fw_ver_valid = true;
+			ocs_strncpy(hba_attr_info->fw_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->fw_ver)));
+			break;
+		case RHBA_OS_NAME_VERSION:
+			hba_attr_info->os_name_ver_valid = true;
+			ocs_strncpy(hba_attr_info->os_name_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->os_name_ver)));
+			break;
+		case RHBA_MAX_CT_PAYLOAD_LEN:
+			hba_attr_info->max_ct_payload_valid = true;
+			hba_attr_info->max_ct_payload_len = ocs_be32toh(ae->attr_int);
+			break;
+		case RHBA_SYM_NODENAME:
+			hba_attr_info->node_symb_name_valid = true;
+			ocs_strncpy(hba_attr_info->node_symb_name, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->node_symb_name)));
+			break;
+		case RHBA_VENDOR_INFO:
+			hba_attr_info->vendor_info_valid = true;
+			hba_attr_info->vendor_info = ocs_be32toh(ae->attr_int);
+			break;
+		case RHBA_NUM_PORTS:
+			hba_attr_info->num_ports_valid = true;
+			hba_attr_info->num_ports = ocs_be32toh(ae->attr_int);
+			break;
+		case RHBA_FABRIC_WWNN:
+			hba_attr_info->fabric_name_valid = true;
+			hba_attr_info->fabric_name = ocs_be64toh(ae->attr_wwn);
+			break;
+		case RHBA_BIOS_VERSION:
+			hba_attr_info->bios_ver_valid = true;
+			ocs_strncpy(hba_attr_info->bios_ver, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->bios_ver)));
+			break;
+		case RHBA_BIOS_STATE:
+			hba_attr_info->boot_state_valid = true;
+			hba_attr_info->boot_state = ocs_be32toh(ae->attr_int);
+			break;
+		case RHBA_VENDOR_ID:
+			hba_attr_info->vendor_id_valid = true;
+			ocs_strncpy(hba_attr_info->vendor_id, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(hba_attr_info->vendor_id)));
+			break;
+		default:
+			ocs_log_warn(node->ocs, "Unrecognized HBA attribute(type: 0x%x)\n",
+				     attr_type);
+		}
+
+		/* Now point to next attribute */
+		offset += attr_len;
+		num_attr_entries--;
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Process the GPAT acc payload.
+ *
+ * @par Description
+ * The GPAT payload is parsed, and new nodes are created, as needed.
+ *
+ * @param node Pointer to the node structure.
+ * @param gpat Pointer to the GPAT payload.
+ * @param gpat_len Payload length
+ * @param buf destination buffer to copy the Port attributes info
+ *
+ * @return Returns 0 on success, or a negative error value on failure.
+ */
+int32_t
+ocs_process_fdmi_gpat_payload(ocs_node_t *node, fcct_fdmi_gpat_rsp_t *gpat,
+			      uint32_t gpat_len, void *buf)
+{
+	uint16_t residual;
+	ocs_fdmi_port_attr_info_t *port_attr_info = buf;
+	ocs_fdmi_attr_block_t *port_attr_block;
+	ocs_fdmi_attr_def_t   *attr_def;
+	ocs_fdmi_attr_entry_t *ae;
+	uint16_t attr_type, attr_len;
+	uint32_t offset, num_attr_entries;
+
+	residual = ocs_be16toh(gpat->hdr.max_residual_size);
+	if (residual != 0) {
+		ocs_log_debug(node->ocs, "residual is %u words\n", residual);
+	}
+
+	if (ocs_be16toh(gpat->hdr.cmd_rsp_code) == FCCT_HDR_CMDRSP_REJECT) {
+		node_printf(node, "GPAT request failed: rsn x%x rsn_expl x%x\n",
+			gpat->hdr.reason_code, gpat->hdr.reason_code_explanation);
+		return -1;
+	}
+
+	offset = sizeof(gpat->hdr);
+	port_attr_block = (ocs_fdmi_attr_block_t *)((uint8_t *)gpat + offset);
+	port_attr_info->num_port_attr_entries = ocs_be32toh(port_attr_block->num_entries);
+
+	num_attr_entries = port_attr_info->num_port_attr_entries;
+	offset += sizeof(port_attr_block->num_entries);
+
+	/* Walk through all attribute entries and copy the same to user buf */
+	while (num_attr_entries) {
+		/* Point to Port attribute entry */
+		attr_def = (ocs_fdmi_attr_def_t *)(((uint8_t *)gpat + offset));
+		attr_type = ocs_be16toh(attr_def->attr_type);
+		attr_len  = ocs_be16toh(attr_def->attr_len);
+		ae = (ocs_fdmi_attr_entry_t *)&attr_def->attr_value;
+		switch (attr_type) {
+		case RPRT_SUPPORTED_FC4_TYPES:
+			port_attr_info->supported_fc_types_valid= true;
+			ocs_memcpy(port_attr_info->supported_fc4_types, ae->attr_types,
+				sizeof(port_attr_info->supported_fc4_types));
+			break;
+		case RPRT_SUPPORTED_SPEED:
+			port_attr_info->supported_speed_valid = true;
+			port_attr_info->supported_speed = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_PORT_SPEED:
+			port_attr_info->current_speed_valid = true;
+			port_attr_info->current_port_speed = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_MAX_FRAME_SIZE:
+			port_attr_info->max_frame_size_valid = true;
+			port_attr_info->max_frame_size = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_OS_DEVICE_NAME:
+			port_attr_info->os_dev_name_valid = true;
+			ocs_strncpy(port_attr_info->os_dev_name, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(port_attr_info->os_dev_name)));
+			break;
+		case RPRT_HOST_NAME:
+			port_attr_info->host_name_valid = true;
+			ocs_strncpy(port_attr_info->host_name, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(port_attr_info->host_name)));
+			break;
+		case RPRT_NODENAME:
+			port_attr_info->node_name_valid = true;
+			port_attr_info->node_name = ocs_be64toh(ae->attr_wwn);
+			break;
+		case RPRT_PORTNAME:
+			port_attr_info->port_name_valid = true;
+			port_attr_info->port_name = ocs_be64toh(ae->attr_wwn);
+			break;
+		case RPRT_SYM_PORTNAME:
+			port_attr_info->port_symb_name_valid = true;
+			ocs_strncpy(port_attr_info->port_symb_name, (char *)ae->attr_string,
+				    MIN(sizeof(ae->attr_string),
+					sizeof(port_attr_info->port_symb_name)));
+			break;
+		case RPRT_PORT_TYPE:
+			port_attr_info->port_type_valid = true;
+			port_attr_info->port_type = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_SUPPORTED_CLASS:
+			port_attr_info->supported_cos_valid = true;
+			port_attr_info->supported_class_of_service = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_FABRICNAME:
+			port_attr_info->port_fabric_name_valid = true;
+			port_attr_info->port_fabric_name = ocs_be64toh(ae->attr_wwn);
+			break;
+		case RPRT_ACTIVE_FC4_TYPES:
+			port_attr_info->active_fc_types_valid= true;
+			ocs_memcpy(port_attr_info->active_fc4_types, ae->attr_types,
+				   sizeof(port_attr_info->active_fc4_types));
+			break;
+		case RPRT_PORT_STATE:
+			port_attr_info->port_state_valid = true;
+			port_attr_info->port_state = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_DISC_PORT:
+			port_attr_info->num_disc_ports_valid = true;
+			port_attr_info->num_disc_ports = ocs_be32toh(ae->attr_int);
+			break;
+		case RPRT_PORT_ID:
+			port_attr_info->port_id_valid = true;
+			port_attr_info->port_identifier = ocs_be32toh(ae->attr_int);
+			break;
+		default:
+			ocs_log_warn(node->ocs, "Unrecognized HBA attribute(type: 0x%x)\n",
+				     attr_type);
+		}
+
+		/* Now point to next attribute */
+		offset += attr_len;
+		num_attr_entries--;
+	}
+
+	return 0;
+}
 /**
  * @brief Set up the domain point-to-point parameters.
  *
@@ -2092,12 +2940,12 @@ ocs_p2p_setup(ocs_sport_t *sport)
 			 * External loopback mode enabled; local sport and remote node
 			 * will be registered with an NPortID = 1;
 			 */
-			ocs_log_debug(ocs, "%s: External loopback mode enabled\n", __func__);
+			ocs_log_debug(ocs, "External loopback mode enabled\n");
 			sport->p2p_remote_port_id = 1;
 			sport->p2p_port_id = 1;
 			sport->p2p_winner = TRUE;
 		} else {
-			ocs_log_warn(ocs, "%s: failed to determine p2p winner\n", __func__);
+			ocs_log_warn(ocs, "failed to determine p2p winner\n");
 			return rnode_winner;
 		}
 	}
@@ -2128,6 +2976,965 @@ ocs_process_rscn(ocs_node_t *node, ocs_node_cb_t *cbdata)
 	if (ns != NULL)  {
 		ocs_node_post_event(ns, OCS_EVT_RSCN_RCVD, cbdata);
 	} else {
-		ocs_log_warn(ocs, "%s(): can't find name server node\n", __func__);
+		ocs_log_warn(ocs, "can't find name server node\n");
 	}
+}
+
+/* Routines for all individual HBA attributes */
+int
+ocs_fdmi_hba_attr_wwnn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	uint64_t wwnn = ocs_be64toh(sport->wwnn);
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, sizeof(sport->wwnn));
+
+	ocs_memcpy(&ae->attr_wwn, &wwnn,
+			sizeof(sport->sli_wwnn));
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(sport->sli_wwnn);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_NODENAME);
+	return size;
+}
+int
+ocs_fdmi_hba_attr_manufacturer(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_strncpy(ae->attr_string, OCS_FDMI_MODEL_MANUFACTURER, sizeof(ae->attr_string));
+	len = ocs_strnlen((char *)ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_MANUFACTURER);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_sn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size, serialnum_len = 0;
+	char *serialnum = NULL;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	serialnum = ocs_scsi_get_property_ptr(ocs, OCS_SCSI_SERIALNUMBER);
+	serialnum_len = *serialnum++;
+
+	ocs_snprintf(ae->attr_string, MIN(sizeof(ae->attr_string), serialnum_len), "%s", serialnum);
+	ocs_log_debug(ocs, "serialnum_len: %d, serialnum: %s\n", serialnum_len, serialnum);
+	len = ocs_strlen(ae->attr_string);
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_SERIAL_NUMBER);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_model(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_strncpy(ae->attr_string, OCS_FDMI_MODEL_NAME, sizeof(ae->attr_string));
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_MODEL);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_description(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_strncpy(ae->attr_string, OCS_FDMI_MODEL_DESCRIPTION, sizeof(ae->attr_string));
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_MODEL_DESCRIPTION);
+
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_drvr_ver(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	ocs_t *ocs = sport->ocs;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_strncpy(ae->attr_string, ocs->driver_version,
+			sizeof(ae->attr_string));
+	len = ocs_strnlen(ae->attr_string,
+			sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_DRIVER_VERSION);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_rom_ver(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_snprintf(ae->attr_string, MIN(ocs_strlen(ocs->fw_version), sizeof(ae->attr_string)), "%s", ocs->fw_version);
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_OPTION_ROM_VERSION);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_fmw_ver(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	ocs_t *ocs = sport->ocs;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_snprintf(ae->attr_string, MIN(ocs_strlen(ocs->fw_version), sizeof(ae->attr_string)), "%s", ocs->fw_version);
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_FIRMWARE_VERSION);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_os_ver(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_get_os_version_and_name(sport->ocs, ae->attr_string,
+				    sizeof(ae->attr_string));
+
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_OS_NAME_VERSION);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_ct_len(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	ae->attr_int =  ocs_htobe32(OCS_MAX_CT_SIZE);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_MAX_CT_PAYLOAD_LEN);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_symbolic_name(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_snprintf(ae->attr_string, sizeof(ae->attr_string),
+			"Emulex %s FV%s DV%s", ocs->model,ocs->fw_version,
+			ocs->driver_version);
+
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_SYM_NODENAME);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_vendor_info(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ae->attr_int =  ocs_htobe32(0);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_VENDOR_INFO);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_num_ports(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	/* Each driver instance corresponds to a single port */
+	ae->attr_int =  ocs_htobe32(1);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_NUM_PORTS);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_fabric_wwnn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, sizeof(sport->sli_wwpn));
+
+	ocs_memcpy(&ae->attr_wwn, &sport->sli_wwpn,
+			sizeof(sport->sli_wwpn));
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(sport->sli_wwpn);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_FABRIC_WWNN);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_bios_ver(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_snprintf(ae->attr_string, MIN(ocs_strlen(ocs->fw_version), sizeof(ae->attr_string)), "%s", ocs->fw_version);
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_BIOS_VERSION);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_bios_state(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	/* Driver doesn't have access to this information */
+	ae->attr_int =  ocs_htobe32(0);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_BIOS_STATE);
+	return size;
+}
+
+int
+ocs_fdmi_hba_attr_vendor_id(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_strncpy(ae->attr_string, "Emulex",
+		sizeof(ae->attr_string));
+	len = ocs_strnlen(ae->attr_string,
+		      sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RHBA_VENDOR_ID);
+	return size;
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief Fabric node state machine: Wait for RHBA response event.
+ *
+ * @par Description
+ * Waits for an RHBA response event;
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_rhba_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	int resp_status;
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:	{
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_FDMI_RHBA, __ocs_fabric_common, __func__))
+			return NULL;
+
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+
+		resp_status = node_check_ct_resp(ctx, evt, arg);
+		if (resp_status == FCCT_HDR_CMDRSP_REJECT) {
+			ocs_log_debug(node->ocs, "FDMI RHBA request got rejected curr HBA attrmask: 0x%x\n",
+					node->sport->fdmi_hba_mask);
+			/* If rejected & mask is V2, fall back to FDMI-V1 and send RHBA */
+			if (node->sport->fdmi_hba_mask == FDMI_RHBA_MASK_V2) {
+				node->sport->fdmi_hba_mask = FDMI_RHBA_MASK_V1;
+				if (ocs_fdmi_send_rhba(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+							OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+					ocs_node_transition(node, __ocs_fdmi_rhba_wait_rsp, NULL);
+				} else {
+					node_printf(node, "[%s] Failed to FDMI RHBA req. Shutting down the node\n",
+							node->display_name);
+					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+				}
+			} else {
+				ocs_node_transition(node, __ocs_fdmi_idle, NULL);
+			}
+		} else if (resp_status == FCCT_HDR_CMDRSP_ACCEPT) {
+			if (ocs_fdmi_send_reg_port(node, FC_GS_FDMI_RPA,
+						OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_fdmi_reg_port_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to FDMI RPA req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+
+		}
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief Fabric node state machine: Wait for DHBA response event.
+ *
+ * @par Description
+ * Waits for an DHBA response event;
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_dhba_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:	{
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_FDMI_DHBA, __ocs_fabric_common, __func__)) {
+			return NULL;
+		}
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+
+		/* Now send FDMI DPRT request */
+
+		if (ocs_fdmi_send_dereg_cmd(node, FC_GS_FDMI_DPRT,
+					OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+			ocs_node_transition(node, __ocs_fdmi_dprt_wait_rsp, NULL);
+		} else {
+			node_printf(node, "[%s] Failed to FDMI DPRT req. Shutting down the node\n",
+					node->display_name);
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+		}
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+void *
+__ocs_fdmi_reg_port_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	uint32_t expected_code, resp_status;
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:	{
+		if (node->sport->is_vport) {
+			expected_code = FC_GS_FDMI_RPRT;
+		} else {
+			expected_code = FC_GS_FDMI_RPA;
+		}
+		if (node_check_ct_req(ctx, evt, arg, expected_code, __ocs_fabric_common, __func__)) {
+			return NULL;
+		}
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+		resp_status = node_check_ct_resp(ctx, evt, arg);
+		if (resp_status == FCCT_HDR_CMDRSP_REJECT) {
+			ocs_log_debug(node->ocs, "FDMI reg port request(cmd: 0x%x) curr Port attrmask: 0x%x\n",
+					expected_code, node->sport->fdmi_port_mask);
+			/* If rejected & mask is V2, fall back to FDMI-V1 and send RPRT/RPA */
+			if (node->sport->fdmi_port_mask == FDMI_PORT_MASK_V2) {
+				node->sport->fdmi_port_mask = FDMI_PORT_MASK_V1;
+				ocs_log_debug(node->ocs, "Send regport with port attrmask: 0x%x\n",
+						node->sport->fdmi_port_mask);
+				if (ocs_fdmi_send_reg_port(node, expected_code,
+							OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+							OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+					ocs_node_transition(node, __ocs_fdmi_reg_port_wait_rsp, NULL);
+				} else {
+					node_printf(node, "[%s] Failed to FDMI RPA req. Shutting down the node\n",
+							node->display_name);
+					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+				}
+				break;
+			}
+		}
+		ocs_node_transition(node, __ocs_fdmi_idle, NULL);
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief Fabric node state machine: Wait for DPRT response event.
+ *
+ * @par Description
+ * Waits for an DPRT response event;
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+void *
+__ocs_fdmi_dprt_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:	{
+		if (node_check_ct_req(ctx, evt, arg, FC_GS_FDMI_DPRT, __ocs_fabric_common, __func__)) {
+			return NULL;
+		}
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+		if (node->sport->is_vport) {
+			if (ocs_fdmi_send_reg_port(node, FC_GS_FDMI_RPRT,
+						OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_fdmi_reg_port_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to FDMI RPRT req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+		} else {
+			if (ocs_fdmi_send_rhba(node, OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				ocs_node_transition(node, __ocs_fdmi_rhba_wait_rsp, NULL);
+			} else {
+				node_printf(node, "[%s] Failed to FDMI RHBA req. Shutting down the node\n",
+						node->display_name);
+				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
+			}
+		}
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+/* Routines for all individual PORT attributes */
+int
+ocs_fdmi_port_attr_fc4type(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 32);
+
+	ae->attr_types[3] = 0x02; /* Type 1 - ELS */
+	ae->attr_types[2] = 0x01; /* Type 8 - FCP */
+	ae->attr_types[7] = 0x01; /* Type 32 - CT */
+	size = FDMI_ATTR_TYPE_LEN_SIZE + 32;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_SUPPORTED_FC4_TYPES);
+
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_support_speed(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	ocs_xport_stats_t speed;
+	uint32_t supported_speeds = 0;
+
+	speed.value = 1000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_1GFC;
+	}
+	speed.value = 2000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_2GFC;
+	}
+	speed.value = 4000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_4GFC;
+	}
+	speed.value = 8000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_8GFC;
+	}
+	speed.value = 16000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_16GFC;
+	}
+	speed.value = 32000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_32GFC;
+	}
+	speed.value = 64000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_64GFC;
+	}
+	speed.value = 128000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_128GFC;
+	}
+	speed.value = 256000;
+	if (ocs_xport_status(ocs->xport, OCS_XPORT_IS_SUPPORTED_LINK_SPEED, &speed)) {
+		supported_speeds |= OCS_PORTSPEED_256GFC;
+	}
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ae->attr_int = ocs_htobe32(supported_speeds);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_SUPPORTED_SPEED);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_speed(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	ocs_xport_stats_t speed;
+	uint32_t size;
+	int rc;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	ae->attr_int = OCS_PORTSPEED_UNKNOWN;
+	rc = ocs_xport_status(ocs->xport, OCS_XPORT_LINK_SPEED, &speed);
+	if (rc == 0) {
+		switch (speed.value) {
+		case 1000:
+			ae->attr_int = OCS_PORTSPEED_1GFC;
+			break;
+		case 2000:
+			ae->attr_int = OCS_PORTSPEED_2GFC;
+			break;
+		case 4000:
+			ae->attr_int = OCS_PORTSPEED_4GFC;
+			break;
+		case 8000:
+			ae->attr_int = OCS_PORTSPEED_8GFC;
+			break;
+		case 16000:
+			ae->attr_int = OCS_PORTSPEED_16GFC;
+			break;
+		case 32000:
+			ae->attr_int = OCS_PORTSPEED_32GFC;
+			break;
+		case 64000:
+			ae->attr_int = OCS_PORTSPEED_64GFC;
+			break;
+		case 128000:
+			ae->attr_int = OCS_PORTSPEED_128GFC;
+			break;
+		case 256000:
+			ae->attr_int = OCS_PORTSPEED_256GFC;
+			break;
+		}
+	}
+
+	ae->attr_int = ocs_htobe32(ae->attr_int);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_PORT_SPEED);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_max_frame(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	fc_plogi_payload_t *sp = (fc_plogi_payload_t *)sport->service_params;
+	uint32_t b2b_recv_data_size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	/*
+	 * common_service_parameters will be in big-endian format
+	 * Convert it to host order and extract b2b
+	 */
+	b2b_recv_data_size = ocs_be32toh(sp->common_service_parameters[1]);
+	/* Return received buffer-to-buffer data frame size from service params */
+	ae->attr_int = b2b_recv_data_size >> 16;
+	ae->attr_int = ocs_htobe32(b2b_recv_data_size);
+
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_MAX_FRAME_SIZE);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_os_devname(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_scsi_get_host_name(ocs, ae->attr_string, sizeof(ae->attr_string));
+
+	len = ocs_strnlen((char *)ae->attr_string,
+			sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_OS_DEVICE_NAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_host_name(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	ocs_get_os_host_name(sport->ocs, ae->attr_string, sizeof(ae->attr_string));
+
+	len = ocs_strnlen(ae->attr_string, sizeof(ae->attr_string));
+	len += 4 - (len & 3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_HOST_NAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_wwnn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	uint64_t wwnn = ocs_be64toh(sport->wwnn);
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, sizeof(sport->sli_wwnn));
+
+	ocs_memcpy(&ae->attr_wwn, &wwnn,
+			sizeof(sport->sli_wwnn));
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(sport->sli_wwnn);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_NODENAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_wwpn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, sizeof(sport->sli_wwpn));
+
+	ocs_memcpy(&ae->attr_wwn, &sport->sli_wwpn,
+			sizeof(sport->sli_wwnn));
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(sport->sli_wwpn);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_PORTNAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_symbolic_name(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t len, size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 256);
+
+	len = ocs_snprintf(ae->attr_string, 256, "%d", sport->instance_index);
+	len += (len & 3) ? (4 - (len & 3)) : 0;
+	size = FDMI_ATTR_TYPE_LEN_SIZE + len;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_SYM_PORTNAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_port_type(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	if (sport->topology == OCS_SPORT_TOPOLOGY_LOOP) {
+		ae->attr_int =  ocs_htobe32(OCS_FDMI_PORTTYPE_NLPORT);
+	} else if ((sport->topology == OCS_SPORT_TOPOLOGY_FABRIC) ||
+			(sport->topology == OCS_SPORT_TOPOLOGY_LOOP)) {
+		ae->attr_int =  ocs_htobe32(OCS_FDMI_PORTTYPE_NPORT);
+	} else {
+		ae->attr_int =  ocs_htobe32(OCS_FDMI_PORTTYPE_UNKNOWN);
+	}
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_PORT_TYPE);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_class(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ae->attr_int = ocs_htobe32(FCCT_CLASS_OF_SERVICE_3);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_SUPPORTED_CLASS);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_fabric_wwpn(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	ocs_t *ocs = sport->ocs;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	ae->attr_wwn = 0;
+	if (ocs->domain) {
+		fc_plogi_payload_t *sp = (fc_plogi_payload_t*)
+			ocs->domain->flogi_service_params;
+
+		ae->attr_wwn = (((uint64_t)sp->node_name_lo << 32ll) |
+				sp->node_name_hi);
+
+	}
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(sport->sli_wwpn);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_FABRICNAME);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_active_fc4type(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ocs_memset(ae, 0, 32);
+
+	ae->attr_types[3] = 0x02; /* Type 1 - ELS */
+	ae->attr_types[2] = 0x01; /* Type 8 - FCP */
+	ae->attr_types[7] = 0x01; /* Type 32 - CT */
+	size = FDMI_ATTR_TYPE_LEN_SIZE + 32;
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_ACTIVE_FC4_TYPES);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_port_state(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_t *ocs = sport->ocs;
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+	ocs_xport_stats_t link_status;
+	int rc;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+
+	rc = ocs_xport_status(ocs->xport, OCS_XPORT_PORT_STATUS, &link_status);
+	if ((rc == OCS_HAL_RTN_SUCCESS) &&
+			(link_status.value == OCS_XPORT_PORT_ONLINE)) {
+		ae->attr_int =  ocs_htobe32(OCS_FDMI_PORTSTATE_ONLINE);
+	} else {
+		ae->attr_int =  ocs_htobe32(OCS_FDMI_PORTSTATE_OFFLINE);
+	}
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_PORT_STATE);
+	return size;
+}
+
+int
+ocs_fdmi_port_attr_nportid(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad)
+{
+	ocs_fdmi_attr_entry_t *ae;
+	uint32_t size;
+
+	ae = (ocs_fdmi_attr_entry_t *)&ad->attr_value;
+	ae->attr_int =  ocs_htobe32(sport->fc_id);
+	size = FDMI_ATTR_TYPE_LEN_SIZE + sizeof(uint32_t);
+	ad->attr_len = ocs_htobe16(size);
+	ad->attr_type = ocs_htobe16(RPRT_PORT_ID);
+	return size;
+}
+
+/**
+ * @ingroup ns_sm
+ * @brief Fabric node state machine: Wait for FDMI response event.
+ *
+ * @par Description
+ * Waits for an FDMI cmd response event;
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+static void *
+__ocs_fdmi_get_cmd_wait_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_node_state_decl();
+
+	node_sm_trace();
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:	{
+		ocs_assert(node->els_req_cnt, NULL);
+		node->els_req_cnt--;
+		/* SM: process GRHL response payload */
+		ocs_node_transition(node, __ocs_fdmi_idle, NULL);
+		break;
+	}
+	default:
+		__ocs_fabric_common(__func__, ctx, evt, arg);
+		return NULL;
+	}
+
+	return NULL;
+}
+
+int
+ocs_fdmi_get_cmd(ocs_sport_t *sport, els_cb_t cb, void *cb_arg,
+		 ocs_fdmi_get_cmd_req_info_t *fdmi_cmd_req)
+{
+	ocs_node_t *node;
+
+	node = ocs_node_find(sport, FC_ADDR_FDMI);
+	if (node == NULL) {
+		ocs_log_err(sport->ocs, "failed to find FDMI node\n")
+		return -1;
+	}
+
+	if (ocs_fdmi_send_get_cmd(node, OCS_FC_FDMI_DEFAULT_TIMEOUT,
+			       OCS_FC_ELS_DEFAULT_RETRIES, cb, cb_arg, fdmi_cmd_req)) {
+		ocs_node_transition(node, __ocs_fdmi_get_cmd_wait_rsp, NULL);
+	} else {
+		ocs_log_err(sport->ocs, "failed to send FDMI request\n");
+		return -1;
+	}
+
+	return 0;
 }

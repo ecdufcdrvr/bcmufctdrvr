@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -42,9 +41,8 @@
  */
 
 #include "sli4.h"
-
 #include "sli4_fc.h"
-
+#include "ocs.h"
 #if defined(OCS_INCLUDE_DEBUG)
 #include "ocs_debug.h"
 #endif
@@ -52,6 +50,7 @@
 #define SLI4_BMBX_DELAY_US 1000 /* 1 ms */
 #define SLI4_INIT_PORT_DELAY_US 10000 /* 10 ms */
 
+static int32_t sli_sriov_setup(sli4_t *sli4);
 static int32_t sli_fw_init(sli4_t *);
 static int32_t sli_fw_term(sli4_t *);
 static int32_t sli_sliport_control(sli4_t *sli4, uint32_t endian);
@@ -71,30 +70,42 @@ const uint8_t sli4_fw_deinitialize[] = {
 };
 
 typedef struct {
-	uint32_t rev_id;
 	uint32_t family;	/* generation */
 	sli4_asic_type_e type;
+} sli4_asic_family_t;
+
+sli4_asic_family_t sli4_asic_family_table[] = {
+	{0x01, SLI4_ASIC_TYPE_BE3	},
+	{0x02, SLI4_ASIC_TYPE_SKYHAWK	},
+	{0x04, SLI4_ASIC_TYPE_SKYHAWK	},
+	{0x0a, SLI4_ASIC_TYPE_LANCER	},
+	{0x0b, SLI4_ASIC_TYPE_LANCER	},
+	{0x0c, SLI4_ASIC_TYPE_LANCERG6	},
+	{0x0d, SLI4_ASIC_TYPE_LANCERG7	},
+	{0x05, SLI4_ASIC_TYPE_CORSAIR	},
+};
+
+typedef struct {
+	uint32_t rev_id;
 	sli4_asic_rev_e rev;
-} sli4_asic_entry_t;
+} sli4_asic_revision_t;
 
-sli4_asic_entry_t sli4_asic_table[] = {
-	{	0x00,	1,	SLI4_ASIC_TYPE_BE3,	SLI4_ASIC_REV_A0},
-	{	0x01,	1,	SLI4_ASIC_TYPE_BE3,	SLI4_ASIC_REV_A1},
-	{	0x02,	1,	SLI4_ASIC_TYPE_BE3,	SLI4_ASIC_REV_A2},
-	{	0x00,	4,	SLI4_ASIC_TYPE_SKYHAWK,	SLI4_ASIC_REV_A0},	// not documented
-	{	0x00,	2,	SLI4_ASIC_TYPE_SKYHAWK,	SLI4_ASIC_REV_A0},
-	{	0x10,	1,	SLI4_ASIC_TYPE_BE3,	SLI4_ASIC_REV_B0},
-	{	0x10,	0x04,	SLI4_ASIC_TYPE_SKYHAWK,	SLI4_ASIC_REV_B0},
-	{	0x11,	0x04,	SLI4_ASIC_TYPE_SKYHAWK,	SLI4_ASIC_REV_B1},
-	{	0x0,	0x0a,	SLI4_ASIC_TYPE_LANCER,	SLI4_ASIC_REV_A0},
-	{	0x10,	0x0b,	SLI4_ASIC_TYPE_LANCER,	SLI4_ASIC_REV_B0},
-	{	0x30,	0x0b,	SLI4_ASIC_TYPE_LANCER,	SLI4_ASIC_REV_D0},
-	{	0x3,	0x0b,	SLI4_ASIC_TYPE_LANCERG6,SLI4_ASIC_REV_A3},
-	{	0x0,	0x0c,	SLI4_ASIC_TYPE_LANCERG6,SLI4_ASIC_REV_A0},
-	{	0x1,	0x0c,	SLI4_ASIC_TYPE_LANCERG6,SLI4_ASIC_REV_A1},
-	{	0x3,	0x0c,	SLI4_ASIC_TYPE_LANCERG6,SLI4_ASIC_REV_A3},
-
-	{	0x00,	0x05,	SLI4_ASIC_TYPE_CORSAIR,	SLI4_ASIC_REV_A0},
+sli4_asic_revision_t sli4_asic_rev_table[] = {
+	{0x00, SLI4_ASIC_REV_A0},
+	{0x01, SLI4_ASIC_REV_A1},
+	{0x02, SLI4_ASIC_REV_A2},
+	{0x03, SLI4_ASIC_REV_A3},
+	{0x10, SLI4_ASIC_REV_B0},
+	{0x11, SLI4_ASIC_REV_B1},
+	{0x12, SLI4_ASIC_REV_B2},
+	{0x13, SLI4_ASIC_REV_B3},
+	{0x14, SLI4_ASIC_REV_B4},
+	{0x20, SLI4_ASIC_REV_C0},
+	{0x21, SLI4_ASIC_REV_C1},
+	{0x22, SLI4_ASIC_REV_C2},
+	{0x23, SLI4_ASIC_REV_C3},
+	{0x24, SLI4_ASIC_REV_C4},
+	{0x30, SLI4_ASIC_REV_D0},
 };
 
 /*
@@ -126,74 +137,104 @@ const sli4_reg_t regmap[SLI4_REG_MAX][SLI4_MAX_IF_TYPES] = {
 	// SLI4_REG_BMBX
 	{
 		{ 2, SLI4_BMBX_REG }, { 0, SLI4_BMBX_REG }, { 0, SLI4_BMBX_REG }, { 0, SLI4_BMBX_REG },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_BMBX_REG },
 	},
-	// SLI4_REG_EQCQ_DOORBELL
+	// SLI4_REG_EQ_DOORBELL
 	{
 		{ 2, SLI4_EQCQ_DOORBELL_REG }, { 0, SLI4_EQCQ_DOORBELL_REG },
 		{ 0, SLI4_EQCQ_DOORBELL_REG }, { 0, SLI4_EQCQ_DOORBELL_REG },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 1, SLI4_IF6_EQ_DOORBELL_REG }
+	},
+	// SLI4_REG_CQ_DOORBELL
+	{
+		{ 2, SLI4_EQCQ_DOORBELL_REG }, { 0, SLI4_EQCQ_DOORBELL_REG },
+		{ 0, SLI4_EQCQ_DOORBELL_REG }, { 0, SLI4_EQCQ_DOORBELL_REG },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 1, SLI4_IF6_CQ_DOORBELL_REG }
 	},
 	// SLI4_REG_FCOE_RQ_DOORBELL
 	{
 		{ 2, SLI4_RQ_DOORBELL_REG }, { 0, SLI4_RQ_DOORBELL_REG },
 		{ 0, SLI4_RQ_DOORBELL_REG }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 1, SLI4_IF6_RQ_DOORBELL_REG }
 	},
 	// SLI4_REG_IO_WQ_DOORBELL
 	{
-		{ 2, SLI4_IO_WQ_DOORBELL_REG }, { 0, SLI4_IO_WQ_DOORBELL_REG }, { 0, SLI4_IO_WQ_DOORBELL_REG }, { UINT32_MAX, UINT32_MAX },
+		{ 2, SLI4_IO_WQ_DOORBELL_REG }, { 0, SLI4_IO_WQ_DOORBELL_REG },
+		{ 0, SLI4_IO_WQ_DOORBELL_REG }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 1, SLI4_IF6_WQ_DOORBELL_REG }
 	},
 	// SLI4_REG_MQ_DOORBELL
 	{
 		{ 2, SLI4_MQ_DOORBELL_REG }, { 0, SLI4_MQ_DOORBELL_REG },
 		{ 0, SLI4_MQ_DOORBELL_REG }, { 0, SLI4_MQ_DOORBELL_REG },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 1, SLI4_IF6_MQ_DOORBELL_REG }
 	},
 	// SLI4_REG_PHYSDEV_CONTROL
 	{
-		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PHSDEV_CONTROL_REG_23 }, { 0, SLI4_PHSDEV_CONTROL_REG_23 },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PHSDEV_CONTROL_REG_236 }, { 0, SLI4_PHSDEV_CONTROL_REG_236 },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PHSDEV_CONTROL_REG_236 },
 	},
 	// SLI4_REG_SLIPORT_CONTROL
 	{
 		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_CONTROL_REG }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_CONTROL_REG },
 	},
 	// SLI4_REG_SLIPORT_ERROR1
 	{
 		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_ERROR1 }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_ERROR1 },
 	},
 	// SLI4_REG_SLIPORT_ERROR2
 	{
 		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_ERROR2 }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_SLIPORT_ERROR2 },
 	},
 	// SLI4_REG_SLIPORT_SEMAPHORE
 	{
 		{ 1, SLI4_PORT_SEMAPHORE_REG_0 },  { 0, SLI4_PORT_SEMAPHORE_REG_1 },
-		{ 0, SLI4_PORT_SEMAPHORE_REG_23 }, { 0, SLI4_PORT_SEMAPHORE_REG_23 },
+		{ 0, SLI4_PORT_SEMAPHORE_REG_236 }, { 0, SLI4_PORT_SEMAPHORE_REG_236 },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ 0, SLI4_PORT_SEMAPHORE_REG_236 },
 	},
 	// SLI4_REG_SLIPORT_STATUS
 	{
-		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PORT_STATUS_REG_23 }, { 0, SLI4_PORT_STATUS_REG_23 },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PORT_STATUS_REG_236 }, { 0, SLI4_PORT_STATUS_REG_236 },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { 0, SLI4_PORT_STATUS_REG_236 },
 	},
 	// SLI4_REG_UERR_MASK_HI
 	{
 		{ 0, SLI4_UERR_MASK_HIGH_REG }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 	// SLI4_REG_UERR_MASK_LO
 	{
 		{ 0, SLI4_UERR_MASK_LOW_REG }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 	// SLI4_REG_UERR_STATUS_HI
 	{
 		{ 0, SLI4_UERR_STATUS_HIGH_REG }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 	// SLI4_REG_UERR_STATUS_LO
 	{
 		{ 0, SLI4_UERR_STATUS_LOW_REG }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 	// SLI4_REG_SW_UE_CSR1
 	{
 		{ 1, SLI4_SW_UE_CSR1}, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 	// SLI4_REG_SW_UE_CSR2
 	{
 		{ 1, SLI4_SW_UE_CSR2}, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX },
+		{ UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }, { UINT32_MAX, UINT32_MAX }
 	},
 };
 
@@ -212,7 +253,7 @@ sli_reg_read(sli4_t *sli, sli4_regname_e reg)
 
 	// sanity check
 	if ((UINT32_MAX == r->rset) || (UINT32_MAX == r->off)) {
-		ocs_log_err(sli->os, "%s: regname %d not defined for if_type %d\n", __func__, reg, sli->if_type);
+		ocs_log_err(sli->os, "regname %d not defined for if_type %d\n", reg, sli->if_type);
 		return UINT32_MAX;
 	}
 
@@ -235,7 +276,7 @@ sli_reg_write(sli4_t *sli, sli4_regname_e reg, uint32_t val)
 
 	// sanity check
 	if ((UINT32_MAX == r->rset) || (UINT32_MAX == r->off)) {
-		ocs_log_err(sli->os, "%s: regname %d not defined for if_type %d\n", __func__, reg, sli->if_type);
+		ocs_log_err(sli->os, "regname %d not defined for if_type %d\n", reg, sli->if_type);
 		return;
 	}
 
@@ -327,7 +368,7 @@ sli_bmbx_wait(sli4_t *sli4, uint32_t msec)
 	uint32_t	val = 0;
 
 	do {
-		ocs_udelay(SLI4_BMBX_DELAY_US);	// 1 ms
+		ocs_delay_usec(SLI4_BMBX_DELAY_US);	// 1 ms
 		val = sli_reg_read(sli4, SLI4_REG_BMBX);
 		msec--;
 	} while(msec && !(val & SLI4_BMBX_RDY));
@@ -353,7 +394,7 @@ sli_bmbx_write(sli4_t *sli4)
 	sli_reg_write(sli4, SLI4_REG_BMBX, val);
 
 	if (sli_bmbx_wait(sli4, SLI4_BMBX_DELAY_US)) {
-		ocs_log_crit(sli4->os, "%s: BMBX WRITE_HI failed\n", __func__);
+		ocs_log_crit(sli4->os, "BMBX WRITE_HI failed\n");
 		return -1;
 	}
 	val = SLI4_BMBX_WRITE_LO(sli4->bmbx.phys);
@@ -426,15 +467,14 @@ sli_dump_bmbx_command(sli4_t *sli4, void *mbx, const char *prefix)
 			    (pmd->address_low == ocs_addr32_lo(sli4->bmbx_non_emb_pmd->phys))) {
 				for (i = 0; i < sli_config->pmd_count; i++, pmd++) {
 					sli_config_hdr = sli4->bmbx_non_emb_pmd->virt;
-					ocs_snprintf(label, sizeof(label), "%s (non-emb pay[%d])",
-						     prefix, i);
+					ocs_snprintf(label, sizeof(label), "%s (non-emb pay[%d])", prefix, i);
 					ocs_dump32(OCS_DEBUG_ENABLE_MQ_DUMP, sli4->os, label,
 						   (uint8_t *)sli4->bmbx_non_emb_pmd->virt,
 						   sli_config_hdr->request_length + (4*sizeof(uint32_t)));
 				}
 			} else {
-				ocs_log_debug(sli4->os, "%s: pmd addr does not match pmd:%x %x (%x %x)\n",
-					__func__, pmd->address_high, pmd->address_low,
+				ocs_log_debug(sli4->os, "pmd addr does not match pmd:%x %x (%x %x)\n",
+					pmd->address_high, pmd->address_low,
 					ocs_addr32_hi(sli4->bmbx_non_emb_pmd->phys),
 					ocs_addr32_lo(sli4->bmbx_non_emb_pmd->phys));
 			}
@@ -467,21 +507,12 @@ sli_bmbx_command(sli4_t *sli4)
 	sli_dump_bmbx_command(sli4, sli4->bmbx.virt, "bmbx cmd");
 #endif
 
-	if (sli_fw_error_status(sli4) > 0) {
-		ocs_log_crit(sli4->os, "%s Chip is in an error state - Mailbox "
-			"command rejected status=%#x error1=%#x error2=%#x\n",
-			__func__,
-			sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS),
-			sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR1),
-			sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR2));
+	if (sli4->reset_pending && sli4->reset_pending(sli4->reset_pending_arg, FALSE))
 		return -1;
-	}
 
 	if (sli_bmbx_write(sli4)) {
-		ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail phys=%p reg=%#x\n",
-			__func__,
-			(void*)sli4->bmbx.phys,
-			sli_reg_read(sli4, SLI4_REG_BMBX));
+		ocs_log_crit(sli4->os, "bootstrap mailbox write fail phys=%p reg=%#x\n",
+			(void*)sli4->bmbx.phys, sli_reg_read(sli4, SLI4_REG_BMBX));
 		return -1;
 	}
 
@@ -490,11 +521,11 @@ sli_bmbx_command(sli4_t *sli4)
 	if (((sli4_mcqe_t *)cqe)->val) {
 #if defined(OCS_INCLUDE_DEBUG)
 		sli_dump_bmbx_command(sli4, sli4->bmbx.virt, "bmbx cmpl");
-        ocs_dump32(OCS_DEBUG_ENABLE_CQ_DUMP, sli4->os, "bmbx cqe", cqe, sizeof(sli4_mcqe_t));
+		ocs_dump32(OCS_DEBUG_ENABLE_CQ_DUMP, sli4->os, "bmbx cqe", cqe, sizeof(sli4_mcqe_t));
 #endif
 		return sli_cqe_mq(cqe);
 	} else {
-		ocs_log_err(sli4->os, "%s: invalid or wrong type\n", __func__);
+		ocs_log_err(sli4->os, "invalid or wrong type\n");
 		return -1;
 	}
 }
@@ -521,6 +552,13 @@ sli_cmd_config_link(sli4_t *sli4, void *buf, size_t size)
 	ocs_memset(buf, 0, size);
 
 	config_link->hdr.command = SLI4_MBOX_COMMAND_CONFIG_LINK;
+
+	if (ocs_bbcr_enabled(sli4->os)) {
+		config_link->cscn = 1;
+		config_link->bbscn = sli4->config.bbscn_def;
+	}
+
+	ocs_log_debug(sli4->os, "config_link->bbscn: %d\n", config_link->bbscn);
 
 	/* Port interprets zero in a field as "use default value" */
 
@@ -553,6 +591,34 @@ sli_cmd_down_link(sli4_t *sli4, void *buf, size_t size)
 
 /**
  * @ingroup sli
+ * @brief Write a DUMP Type 2 command to the provided buffer.
+ *
+ * @param sli4 SLI context pointer.
+ * @param buf Virtual pointer to the destination buffer.
+ * @param size Buffer size, in bytes.
+ * @param region_id BOOT region ID.
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_dump_type2(sli4_t *sli4, void *buf, size_t size, uint16_t region_id, ocs_dma_t *dma)
+{
+	sli4_cmd_dump2_t	*cmd = buf;
+
+	ocs_memset(buf, 0, size);
+
+	cmd->hdr.command = SLI4_MBOX_COMMAND_DUMP;
+	cmd->type = 2;
+	cmd->region_id = region_id;
+	cmd->phys_addr_low = ocs_addr32_lo(dma->phys);
+	cmd->phys_addr_high = ocs_addr32_hi(dma->phys);
+	cmd->aval_len = size;
+
+	return sizeof(sli4_cmd_dump2_t);
+}
+
+/**
+ * @ingroup sli
  * @brief Write a DUMP Type 4 command to the provided buffer.
  *
  * @param sli4 SLI context pointer.
@@ -573,6 +639,39 @@ sli_cmd_dump_type4(sli4_t *sli4, void *buf, size_t size, uint16_t wki)
 	cmd->type = 4;
 	cmd->wki_selection = wki;
 	return sizeof(sli4_cmd_dump4_t);
+}
+
+/**
+ * @ingroup sli
+ * @brief update SLI Port non-volatile configuration data.
+ *
+ * @param sli4 SLI context pointer.
+ * @param buf Virtual pointer to the destination buffer.
+ * @param size Buffer size, in bytes.
+ * @param region_id BOOT region ID.
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_update_cfg(sli4_t *sli4, void *buf, size_t size, uint16_t region_id, ocs_dma_t *dma)
+{
+	sli4_cmd_update_cfg_t	*cmd = buf;
+
+	ocs_memset(buf, 0, size);
+
+	cmd->hdr.command = SLI4_MBOX_COMMAND_UPDATE_CFG;
+	cmd->req_type = SLI4_REQ_UPDATE_CFG;
+	cmd->version = 1;
+	cmd->di = 1;
+	cmd->region_id = region_id;
+	cmd->byte_cnt = size;
+	cmd->entry_len = size;
+	cmd->bde.bde_type = SLI4_BDE_TYPE_BDE_64;
+	cmd->bde.buffer_length = size;
+	cmd->bde.u.data.buffer_address_low = ocs_addr32_lo(dma->phys);
+	cmd->bde.u.data.buffer_address_high = ocs_addr32_hi(dma->phys);
+
+	return sizeof(sli4_cmd_update_cfg_t);
 }
 
 /**
@@ -754,10 +853,13 @@ sli_cmd_init_link(sli4_t *sli4, void *buf, size_t size, uint32_t speed, uint8_t 
 		case FC_LINK_SPEED_8G:
 		case FC_LINK_SPEED_16G:
 		case FC_LINK_SPEED_32G:
+		case FC_LINK_SPEED_64G:
+		case FC_LINK_SPEED_128G:
+		case FC_LINK_SPEED_256G:
 			init_link->link_flags.fixed_speed = TRUE;
 			break;
 		case FC_LINK_SPEED_10G:
-			ocs_log_test(sli4->os, "%s: unsupported FC speed %d\n", __func__, speed);
+			ocs_log_test(sli4->os, "unsupported FC speed %d\n", speed);
 			return 0;
 		}
 
@@ -769,17 +871,20 @@ sli_cmd_init_link(sli4_t *sli4, void *buf, size_t size, uint32_t speed, uint8_t 
 			break;
 		case SLI4_READ_CFG_TOPO_FC_AL:
 			init_link->link_flags.topology = SLI4_INIT_LINK_F_FCAL_ONLY;
+
 			if ((init_link->link_speed_selection_code == FC_LINK_SPEED_16G) ||
-			    (init_link->link_speed_selection_code == FC_LINK_SPEED_32G)) {
-				ocs_log_test(sli4->os, "%s: unsupported FC-AL speed %d\n", __func__, speed);
+			    (init_link->link_speed_selection_code == FC_LINK_SPEED_32G) ||
+			    (init_link->link_speed_selection_code >= FC_LINK_SPEED_AUTO_32_16)) {
+				ocs_log_err(sli4->os, "unsupported FC-AL speed (speed_code: %d)\n", speed);
 				return 0;
 			}
+
 			break;
 		case SLI4_READ_CFG_TOPO_FC_DA:
 			init_link->link_flags.topology = FC_TOPOLOGY_P2P;
 			break;
 		default:
-			ocs_log_test(sli4->os, "%s: unsupported topology %#x\n", __func__, sli4->config.topology);
+			ocs_log_err(sli4->os, "unsupported topology %#x\n", sli4->config.topology);
 			return 0;
 		}
 
@@ -879,8 +984,11 @@ sli_cmd_post_xri(sli4_t *sli4, void *buf, size_t size,  uint16_t xri_base, uint1
 	post_xri->hdr.command = SLI4_MBOX_COMMAND_POST_XRI;
 	post_xri->xri_base = xri_base;
 	post_xri->xri_count = xri_count;
-	post_xri->enx = TRUE;
-	post_xri->val = TRUE;
+
+	if ((!sli_get_auto_xfer_rdy_capable(sli4)) && (!sli_get_tow_capable(sli4))) {
+		post_xri->enx = TRUE;
+		post_xri->val = TRUE;
+	}
 
 	return sizeof(sli4_cmd_post_xri_t);
 }
@@ -918,7 +1026,7 @@ sli_cmd_release_xri(sli4_t *sli4, void *buf, size_t size,  uint8_t num_xri)
  *
  * @return Returns the number of bytes written.
  */
-static int32_t
+int32_t
 sli_cmd_read_config(sli4_t *sli4, void *buf, size_t size)
 {
 	sli4_cmd_read_config_t	*read_config = buf;
@@ -1033,12 +1141,12 @@ sli_cmd_read_sparm64(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *dma,
 	ocs_memset(buf, 0, size);
 
 	if (SLI4_READ_SPARM64_VPI_SPECIAL == vpi) {
-		ocs_log_test(sli4->os, "%s: special VPI not supported!!!\n", __func__);
+		ocs_log_test(sli4->os, "special VPI not supported!!!\n");
 		return -1;
 	}
 
 	if (!dma || !dma->phys) {
-		ocs_log_test(sli4->os, "%s: bad DMA buffer\n", __func__);
+		ocs_log_test(sli4->os, "bad DMA buffer\n");
 		return -1;
 	}
 
@@ -1076,8 +1184,7 @@ sli_cmd_read_topology(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *dma)
 
 	if (dma && dma->size) {
 		if (dma->size < SLI4_MIN_LOOP_MAP_BYTES) {
-			ocs_log_test(sli4->os, "%s: loop map buffer too small %jd\n", __func__,
-					dma->size);
+			ocs_log_test(sli4->os, "loop map buffer too small %jd\n", dma->size);
 			return 0;
 		}
 
@@ -1147,17 +1254,17 @@ sli_cmd_reg_fcfi(sli4_t *sli4, void *buf, size_t size, uint16_t index, sli4_cmd_
  * @param fcf_index FCF index returned by READ_FCF_TABLE.
  * @param vlan_id VLAN ID tag.
  * @param rq_cfg RQ_ID/R_CTL/TYPE routing information
+ * @param rq_cfg_cnt Number of rq_cfg's
  *
  * @return returns 0 for success, a negative error code value for failure.
  */
 int32_t
 sli_cmd_reg_fcfi_mrq(sli4_t *sli4, void *buf, size_t size, uint8_t mode,
 		     uint16_t fcf_index, uint16_t vlan_id,
-		     sli4_cmd_rq_cfg_t rq_cfg[SLI4_CMD_REG_FCFI_NUM_RQ_CFG])
+		     sli4_cmd_rq_cfg_t rq_cfg[SLI4_CMD_REG_FCFI_NUM_RQ_CFG], int32_t rq_cfg_cnt)
 {
 	sli4_cmd_reg_fcfi_mrq_t	*reg_fcfi_mrq = buf;
 	uint32_t i;
-	bool filter_ext_used = FALSE;
 
 	ocs_memset(buf, 0, size);
 
@@ -1172,8 +1279,10 @@ sli_cmd_reg_fcfi_mrq(sli4_t *sli4, void *buf, size_t size, uint8_t mode,
 		goto done;
 	}
 
-	for (i = 0; i < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; i++) {
+	if (rq_cfg_cnt > 4)
+		reg_fcfi_mrq->xmv = true;
 
+	for (i = 0; i < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; i++) {
 		switch (i) {
 		case 7:	reg_fcfi_mrq->rq_id_7 = rq_cfg[i].rq_id; break;
 		case 6:	reg_fcfi_mrq->rq_id_6 = rq_cfg[i].rq_id; break;
@@ -1185,72 +1294,54 @@ sli_cmd_reg_fcfi_mrq(sli4_t *sli4, void *buf, size_t size, uint8_t mode,
 		case 0:	reg_fcfi_mrq->rq_id_0 = rq_cfg[i].rq_id; break;
 		}
 
-		if (rq_cfg[i].rq_id == 0xffff) { // Not valid
+		if (rq_cfg[i].rq_id == 0xffff) /* Not valid */
 			continue;
-		}
 
 		if (i < 4) {
-			// First set of filters
+			/* First set of filters */
 			reg_fcfi_mrq->rq_cfg_1[i].r_ctl_mask = rq_cfg[i].r_ctl_mask;
 			reg_fcfi_mrq->rq_cfg_1[i].r_ctl_match = rq_cfg[i].r_ctl_match;
 			reg_fcfi_mrq->rq_cfg_1[i].type_mask = rq_cfg[i].type_mask;
 			reg_fcfi_mrq->rq_cfg_1[i].type_match = rq_cfg[i].type_match;
 		} else {
-			filter_ext_used = TRUE;
-
 			reg_fcfi_mrq->rq_cfg_2[i - 4].r_ctl_mask = rq_cfg[i].r_ctl_mask;
 			reg_fcfi_mrq->rq_cfg_2[i - 4].r_ctl_match = rq_cfg[i].r_ctl_match;
 			reg_fcfi_mrq->rq_cfg_2[i - 4].type_mask = rq_cfg[i].type_mask;
 			reg_fcfi_mrq->rq_cfg_2[i - 4].type_match = rq_cfg[i].type_match;
 		}
 
-
-		/* Check if protocol need be set */
+		/* Check if protocol needs to be set */
 		if (rq_cfg[i].protocol_valid) {
 			reg_fcfi_mrq->ptc |= (1 << i);
 			reg_fcfi_mrq->pt  |= ((rq_cfg[i].protocol & 0x1) << i);
 		}
-		
+
 		/* Check if this filter points to MRQ */
 		if (rq_cfg[i].is_mrq) {
-			if (rq_cfg[i].mrq_set_num == 0) { // set 0
-				reg_fcfi_mrq->num_mrq_pairs_1 = 
-					rq_cfg[i].mrq_set_count;
+			if (rq_cfg[i].mrq_set_num == SLI4_CMD_REG_FCFI_MRQ_SET_0) {
+				reg_fcfi_mrq->num_mrq_pairs_1 = rq_cfg[i].mrq_set_count;
 
-				if (rq_cfg[i].filtermask & 0xf0) { // extended filter
-					reg_fcfi_mrq->alt_mrq_filter_bit_mask_1 =
-						rq_cfg[i].filtermask;
-				} else {
-					reg_fcfi_mrq->mrq_filter_bitmask_1 =
-						rq_cfg[i].filtermask;
-				}
-			
-				reg_fcfi_mrq->rq_selection_policy_1 =
-					rq_cfg[i].mrq_policy;
+				if (reg_fcfi_mrq->xmv) /* extended filter */
+					reg_fcfi_mrq->alt_mrq_filter_bit_mask_1 = rq_cfg[i].filtermask;
+				else
+					reg_fcfi_mrq->mrq_filter_bitmask_1 = rq_cfg[i].filtermask;
 
-			} else if (rq_cfg[i].mrq_set_num == 1) { // set 1 
-				reg_fcfi_mrq->num_mrq_pairs_2 = 
-					rq_cfg[i].mrq_set_count;
+				reg_fcfi_mrq->rq_selection_policy_1 = rq_cfg[i].mrq_policy;
+			} else if (rq_cfg[i].mrq_set_num == SLI4_CMD_REG_FCFI_MRQ_SET_1) {
+				reg_fcfi_mrq->num_mrq_pairs_2 = rq_cfg[i].mrq_set_count;
 
-				if (rq_cfg[i].filtermask & 0xf0) {
-					reg_fcfi_mrq->alt_mrq_filter_bit_mask_2 =
-						rq_cfg[i].filtermask;
-				} else {
-					reg_fcfi_mrq->mrq_filter_bitmask_2 =
-						rq_cfg[i].filtermask;
-				}
+				if (reg_fcfi_mrq->xmv)
+					reg_fcfi_mrq->alt_mrq_filter_bit_mask_2 = rq_cfg[i].filtermask;
+				else
+					reg_fcfi_mrq->mrq_filter_bitmask_2 = rq_cfg[i].filtermask;
 
-				reg_fcfi_mrq->rq_selection_policy_2 =
-					rq_cfg[i].mrq_policy;
+				reg_fcfi_mrq->rq_selection_policy_2 = rq_cfg[i].mrq_policy;
 			} else {
 				return 0;
 			}
 		}
 	}
 
-	if (filter_ext_used) {
-		reg_fcfi_mrq->xmv  = TRUE;
-	}
 done:
 	return sizeof(sli4_cmd_reg_fcfi_mrq_t);
 }
@@ -1268,12 +1359,15 @@ done:
  * @param dma DMA buffer that contains the remote port's service parameters.
  * @param update Boolean indicating an update to an existing RPI (TRUE)
  * or a new registration (FALSE).
+ * @param hlm Indicating an RPI being used for HLM RPI
+ * @param nsler NVMe Sequence Level Error Recovery
  *
  * @return Returns the number of bytes written.
  */
 int32_t
 sli_cmd_reg_rpi(sli4_t *sli4, void *buf, size_t size, uint32_t nport_id, uint16_t rpi,
-			uint16_t vpi, ocs_dma_t *dma, uint8_t update,  uint8_t enable_t10_pi)
+		uint16_t vpi, ocs_dma_t *dma, uint8_t update,
+		uint8_t enable_t10_pi, uint8_t hlm, uint8_t nsler)
 {
 	sli4_cmd_reg_rpi_t *reg_rpi = buf;
 
@@ -1285,11 +1379,15 @@ sli_cmd_reg_rpi(sli4_t *sli4, void *buf, size_t size, uint32_t nport_id, uint16_
 	reg_rpi->remote_n_port_id = nport_id;
 	reg_rpi->upd = update;
 	reg_rpi->etow = enable_t10_pi;
+	reg_rpi->hlm = hlm;
+	reg_rpi->nsler = nsler;
 
-	reg_rpi->bde_64.bde_type = SLI4_BDE_TYPE_BDE_64;
-	reg_rpi->bde_64.buffer_length = SLI4_REG_RPI_BUF_LEN;
-	reg_rpi->bde_64.u.data.buffer_address_low  = ocs_addr32_lo(dma->phys);
-	reg_rpi->bde_64.u.data.buffer_address_high = ocs_addr32_hi(dma->phys);
+	if (dma) {
+		reg_rpi->bde_64.bde_type = SLI4_BDE_TYPE_BDE_64;
+		reg_rpi->bde_64.buffer_length = SLI4_REG_RPI_BUF_LEN;
+		reg_rpi->bde_64.u.data.buffer_address_low  = ocs_addr32_lo(dma->phys);
+		reg_rpi->bde_64.u.data.buffer_address_high = ocs_addr32_hi(dma->phys);
+	}
 
 	reg_rpi->vpi = vpi;
 
@@ -1311,6 +1409,8 @@ int32_t
 sli_cmd_reg_vfi(sli4_t *sli4, void *buf, size_t size, ocs_domain_t *domain)
 {
 	sli4_cmd_reg_vfi_t	*reg_vfi = buf;
+	fc_plogi_payload_t	*flogi_rsp_sparams = NULL;
+	uint8_t			bbscn_fabric = 0;
 
 	if (!sli4 || !buf || !domain) {
 		return 0;
@@ -1337,6 +1437,27 @@ sli_cmd_reg_vfi(sli4_t *sli4, void *buf, size_t size, ocs_domain_t *domain)
 	reg_vfi->vpi = domain->sport->indicator;
 	ocs_memcpy(reg_vfi->wwpn, &domain->sport->sli_wwpn, sizeof(reg_vfi->wwpn));
 	reg_vfi->local_n_port_id = domain->sport->fc_id;
+
+	flogi_rsp_sparams = (fc_plogi_payload_t *)domain->flogi_service_params;
+	bbscn_fabric = (ocs_be32toh(flogi_rsp_sparams->common_service_parameters[1]) >> 12) & 0xF;
+	ocs_log_debug(sli4->os, "bbscn_fabric: %d\n", bbscn_fabric);
+
+	/**
+	 * If our advertised service parameter BB_SC_N is 0 or
+	 * accept BB_SC_N is 0, send REG_VFI with BBCR set to 0
+	 */
+	if (ocs_bbcr_enabled(sli4->os) && bbscn_fabric) {
+		/**
+		 * If the accept BB_SC_N value is greater than our maximum supported value
+		 * (BBSCN_MAX from READ_CONFIG), then BBCR should not be enabled
+		 */
+		if (bbscn_fabric <= sli4->config.bbscn_max) {
+			/* BB_SC_N value should be set to max of (advertised value, accept value) */
+			reg_vfi->bbscn = OCS_MAX(sli4->config.bbscn_def, bbscn_fabric);
+			reg_vfi->bbcr = 1;
+			ocs_log_info(sli4->os, "Enabling BBCR with BB_SC_N: %d\n", reg_vfi->bbscn);
+		}
+	}
 
 	return sizeof(sli4_cmd_reg_vfi_t);
 }
@@ -1422,8 +1543,7 @@ sli_cmd_sli_config(sli4_t *sli4, void *buf, size_t size, uint32_t length, ocs_dm
 	sli4_cmd_sli_config_t	*sli_config = NULL;
 
 	if ((length > sizeof(sli_config->payload.embed)) && (dma == NULL)) {
-		ocs_log_test(sli4->os, "%s: length(%d) > payload(%ld)\n", __func__,
-				length, sizeof(sli_config->payload.embed));
+		ocs_log_test(sli4->os, "length(%d) > payload(%ld)\n", length, sizeof(sli_config->payload.embed));
 		return -1;
 	}
 
@@ -1475,16 +1595,16 @@ sli_sliport_control(sli4_t *sli4, uint32_t endian)
 	sli_reg_write(sli4, SLI4_REG_SLIPORT_CONTROL, endian | SLI4_SLIPORT_CONTROL_IP);
 
 	for (iter = 0; iter < 3000; iter ++) {
-		ocs_udelay(SLI4_INIT_PORT_DELAY_US);	// 10 ms
-		if (sli_fw_ready(sli4) == 1) {
+		ocs_delay_usec(SLI4_INIT_PORT_DELAY_US);	/* 10 ms */
+		/* Wait for FW to become ready & error to be cleared */
+		if ((sli_fw_ready(sli4) == 1) && !sli_fw_error_status(sli4)) {
 			rc = 0;
 			break;
 		}
 	}
 
-	if (rc != 0) {
-		ocs_log_crit(sli4->os, "%s: port failed to become ready after initialization\n", __func__);
-	}
+	if (rc)
+		ocs_log_crit(sli4->os, "port failed to become ready after initialization\n");
 
 	return rc;
 }
@@ -1564,7 +1684,7 @@ sli_cmd_unreg_rpi(sli4_t *sli4, void *buf, size_t size, uint16_t indicator, sli4
 		index_indicator = SLI4_UNREG_RPI_II_FCFI;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: unknown type %#x\n", __func__, which);
+		ocs_log_test(sli4->os, "unknown type %#x\n", which);
 		return 0;
 	}
 
@@ -1665,10 +1785,10 @@ sli_cmd_unreg_vpi(sli4_t *sli4, void *buf, size_t size, uint16_t indicator, uint
 	return sizeof(sli4_cmd_unreg_vpi_t);
 }
 
-
 /**
  * @ingroup sli
  * @brief Write an CONFIG_AUTO_XFER_RDY command to the provided buffer.
+ *        Command to enable AXR in G5.
  *
  * @param sli4 SLI context pointer.
  * @param buf Virtual pointer to the destination buffer.
@@ -1689,7 +1809,7 @@ sli_cmd_config_auto_xfer_rdy(sli4_t *sli4, void *buf, size_t size, uint32_t max_
 
 	ocs_memset(buf, 0, size);
 
-	req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_AUTO_XFER_RDY;
+	req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_TOW;
 	req->max_burst_len = max_burst_len;
 
 	return sizeof(sli4_cmd_config_auto_xfer_rdy_t);
@@ -1710,22 +1830,105 @@ sli_cmd_config_auto_xfer_rdy(sli4_t *sli4, void *buf, size_t size, uint32_t max_
  * @return Returns the number of bytes written.
  */
 int32_t
-sli_cmd_config_auto_xfer_rdy_hp(sli4_t *sli4, void *buf, size_t size, uint32_t max_burst_len,
-                                                uint32_t esoc, uint32_t block_size )
+sli_cmd_config_auto_xfer_rdy_hp(sli4_t *sli4, void *buf, size_t size,
+				uint32_t max_burst_len, uint32_t block_size)
 {
-        sli4_cmd_config_auto_xfer_rdy_hp_t      *req = buf;
+	sli4_cmd_config_auto_xfer_rdy_hp_t *req = buf;
 
-        if (!sli4 || !buf) {
-                return 0;
-        }
+	if (!sli4 || !buf)
+		return 0;
 
-        ocs_memset(buf, 0, size);
+	ocs_memset(buf, 0, size);
 
-        req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_AUTO_XFER_RDY_HP;
-        req->max_burst_len = max_burst_len;
-        req->esoc = esoc;
-        req->block_size = block_size;
-        return sizeof(sli4_cmd_config_auto_xfer_rdy_hp_t);
+	req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_TOW_HP;
+	req->max_burst_len = max_burst_len;
+	req->esoc = 1;
+	req->block_size = block_size;
+
+	return sizeof(sli4_cmd_config_auto_xfer_rdy_hp_t);
+}
+
+/**
+ * @ingroup sli
+ * @brief Write an CONFIG_OPTIMIZED_WRITE command to the provided buffer.
+ *
+ * @param sli4 SLI context pointer.
+ * @param buf Virtual pointer to the destination buffer.
+ * @param size Buffer size, in bytes.
+ * @param max_burst_len if the write FCP_DL is less than this size,
+ * @param xri_cnt Total XRIs that will be posted,
+ * then the SLI port will generate the auto XFER_RDY.
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_config_optimized_write(sli4_t *sli4, void *buf, size_t size,
+			       uint32_t max_burst_len, uint32_t xri_cnt,
+			       uint32_t tow_feature)
+{
+	sli4_cmd_config_tow_t *req = buf;
+
+	if (!sli4 || !buf) {
+		return 0;
+	}
+
+	ocs_memset(buf, 0, size);
+
+	req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_TOW;
+	if (tow_feature & OCS_TOW_FEATURE_AXR)
+		req->axs = 1;
+	if (tow_feature & OCS_TOW_FEATURE_TFB)
+		req->fbs = 1;
+
+	req->xpns = 0;
+	req->scsi_max_data_len = max_burst_len;
+	req->version = 1;
+	req->pool0_xri_cnt = xri_cnt;
+
+	return sizeof(sli4_cmd_config_tow_t);
+}
+
+/**
+ * @ingroup sli
+ * @brief Write an CONFIG_OPTIMIZED_WRITE_HP command to the provided buffer.
+ *
+ * @param sli4 SLI context pointer.
+ * @param buf Virtual pointer to the destination buffer.
+ * @param size Buffer size, in bytes.
+ * @param max_burst_len if the write FCP_DL is less than this size,
+ * @param xri_cnt Total XRIs that will be posted,
+ * @param block_size block size,
+ * then the SLI port will generate the auto XFER_RDY.
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_config_optimized_write_hp(sli4_t *sli4, void *buf,
+				  size_t size, uint32_t max_burst_len,
+				  uint32_t xri_cnt, uint32_t block_size,
+				  uint32_t tow_feature)
+{
+	sli4_cmd_config_tow_hp_t *req = buf;
+
+	if (!sli4 || !buf) {
+		return 0;
+	}
+
+	ocs_memset(buf, 0, size);
+
+	req->hdr.command = SLI4_MBOX_COMMAND_CONFIG_TOW_HP;
+	if (tow_feature & OCS_TOW_FEATURE_AXR)
+		req->axs = 1;
+	if (tow_feature & OCS_TOW_FEATURE_TFB)
+		req->fbs = 1;
+
+	req->xpns = 0;
+	req->scsi_max_data_len = max_burst_len;
+	req->esoc = 1;
+	req->scsi_block_size = block_size;
+	req->pool0_xri_cnt =  xri_cnt;
+
+	return sizeof(sli4_cmd_config_tow_hp_t);
 }
 
 /**
@@ -1769,7 +1972,8 @@ sli_cmd_common_function_reset(sli4_t *sli4, void *buf, size_t size)
  * @param size Buffer size, in bytes.
  * @param qmem DMA memory for the queue.
  * @param eq_id Associated EQ_ID
- * @param ignored This parameter carries the ULP which is only used for WQ and RQs
+ * @param ignored1 This parameter carries the ULP which is only used for WQ and RQs
+ * @param ignored2 Ignored (Used for consistency among queue creation functions)
  *
  * @note This creates a Version 0 message.
  *
@@ -1777,64 +1981,47 @@ sli_cmd_common_function_reset(sli4_t *sli4, void *buf, size_t size)
  */
 static int32_t
 sli_cmd_common_create_cq(sli4_t *sli4, void *buf, size_t size,
-		ocs_dma_t *qmem, uint16_t eq_id, uint16_t ignored)
+			 ocs_dma_t *qmem, uint16_t eq_id,
+			 uint16_t ignored1, bool ignored2)
 {
 	sli4_req_common_create_cq_v0_t	*cqv0 = NULL;
 	sli4_req_common_create_cq_v2_t	*cqv2 = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
 	uint32_t	if_type = sli4->if_type;
-	uint32_t	page_bytes = 0;
 	uint32_t	num_pages = 0;
 	uint32_t 	cmd_size = 0;
-	uint32_t	page_size = 0;
-	uint32_t	n_cqe = 0;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	/* First calculate number of pages and the mailbox cmd length */
+	/* Any 'case' added to this switch must be added to the subsequent switch-case as well */
 	switch (if_type)
 	{
 	case SLI4_IF_TYPE_BE3_SKH_PF:
-		page_bytes = SLI_PAGE_SIZE;
-		num_pages = sli_page_count(qmem->size, page_bytes);
+		num_pages = sli_page_count(qmem_size, qpage_size);
 		cmd_size = sizeof(sli4_req_common_create_cq_v0_t) + (8 * num_pages);
 		break;
 	case SLI4_IF_TYPE_LANCER_FC_ETH:
-		n_cqe = qmem->size / SLI4_CQE_BYTES;
-		switch (n_cqe) {
-		case 256:
-		case 512:
-		case 1024:
-		case 2048:
-			page_size = 1;
-			break;
-		case 4096:
-			page_size = 2;
-			break;
-		default:
-			return 0;
-		}
-		page_bytes = page_size * SLI_PAGE_SIZE;
-		num_pages = sli_page_count(qmem->size, page_bytes);
+	case SLI4_IF_TYPE_LANCER_G7:
+		num_pages = sli_page_count(qmem_size, qpage_size);
 		cmd_size = sizeof(sli4_req_common_create_cq_v2_t) + (8 * num_pages);
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: unsupported IF_TYPE %d\n", __func__, if_type);
+		ocs_log_test(sli4->os, "unsupported IF_TYPE %d\n", if_type);
 		return -1;
 	}
-
 
 	/* now that we have the mailbox command size, we can set SLI_CONFIG fields */
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max((size_t)cmd_size, sizeof(sli4_res_common_create_queue_t));
-
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		payload_size = OCS_MAX((size_t)cmd_size, sizeof(sli4_res_common_create_queue_t));
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 
+	/* Expect only 3 values for 'if_type', rest would have been filtered by the above switch case */
 	switch (if_type)
 	{
 	case SLI4_IF_TYPE_BE3_SKH_PF:
@@ -1857,7 +2044,7 @@ sli_cmd_common_create_cq(sli4_t *sli4, void *buf, size_t size,
 			cqv0->cqecnt = SLI4_CQ_CNT_1024;
 			break;
 		default:
-			ocs_log_test(sli4->os, "%s: num_pages %d not valid\n", __func__, cqv0->num_pages);
+			ocs_log_test(sli4->os, "num_pages %d not valid\n", cqv0->num_pages);
 			return -1;
 		}
 		cqv0->evt = TRUE;
@@ -1867,23 +2054,28 @@ sli_cmd_common_create_cq(sli4_t *sli4, void *buf, size_t size,
 		cqv0->arm = FALSE;
 		cqv0->eq_id = eq_id;
 
-		for (p = 0, addr = qmem->phys;
-				p < cqv0->num_pages;
-				p++, addr += page_bytes) {
+		for (p = 0; p < cqv0->num_pages; p++) {
+			addr = qmem[p].phys;
 			cqv0->page_physical_address[p].low = ocs_addr32_lo(addr);
 			cqv0->page_physical_address[p].high = ocs_addr32_hi(addr);
 		}
 
 		break;
 	case SLI4_IF_TYPE_LANCER_FC_ETH:
-	{
+		/* fall-through */
+		FALL_THROUGH;
+	case SLI4_IF_TYPE_LANCER_G7:
 		cqv2 = (sli4_req_common_create_cq_v2_t *)((uint8_t *)buf + sli_config_off);
 		cqv2->hdr.opcode = SLI4_OPC_COMMON_CREATE_CQ;
 		cqv2->hdr.subsystem = SLI4_SUBSYSTEM_COMMON;
 		cqv2->hdr.version = 2;
 		cqv2->hdr.request_length = cmd_size - sizeof(sli4_req_hdr_t);
 
-		cqv2->page_size = page_size;
+		if (if_type == SLI4_IF_TYPE_LANCER_G7)
+			cqv2->autovalid = TRUE;
+
+		/* Fill the page_size_multiplier */
+		cqv2->page_size = (qpage_size / SLI_PAGE_SIZE);
 
 		/* valid values for number of pages: 1, 2, 4, 8 (sec 4.4.3) */
 		cqv2->num_pages = num_pages;
@@ -1903,10 +2095,10 @@ sli_cmd_common_create_cq(sli4_t *sli4, void *buf, size_t size,
 			break;
 		case 8:
 			cqv2->cqecnt = SLI4_CQ_CNT_LARGE;
-			cqv2->cqe_count = n_cqe;
+			cqv2->cqe_count = (qmem_size / SLI4_CQE_BYTES);
 			break;
 		default:
-			ocs_log_test(sli4->os, "%s: num_pages %d not valid\n", __func__, cqv2->num_pages);
+			ocs_log_test(sli4->os, "num_pages %d not valid\n", cqv2->num_pages);
 			return -1;
 		}
 
@@ -1917,16 +2109,15 @@ sli_cmd_common_create_cq(sli4_t *sli4, void *buf, size_t size,
 		cqv2->arm = FALSE;
 		cqv2->eq_id = eq_id;
 
-		for (p = 0, addr = qmem->phys;
-				p < cqv2->num_pages;
-				p++, addr += page_bytes) {
+		for (p = 0; p < cqv2->num_pages; p++) {
+			addr = qmem[p].phys;
 			cqv2->page_physical_address[p].low = ocs_addr32_lo(addr);
 			cqv2->page_physical_address[p].high = ocs_addr32_hi(addr);
 		}
-	}
+
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: unsupported IF_TYPE %d\n", __func__, if_type);
+		ocs_log_test(sli4->os, "unsupported IF_TYPE %d\n", if_type);
 		return -1;
 	}
 
@@ -2024,6 +2215,7 @@ sli_cmd_common_modify_eq_delay(sli4_t *sli4, void *buf, size_t size, sli4_queue_
  * @param qmem DMA memory for the queue.
  * @param ignored1 Ignored (used for consistency among queue creation functions).
  * @param ignored2 Ignored (used for consistency among queue creation functions).
+ * @param ignored3 Ignored (used for consistency among queue creation functions).
  *
  * @note Other queue creation routines use the last parameter to pass in
  * the associated Q_ID and ULP. EQ doesn't have an associated queue or ULP,
@@ -2035,31 +2227,35 @@ sli_cmd_common_modify_eq_delay(sli4_t *sli4, void *buf, size_t size, sli4_queue_
  */
 static int32_t
 sli_cmd_common_create_eq(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *qmem,
-		uint16_t ignored1, uint16_t ignored2)
+			 uint16_t ignored1, uint16_t ignored2, bool ignored3)
 {
 	sli4_req_common_create_eq_t	*eq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_common_create_eq_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_common_create_eq_t),
 				sizeof(sli4_res_common_create_queue_t));
-
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	eq = (sli4_req_common_create_eq_t *)((uint8_t *)buf + sli_config_off);
 
 	eq->hdr.opcode = SLI4_OPC_COMMON_CREATE_EQ;
 	eq->hdr.subsystem = SLI4_SUBSYSTEM_COMMON;
-	eq->hdr.request_length = sizeof(sli4_req_common_create_eq_t) -
-					sizeof(sli4_req_hdr_t);
+	eq->hdr.request_length = sizeof(sli4_req_common_create_eq_t) - sizeof(sli4_req_hdr_t);
+
+	if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7) {
+		eq->hdr.version = 2;
+		eq->autovalid = TRUE;
+	}
+
 	/* valid values for number of pages: 1, 2, 4 (sec 4.4.3) */
-	eq->num_pages = qmem->size / SLI_PAGE_SIZE;
+	eq->num_pages = sli_page_count(qmem_size, qpage_size);
 	switch (eq->num_pages) {
 	case 1:
 		eq->eqesz = SLI4_EQE_SIZE_4;
@@ -2074,16 +2270,16 @@ sli_cmd_common_create_eq(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *qmem,
 		eq->count = SLI4_EQ_CNT_4096;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: num_pages %d not valid\n", __func__, eq->num_pages);
+		ocs_log_test(sli4->os, "num_pages %d not valid\n", eq->num_pages);
 		return -1;
 	}
+
 	eq->valid = TRUE;
 	eq->arm = FALSE;
 	eq->delay_multiplier = 32;
 
-	for (p = 0, addr = qmem->phys;
-			p < eq->num_pages;
-			p++, addr += SLI_PAGE_SIZE) {
+	for (p = 0; p < eq->num_pages; p++) {
+		addr = qmem[p].phys;
 		eq->page_address[p].low = ocs_addr32_lo(addr);
 		eq->page_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -2167,6 +2363,111 @@ sli4_cmd_lowlevel_set_watchdog(sli4_t *sli4, void *buf, size_t size, uint16_t ti
 	return;
 }
 
+/**
+ * @brief Write a LOWLEVEL_SET_DIAG_LOG_OPTIONS command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param timeout watchdog timer timeout in seconds
+ *
+ * @return void
+ */
+void
+sli4_cmd_lowlevel_enable_ras(sli4_t *sli4, void *buf, size_t size, int log_level,
+			     uint32_t unit_size, int32_t buf_count, uint32_t *phys_addr,
+			     uintptr_t lwpd_phys_addr)
+{
+	int32_t i;
+	uint32_t sli_config_off = 0;
+	sli4_req_lowlevel_set_diag_log_options_t *req = NULL;
+
+	ocs_memset(buf, 0x00, sizeof(sli4_req_lowlevel_set_diag_log_options_t) + sizeof(sli4_req_hdr_t));
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+				/* Payload length must accomodate both request and response */
+				max(sizeof(sli4_req_lowlevel_set_diag_log_options_t),
+				    sizeof(sli4_res_lowlevel_set_diag_log_options_t)),
+				NULL);
+	}
+	req = (sli4_req_lowlevel_set_diag_log_options_t *)((uint8_t *)buf + sli_config_off);
+
+	req->hdr.opcode = SLI4_OPC_LOWLEVEL_SET_DIAG_LOG_OPTIONS;
+	req->hdr.subsystem = SLI4_SUBSYSTEM_LOWLEVEL;
+	req->hdr.request_length = sizeof(sli4_req_lowlevel_set_diag_log_options_t) -
+				  sizeof(sli4_req_hdr_t) + sizeof(uint32_t) * 2 * buf_count;
+	req->enable = 1;
+	req->reset_action = 0;
+	req->log_level = log_level;
+	req->buffer_size = (uint8_t)(unit_size / 4096);
+	req->buffer_cnt = (uint8_t)buf_count;
+	req->acqe_interval = 0;	/* Disabled */
+	req->cq_id = 0;
+	req->lwpd_addr_lo = (uint32_t)(lwpd_phys_addr & 0xFFFFFFFF);
+	req->lwpd_addr_hi = (uint32_t)(lwpd_phys_addr >> 32);
+	for (i = 0; i < buf_count; i++) {
+		req->buffer_desc[i].addr_lo = phys_addr[i * 2];
+		req->buffer_desc[i].addr_hi = phys_addr[i * 2 + 1];
+	}
+}
+
+/**
+ * @brief Write a LOWLEVEL_SET_DIAG_LOG_OPTIONS command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param timeout watchdog timer timeout in seconds
+ *
+ * @return void
+ */
+void
+sli4_cmd_lowlevel_disable_ras(sli4_t *sli4, void *buf, size_t size)
+{
+	uint32_t sli_config_off = 0;
+	sli4_req_lowlevel_set_diag_log_options_t *req = NULL;
+
+	ocs_memset(buf, 0x00, sizeof(sli4_req_lowlevel_set_diag_log_options_t) + sizeof(sli4_req_hdr_t));
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+				/* Payload length must accomodate both request and response */
+				max(sizeof(sli4_req_lowlevel_set_diag_log_options_t),
+				    sizeof(sli4_res_lowlevel_set_diag_log_options_t)),
+				NULL);
+	}
+	req = (sli4_req_lowlevel_set_diag_log_options_t *)((uint8_t *)buf + sli_config_off);
+
+	req->hdr.opcode = SLI4_OPC_LOWLEVEL_SET_DIAG_LOG_OPTIONS;
+	req->hdr.subsystem = SLI4_SUBSYSTEM_LOWLEVEL;
+	req->hdr.request_length = sizeof(sli4_req_lowlevel_set_diag_log_options_t) - sizeof(sli4_req_hdr_t);
+	req->enable = 0;
+}
+
+void
+sli4_cmd_lowlevel_get_itcm_parity_stats(sli4_t *sli4, void *buf, size_t size, bool clear_stats)
+{
+	sli4_req_lowlevel_get_itcm_parity_stats_t *req = NULL;
+	uint32_t sli_config_off = 0;
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type)
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+				/* Payload length must accomodate both request and response */
+				max(sizeof(*req), sizeof(sli4_res_lowlevel_get_itcm_parity_stats_t)),
+				NULL);
+
+	req = (sli4_req_lowlevel_get_itcm_parity_stats_t *)SLI4_GET_SLI_CONFIG_OFFSET(buf, sli_config_off);
+	req->hdr.opcode = SLI4_OPC_LOWLEVEL_GET_ITCM_PARITY_STATS;
+	req->hdr.subsystem = SLI4_SUBSYSTEM_LOWLEVEL;
+	req->hdr.request_length = (sizeof(*req) - sizeof(sli4_req_hdr_t));
+	if (clear_stats) {
+		ocs_log_info(sli4->os, "Clearing the ITCM parity stats\n");
+		req->clr_pbec = 1;
+		req->clr_tpec = 1;
+	}
+}
+
 static int32_t
 sli_cmd_common_get_cntl_attributes(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *dma)
 {
@@ -2239,7 +2540,8 @@ sli_cmd_common_get_cntl_addl_attributes(sli4_t *sli4, void *buf, size_t size, oc
  * @param size Buffer size, in bytes.
  * @param qmem DMA memory for the queue.
  * @param cq_id Associated CQ_ID.
- * @param ignored This parameter carries the ULP which is only used for WQ and RQs
+ * @param ignored1 This parameter carries the ULP which is only used for WQ and RQs
+ * @param ignored2 Ignored (Used for consistency among queue creation functions)
  *
  * @note This creates a Version 0 message.
  *
@@ -2247,31 +2549,31 @@ sli_cmd_common_get_cntl_addl_attributes(sli4_t *sli4, void *buf, size_t size, oc
  */
 static int32_t
 sli_cmd_common_create_mq_ext(sli4_t *sli4, void *buf, size_t size,
-			     ocs_dma_t *qmem, uint16_t cq_id, uint16_t ignored)
+			     ocs_dma_t *qmem, uint16_t cq_id,
+			     uint16_t ignored1, bool ignored2)
 {
 	sli4_req_common_create_mq_ext_t	*mq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_common_create_mq_ext_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_common_create_mq_ext_t),
 				sizeof(sli4_res_common_create_queue_t));
-
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	mq = (sli4_req_common_create_mq_ext_t *)((uint8_t *)buf + sli_config_off);
 
 	mq->hdr.opcode = SLI4_OPC_COMMON_CREATE_MQ_EXT;
 	mq->hdr.subsystem = SLI4_SUBSYSTEM_COMMON;
-	mq->hdr.request_length = sizeof(sli4_req_common_create_mq_ext_t) -
-					sizeof(sli4_req_hdr_t);
+	mq->hdr.request_length = sizeof(sli4_req_common_create_mq_ext_t) - sizeof(sli4_req_hdr_t);
+
 	/* valid values for number of pages: 1, 2, 4, 8 (sec 4.4.12) */
-	mq->num_pages = qmem->size / SLI_PAGE_SIZE;
+	mq->num_pages = sli_page_count(qmem_size, qpage_size);
 	switch (mq->num_pages) {
 	case 1:
 		mq->ring_size = SLI4_MQE_SIZE_16;
@@ -2286,7 +2588,7 @@ sli_cmd_common_create_mq_ext(sli4_t *sli4, void *buf, size_t size,
 		mq->ring_size = SLI4_MQE_SIZE_128;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: num_pages %d not valid\n", __func__, mq->num_pages);
+		ocs_log_test(sli4->os, "num_pages %d not valid\n", mq->num_pages);
 		return -1;
 	}
 
@@ -2302,9 +2604,8 @@ sli_cmd_common_create_mq_ext(sli4_t *sli4, void *buf, size_t size,
 	}
 	mq->val = TRUE;
 
-	for (p = 0, addr = qmem->phys;
-			p < mq->num_pages;
-			p++, addr += SLI_PAGE_SIZE) {
+	for (p = 0; p < mq->num_pages; p++) {
+		addr = qmem[p].phys;
 		mq->page_physical_address[p].low = ocs_addr32_lo(addr);
 		mq->page_physical_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -2511,10 +2812,11 @@ sli_cmd_common_get_port_name(sli4_t *sli4, void *buf, size_t size)
 		break;
 	case SLI4_IF_TYPE_LANCER_FC_ETH:
 	case SLI4_IF_TYPE_LANCER_RDMA:
+	case SLI4_IF_TYPE_LANCER_G7:
 		version = 1;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: unsupported IF_TYPE %d\n", __func__, sli4->if_type);
+		ocs_log_test(sli4->os, "unsupported IF_TYPE %d\n", sli4->if_type);
 		return 0;
 	}
 
@@ -2765,7 +3067,7 @@ sli_cmd_dmtf_exec_clp_cmd(sli4_t *sli4, void *buf, size_t size,
 int32_t
 sli_cmd_common_set_dump_location(sli4_t *sli4, void *buf, size_t size,
 				 uint8_t query, uint8_t is_buffer_list,
-				 ocs_dma_t *buffer)
+				 ocs_dma_t *buffer, uint8_t fdb)
 {
 	sli4_req_common_set_dump_location_t *set_dump_loc = NULL;
 	uint32_t	sli_config_off = 0;
@@ -2786,6 +3088,7 @@ sli_cmd_common_set_dump_location(sli4_t *sli4, void *buf, size_t size,
 
 	set_dump_loc->blp = is_buffer_list;
 	set_dump_loc->qry = query;
+	set_dump_loc->fdb = fdb;
 
 	if (buffer) {
 		set_dump_loc->buf_addr_low = ocs_addr32_lo(buffer->phys);
@@ -2800,6 +3103,125 @@ sli_cmd_common_set_dump_location(sli4_t *sli4, void *buf, size_t size,
 	return(sli_config_off + sizeof(sli4_req_common_set_dump_location_t));
 }
 
+/**
+ * @ingroup sli
+ * @brief Write a RUN_BIU_DIAG command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param TX DMA buffer structure
+ * @param TX DMA buffer size
+ * @param RX DMA buffer structure
+ * @param RX DMA buffer size
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_config_run_biu_diag(sli4_t *sli4, void *buf, size_t size,
+			    ocs_dma_t *tx_buffer, size_t tx_buf_len,
+			    ocs_dma_t *rx_buffer, size_t rx_buf_len)
+{
+	sli4_cmd_config_run_biu_diag_t *req = buf;
+
+	if (!sli4 || !buf) {
+		ocs_log_err(NULL, "Invalid parameters\n");
+		return 0;
+	}
+
+	if (!tx_buffer || !rx_buffer) {
+		ocs_log_err(sli4->os, "Invalid Tx/Rx buffers\n");
+		return 0;
+	}
+	ocs_memset(buf, 0, size);
+
+	req->hdr.command = SLI4_OPC_COMMON_RUN_BIU_DIAG;
+
+	req->tx_phy_addr_low = ocs_addr32_lo(tx_buffer->phys);
+	req->tx_phy_addr_high = ocs_addr32_hi(tx_buffer->phys);
+	req->tx_buf_len = tx_buf_len;
+
+	req->rx_phy_addr_low = ocs_addr32_lo(rx_buffer->phys);
+	req->rx_phy_addr_high = ocs_addr32_hi(rx_buffer->phys);
+	req->rx_buf_len = rx_buf_len;
+
+	return(sizeof(sli4_cmd_config_run_biu_diag_t));
+}
+/**
+ * @ingroup sli
+ * @brief Write a  SLI4_OPC_FCOE_SET_LINK_DIAG_LOOPBACK command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param type Loopback type.
+ *
+ * @return Returns the number of bytes written.
+ */
+
+int32_t
+sli_cmd_fcoe_set_loopback_mode(sli4_t *sli4, void *buf, size_t size, int type)
+{
+	sli4_req_common_set_loopback_mode_t *set_loopback_mode = NULL;
+	uint32_t	sli_config_off = 0;
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+				sizeof (sli4_req_common_set_loopback_mode_t),
+				NULL);
+	}
+
+	set_loopback_mode = (sli4_req_common_set_loopback_mode_t *)((uint8_t *)buf + sli_config_off);
+
+	set_loopback_mode->hdr.opcode = SLI4_OPC_FCOE_SET_LINK_DIAG_LOOPBACK;
+	set_loopback_mode->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
+	set_loopback_mode->hdr.request_length = sizeof(sli4_req_common_set_loopback_mode_t) - sizeof(sli4_req_hdr_t);
+	set_loopback_mode->hdr.timeout = 0;
+	set_loopback_mode->hdr.version = 0;
+
+	set_loopback_mode->typ = type; /* Loopback type */
+	set_loopback_mode->link_number = sli4->config.port_number; /* Link number */
+	set_loopback_mode->link_type = 0x1; /* FC Link */
+
+	return(sli_config_off + sizeof(sli4_req_common_set_loopback_mode_t));
+}
+
+/**
+ * @ingroup sli
+ * @brief Write a SLI4_OPC_FC_SET_TRUNK_MODE command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param trunk_mode Trunk mode.
+ *
+ * @return Returns the number of bytes written or '-1' if an invalid trunk mode is requested.
+ */
+int32_t
+sli_cmd_fc_set_trunk_mode(sli4_t *sli4, void *buf, size_t size, uint32_t trunk_mode)
+{
+	sli4_req_set_trunk_mode_t *req = NULL;
+	uint32_t sli_config_off = 0;
+
+	if (trunk_mode > SLI4_TRUNK_MODE_4_LINKS_PER_TRUNK)
+		return -1;
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+				/* Payload length must accomodate both request and response */
+				max(sizeof(sli4_req_set_trunk_mode_t),
+				    sizeof(sli4_res_set_trunk_mode_t)),
+				NULL);
+	}
+
+	req = (sli4_req_set_trunk_mode_t *)((uint8_t *)buf + sli_config_off);
+	req->hdr.opcode = SLI4_OPC_FC_SET_TRUNK_MODE;
+	req->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
+	req->hdr.request_length = sizeof(sli4_req_set_trunk_mode_t) - sizeof(sli4_req_hdr_t);
+	req->trunk_mode = trunk_mode;
+
+	return (sli_config_off + sizeof(sli4_req_set_trunk_mode_t));
+}
 
 /**
  * @ingroup sli
@@ -2839,7 +3261,7 @@ sli_cmd_common_set_features(sli4_t *sli4, void *buf, size_t size,
 
 	cmd->feature = feature;
 	cmd->param_len = param_len;
-	ocs_memcpy(cmd->params, parameter, param_len);
+	ocs_memcpy(cmd->params, parameter, MIN(param_len, sizeof(cmd->params)));
 
 	return(sli_config_off + sizeof(sli4_req_common_set_features_t));
 }
@@ -3174,18 +3596,16 @@ sli_cqe_mq(void *buf)
 	 * Thus, ignore MCQE unless "complete" is set.
 	 */
 	if (!mcqe->cmp) {
+		ocs_log_err(NULL, "Ignoring MCQE, completion bit not set\n");
 		return -2;
 	}
 
 	if (mcqe->completion_status) {
-		ocs_log_debug(NULL, "%s: bad status (cmpl=%#x ext=%#x con=%d cmp=%d ae=%d val=%d)\n",
-				__func__,
-				mcqe->completion_status,
-				mcqe->extended_status,
-				mcqe->con,
-				mcqe->cmp,
-				mcqe->ae,
-				mcqe->val);
+		ocs_log_err(NULL, "MCQE: bad status (cmpl=%#x ext=%#x con=%d cmp=%d ae=%d val=%d)\n",
+			mcqe->completion_status, mcqe->extended_status,
+			mcqe->con, mcqe->cmp, mcqe->ae, mcqe->val);
+		ocs_log_err(NULL, "      %08X %08X %08X %08X\n", ((uint32_t *)buf)[0],
+			((uint32_t *)buf)[1], ((uint32_t *)buf)[2], ((uint32_t *)buf)[3]);
 	}
 
 	return mcqe->completion_status;
@@ -3207,7 +3627,7 @@ sli_cqe_async(sli4_t *sli4, void *buf)
 	int32_t		rc = -1;
 
 	if (!sli4 || !buf) {
-		ocs_log_err(NULL, "%s: bad parameter sli4=%p buf=%p\n", __func__, sli4, buf);
+		ocs_log_err(NULL, "bad parameter sli4=%p buf=%p\n", sli4, buf);
 		return -1;
 	}
 
@@ -3219,20 +3639,24 @@ sli_cqe_async(sli4_t *sli4, void *buf)
 		rc = sli_fc_process_fcoe(sli4, buf);
 		break;
 	case SLI4_ACQE_EVENT_CODE_GRP_5:
-		/*TODO*/ocs_log_debug(sli4->os, "ACQE GRP5\n");
+		/*TODO*/
+		ocs_log_debug(sli4->os, "ACQE GRP5\n");
 		break;
 	case SLI4_ACQE_EVENT_CODE_SLI_PORT_EVENT:
-        ocs_log_debug(sli4->os,"ACQE SLI Port, type=0x%x, data1,2=0x%08x,0x%08x\n",
-		acqe->event_type, acqe->event_data[0], acqe->event_data[1]);
+		ocs_log_debug(sli4->os,"ACQE SLI Port, type=0x%x, data1,2=0x%08x,0x%08x\n",
+			      acqe->event_type, acqe->event_data[0], acqe->event_data[1]);
 #if defined(OCS_INCLUDE_DEBUG)
 		ocs_dump32(OCS_DEBUG_ALWAYS, sli4->os, "acq", acqe, sizeof(*acqe));
 #endif
+		rc = sli_fc_process_sli_port_event(sli4, buf);
 		break;
+
 	case SLI4_ACQE_EVENT_CODE_FC_LINK_EVENT:
 		rc = sli_fc_process_link_attention(sli4, buf);
 		break;
 	default:
-		/*TODO*/ocs_log_test(sli4->os, "ACQE unknown=%#x\n", acqe->event_code);
+		/*TODO*/
+		ocs_log_test(sli4->os, "ACQE unknown=%#x\n", acqe->event_code);
 	}
 
 	return rc;
@@ -3255,8 +3679,7 @@ sli_res_sli_config(void *buf)
 
 	// sanity check
 	if (!buf || (SLI4_MBOX_COMMAND_SLI_CONFIG != sli_config->hdr.command)) {
-		ocs_log_err(NULL, "%s: bad parameter buf=%p cmd=%#x\n", __func__, buf,
-				buf ? sli_config->hdr.command : -1);
+		ocs_log_err(NULL, "bad parameter buf=%p cmd=%#x\n", buf, (buf ? sli_config->hdr.command : -1));
 		return -1;
 	}
 
@@ -3267,7 +3690,7 @@ sli_res_sli_config(void *buf)
 	if (sli_config->emb) {
 		return sli_config->payload.embed[4];
 	} else {
-		ocs_log_test(NULL, "%s: external buffers not supported\n", __func__);
+		ocs_log_test(NULL, "external buffers not supported\n");
 		return -1;
 	}
 }
@@ -3285,15 +3708,15 @@ sli_common_function_reset(sli4_t *sli4)
 
 	if (sli_cmd_common_function_reset(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE)) {
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (COM_FUNC_RESET)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (COM_FUNC_RESET)\n");
 			return -1;
 		}
 		if (sli_res_sli_config(sli4->bmbx.virt)) {
-			ocs_log_err(sli4->os, "%s: bad status COM_FUNC_RESET\n", __func__);
+			ocs_log_err(sli4->os, "bad status COM_FUNC_RESET\n");
 			return -1;
 		}
 	} else {
-		ocs_log_err(sli4->os, "%s: bad COM_FUNC_RESET write\n", __func__);
+		ocs_log_err(sli4->os, "bad COM_FUNC_RESET write\n");
 		return -1;
 	}
 
@@ -3321,7 +3744,7 @@ sli_wait_for_fw_ready(sli4_t *sli4, uint32_t timeout_ms)
 
 	do {
 		iter--;
-		ocs_udelay(SLI4_INIT_PORT_DELAY_US);	// 10 ms
+		ocs_delay_usec(SLI4_INIT_PORT_DELAY_US);	/* 10 ms */
 		if (sli_fw_ready(sli4) == 1) {
 			ready = TRUE;
 		}
@@ -3351,7 +3774,7 @@ sli_fw_init(sli4_t *sli4)
 	 */
 	ready = sli_wait_for_fw_ready(sli4, SLI4_FW_READY_TIMEOUT_MSEC);
 	if (!ready) {
-		ocs_log_crit(sli4->os, "%s FW status is NOT ready\n", __func__);
+		ocs_log_crit(sli4->os, "FW status is NOT ready\n");
 		return -1;
 	}
 
@@ -3363,26 +3786,27 @@ sli_fw_init(sli4_t *sli4)
 	case SLI4_IF_TYPE_BE3_SKH_VF:
 		/* No SLIPORT_CONTROL register so use command sequence instead */
 		if (sli_bmbx_wait(sli4, SLI4_BMBX_DELAY_US)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox not ready\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox not ready\n");
 			return -1;
 		}
 
 		if (sli_cmd_fw_initialize(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE)) {
 			if (sli_bmbx_command(sli4)) {
-				ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (FW_INIT)\n", __func__);
+				ocs_log_crit(sli4->os, "bootstrap mailbox write fail (FW_INIT)\n");
 				return -1;
 			}
 		} else {
-			ocs_log_crit(sli4->os, "%s: bad FW_INIT write\n", __func__);
+			ocs_log_crit(sli4->os, "bad FW_INIT write\n");
 			return -1;
 		}
 
 		if (sli_common_function_reset(sli4)) {
-			ocs_log_err(sli4->os, "%s: bad COM_FUNC_RESET write\n", __func__);
+			ocs_log_err(sli4->os, "bad COM_FUNC_RESET write\n");
 			return -1;
 		}
 		break;
 	case SLI4_IF_TYPE_LANCER_FC_ETH:
+	case SLI4_IF_TYPE_LANCER_G7:
 #if BYTE_ORDER == LITTLE_ENDIAN
 		endian = SLI4_SLIPORT_CONTROL_LITTLE_ENDIAN;
 #else
@@ -3393,7 +3817,7 @@ sli_fw_init(sli4_t *sli4)
 			return -1;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: if_type %d not supported\n", __func__, sli4->if_type);
+		ocs_log_test(sli4->os, "if_type %d not supported\n", sli4->if_type);
 		return -1;
 	}
 
@@ -3416,22 +3840,22 @@ sli_fw_term(sli4_t *sli4)
 	    sli4->if_type == SLI4_IF_TYPE_BE3_SKH_VF) {
 		/* No SLIPORT_CONTROL register so use command sequence instead */
 		if (sli_bmbx_wait(sli4, SLI4_BMBX_DELAY_US)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox not ready\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox not ready\n");
 			return -1;
 		}
 
 		if (sli_common_function_reset(sli4)) {
-			ocs_log_err(sli4->os, "%s: bad COM_FUNC_RESET write\n", __func__);
+			ocs_log_err(sli4->os, "bad COM_FUNC_RESET write\n");
 			return -1;
 		}
 
 		if (sli_cmd_fw_deinitialize(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE)) {
 			if (sli_bmbx_command(sli4)) {
-				ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (FW_DEINIT)\n", __func__);
+				ocs_log_crit(sli4->os, "bootstrap mailbox write fail (FW_DEINIT)\n");
 				return -1;
 			}
 		} else {
-			ocs_log_test(sli4->os, "%s: bad FW_DEINIT write\n", __func__);
+			ocs_log_test(sli4->os, "bad FW_DEINIT write\n");
 			return -1;
 		}
 	} else {
@@ -3461,11 +3885,19 @@ sli_queue_doorbell(sli4_t *sli4, sli4_queue_t *q)
 
 	switch (q->type) {
 	case SLI_QTYPE_EQ:
-		val = sli_eq_doorbell(q->n_posted, q->id, FALSE);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+			val = sli_iftype6_eq_doorbell(q->n_posted, q->id, FALSE);
+		else
+			val = sli_eq_doorbell(q->n_posted, q->id, FALSE);
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		break;
 	case SLI_QTYPE_CQ:
-		val = sli_cq_doorbell(q->n_posted, q->id, FALSE);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+			val = sli_iftype6_cq_doorbell(q->n_posted, q->id, FALSE);
+		else
+			val = sli_cq_doorbell(q->n_posted, q->id, FALSE);
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		break;
 	case SLI_QTYPE_MQ:
@@ -3509,11 +3941,23 @@ sli_queue_doorbell(sli4_t *sli4, sli4_queue_t *q)
 		break;
 	}
 	case SLI_QTYPE_WQ:
-		val = SLI4_WQ_DOORBELL(q->n_posted, q->index, q->id);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7) {
+			if (q->u.dpp.enabled) {
+				/* Ring the doorbell with dpp bit set + dpp id + q id */
+				val = SLI4_DPP_WQ_DOORBELL(q->n_posted, q->u.dpp.id, q->id);
+			} else {
+				/* non-dpp write for iftype = 6 */
+				val = SLI4_WQ_DOORBELL(q->n_posted, 0, q->id);
+			}
+		} else {
+			/* For iftype = 2 and 3, q->index value is ignored */
+			val = SLI4_WQ_DOORBELL(q->n_posted, q->index, q->id);
+		}
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: bad queue type %d\n", __func__, q->type);
+		ocs_log_test(sli4->os, "bad queue type %d\n", q->type);
 		return -1;
 	}
 
@@ -3523,23 +3967,23 @@ sli_queue_doorbell(sli4_t *sli4, sli4_queue_t *q)
 static int32_t
 sli_request_features(sli4_t *sli4, sli4_features_t *features, uint8_t query)
 {
-
 	if (sli_cmd_request_features(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE,
 				*features, query)) {
 		sli4_cmd_request_features_t *req_features = sli4->bmbx.virt;
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (REQUEST_FEATURES)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (REQUEST_FEATURES)\n");
 			return -1;
 		}
+
 		if (req_features->hdr.status) {
-			ocs_log_err(sli4->os, "%s: REQUEST_FEATURES bad status %#x\n", __func__,
-					req_features->hdr.status);
+			ocs_log_err(sli4->os, "REQUEST_FEATURES bad status %#x\n", req_features->hdr.status);
 			return -1;
 		}
+
 		features->dword = req_features->response.dword;
 	} else {
-		ocs_log_err(sli4->os, "%s: bad REQUEST_FEATURES write\n", __func__);
+		ocs_log_err(sli4->os, "bad REQUEST_FEATURES write\n");
 		return -1;
 	}
 
@@ -3607,12 +4051,12 @@ sli_query_fw_config(sli4_t *sli4)
 			(((uint8_t *)sli4->bmbx.virt) + offsetof(sli4_cmd_sli_config_t, payload.embed));
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (QUERY_FW_CONFIG)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (QUERY_FW_CONFIG)\n");
 			return -1;
 		}
+
 		if (fw_config->hdr.status) {
-			ocs_log_err(sli4->os, "%s: COMMON_QUERY_FW_CONFIG bad status %#x\n", __func__,
-				fw_config->hdr.status);
+			ocs_log_err(sli4->os, "COMMON_QUERY_FW_CONFIG bad status %#x\n", fw_config->hdr.status);
 			return -1;
 		}
 
@@ -3643,12 +4087,13 @@ sli_query_fw_config(sli4_t *sli4)
 			}
 		}
 	} else {
-		ocs_log_err(sli4->os, "%s: bad QUERY_FW_CONFIG write\n", __func__);
+		ocs_log_err(sli4->os, "bad QUERY_FW_CONFIG write\n");
 		return -1;
 	}
 	return 0;
 }
 
+#define SLI4_MIN_XRI_FOR_DISCOVERY 100
 
 static int32_t
 sli_get_config(sli4_t *sli4)
@@ -3664,12 +4109,12 @@ sli_get_config(sli4_t *sli4)
 		uint32_t	total;
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (READ_CONFIG)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (READ_CONFIG)\n");
 			return -1;
 		}
+
 		if (read_config->hdr.status) {
-			ocs_log_err(sli4->os, "%s: READ_CONFIG bad status %#x\n", __func__,
-					read_config->hdr.status);
+			ocs_log_err(sli4->os, "READ_CONFIG bad status %#x\n", read_config->hdr.status);
 			return -1;
 		}
 
@@ -3690,6 +4135,7 @@ sli_get_config(sli4_t *sli4)
 				sli4->config.extent[i].number = 1;
 				sli4->config.extent[i].n_alloc = 0;
 				sli4->config.extent[i].base = &base[i];
+				sli4->config.extent[i].nvme_size = 0;
 			}
 
 			sli4->config.extent[SLI_RSRC_FCOE_VFI].base[0] = read_config->vfi_base;
@@ -3700,15 +4146,22 @@ sli_get_config(sli4_t *sli4)
 
 			sli4->config.extent[SLI_RSRC_FCOE_RPI].base[0] = read_config->rpi_base;
 			sli4->config.extent[SLI_RSRC_FCOE_RPI].size = read_config->rpi_count;
+			sli4->config.extent[SLI_RSRC_FCOE_XRI].base[0] = read_config->xri_base;
+			if (ocs_dual_protocol_enabled(sli4->os)) {
+				sli4->config.extent[SLI_RSRC_FCOE_XRI].size = read_config->xri_count / 2;
+				sli4->config.extent[SLI_RSRC_FCOE_XRI].nvme_size = 
+					read_config->xri_count - sli4->config.extent[SLI_RSRC_FCOE_XRI].size;
+			} else if (ocs_scsi_protocol_enabled(sli4->os)) {	
+				sli4->config.extent[SLI_RSRC_FCOE_XRI].size = read_config->xri_count;
+			} else {
+				/* OCS only used for discovery */
+				sli4->config.extent[SLI_RSRC_FCOE_XRI].size = SLI4_MIN_XRI_FOR_DISCOVERY;
+				sli4->config.extent[SLI_RSRC_FCOE_XRI].nvme_size = 
+					read_config->xri_count - SLI4_MIN_XRI_FOR_DISCOVERY;
+			}
 
-#if defined(OCS_NVME_FC)
-			sli4->config.extent[SLI_RSRC_FCOE_XRI].base[0] = read_config->xri_base;
-			sli4->config.extent[SLI_RSRC_FCOE_XRI].size = read_config->xri_count / 2;
-			printf("SLI4 Xri base = %d cnt  = %d\n", read_config->xri_base, read_config->xri_count);
-#else
-			sli4->config.extent[SLI_RSRC_FCOE_XRI].base[0] = read_config->xri_base;
-			sli4->config.extent[SLI_RSRC_FCOE_XRI].size = read_config->xri_count;
-#endif
+			ocs_log_info(sli4->os, "SLI4 SCSI/DISC Xri base = %d cnt = %d\n",
+				     read_config->xri_base, sli4->config.extent[SLI_RSRC_FCOE_XRI].size);
 
 			sli4->config.extent[SLI_RSRC_FCOE_FCFI].base[0] = 0;
 			sli4->config.extent[SLI_RSRC_FCOE_FCFI].size = read_config->fcfi_count;
@@ -3721,11 +4174,12 @@ sli_get_config(sli4_t *sli4)
 			total = sli4->config.extent[i].number * sli4->config.extent[i].size;
 			sli4->config.extent[i].use_map = ocs_bitmap_alloc(total);
 			if (NULL == sli4->config.extent[i].use_map) {
-				ocs_log_err(sli4->os, "bitmap memory allocation failed "
-						"resource %d\n", i);
+				ocs_log_err(sli4->os, "bitmap memory allocation failed resource %d\n", i);
 				return -1;
 			}
+
 			sli4->config.extent[i].map_size = total;
+			ocs_lock_init(sli4->os, &sli4->config.extent[i].lock, "rsrc_lock-%d", i);
 		}
 
 		sli4->config.topology = read_config->topology;
@@ -3749,6 +4203,15 @@ sli_get_config(sli4_t *sli4)
 		sli4->config.e_d_tov = read_config->e_d_tov;
 		sli4->config.r_a_tov = read_config->r_a_tov;
 
+		if (read_config->bbscn_def) {
+			sli4->config.enable_bbcr = TRUE;
+			sli4->config.bbscn_max = read_config->bbscn_max;
+			sli4->config.bbscn_def = read_config->bbscn_def;
+		}
+
+		ocs_log_debug(sli4->os, "bbscn_max: %d, bbscn_def: %d\n",
+			read_config->bbscn_max, read_config->bbscn_def);
+
 		sli4->config.link_module_type = read_config->lmt;
 
 		sli4->config.max_qcount[SLI_QTYPE_EQ] = read_config->eq_count;
@@ -3763,7 +4226,7 @@ sli_get_config(sli4_t *sli4)
 		 */
 		sli4->config.max_qcount[SLI_QTYPE_MQ] = SLI_USER_MQ_COUNT;
 	} else {
-		ocs_log_err(sli4->os, "%s: bad READ_CONFIG write\n", __func__);
+		ocs_log_err(sli4->os, "bad READ_CONFIG write\n");
 		return -1;
 	}
 
@@ -3772,19 +4235,27 @@ sli_get_config(sli4_t *sli4)
 			(((uint8_t *)sli4->bmbx.virt) + offsetof(sli4_cmd_sli_config_t, payload.embed));
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (COMMON_GET_SLI4_PARAMETERS)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (COMMON_GET_SLI4_PARAMETERS)\n");
 			return -1;
 		} else if (parms->hdr.status) {
-			ocs_log_err(sli4->os, "%s: COMMON_GET_SLI4_PARAMETERS bad status %#x att'l %#x\n", __func__,
+			ocs_log_err(sli4->os, "COMMON_GET_SLI4_PARAMETERS bad status %#x att'l %#x\n",
 					parms->hdr.status, parms->hdr.additional_status);
 			return -1;
 		}
 
 		sli4->config.auto_reg = parms->areg;
 		sli4->config.auto_xfer_rdy = parms->agxf;
+		sli4->config.tow = parms->tow;
+		sli4->config.max_tow_xris = parms->dw20w0;
+
 		sli4->config.hdr_template_req = parms->hdrr;
 		sli4->config.t10_dif_inline_capable = parms->timm;
 		sli4->config.t10_dif_separate_capable = parms->tsmm;
+		sli4->config.fdd_present = parms->fdb;
+
+		sli4->config.xib_capable = parms->xib;
+		sli4->config.suppress_rsp_not_supported = parms->sriuns;
+		sli4->config.nsler_capable = parms->nsler;
 
 		sli4->config.mq_create_version = parms->mqv;
 		sli4->config.cq_create_version = parms->cqv;
@@ -3829,9 +4300,9 @@ sli_get_config(sli4_t *sli4)
 		sli4->config.sgl_chaining_params.chaining_capable =
 			(parms->sglc == 1);
 		sli4->config.sgl_chaining_params.frag_num_field_offset =
-			parms->frag_num_field_offset;
+			parms->dw20w0;
 		sli4->config.sgl_chaining_params.frag_num_field_mask =
-			(1ull << parms->frag_num_field_size) - 1;
+			(1ull << parms->dw20w1) - 1;
 		sli4->config.sgl_chaining_params.sgl_index_field_offset =
 			parms->sgl_index_field_offset;
 		sli4->config.sgl_chaining_params.sgl_index_field_mask =
@@ -3840,16 +4311,16 @@ sli_get_config(sli4_t *sli4)
 			parms->chain_sge_initial_value_lo;
 		sli4->config.sgl_chaining_params.chain_sge_initial_value_hi =
 			parms->chain_sge_initial_value_hi;
-		/* Use the highest available WQE size. */
-		if (parms->wqe_sizes & SLI4_128BYTE_WQE_SUPPORT) {
+
+		/* Use the highest available WQE size */
+		if (parms->wqe_sizes & SLI4_128BYTE_WQE_SUPPORT)
 			sli4->config.wqe_size = SLI4_WQE_EXT_BYTES;
-		} else {
+		else
 			sli4->config.wqe_size = SLI4_WQE_BYTES;
-		}
 	}
 
 	if (sli_query_fw_config(sli4)) {
-		ocs_log_err(sli4->os, "%s: Error sending QUERY_FW_CONFIG\n", __func__);
+		ocs_log_err(sli4->os, "Error sending QUERY_FW_CONFIG\n");
 		return -1;
 	}
 
@@ -3864,30 +4335,21 @@ sli_get_config(sli4_t *sli4)
 		sli4_res_common_get_cntl_attributes_t *attr = sli4->vpd.data.virt;
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (COMMON_GET_CNTL_ATTRIBUTES)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (COMMON_GET_CNTL_ATTRIBUTES)\n");
 			return -1;
 		} else if (attr->hdr.status) {
-			ocs_log_err(sli4->os, "%s: COMMON_GET_CNTL_ATTRIBUTES bad status %#x att'l %#x\n", __func__,
+			ocs_log_err(sli4->os, "COMMON_GET_CNTL_ATTRIBUTES bad status %#x att'l %#x\n",
 					attr->hdr.status, attr->hdr.additional_status);
 			return -1;
 		}
 
 		sli4->config.port_number = attr->port_number;
 
+		ocs_memcpy(sli4->config.modeldesc, attr->description, sizeof(sli4->config.modeldesc));
 		ocs_memcpy(sli4->config.bios_version_string, attr->bios_version_string,
 				sizeof(sli4->config.bios_version_string));
-
-		ocs_memcpy(sli4->config.description, attr->description,
-			sizeof(sli4->config.description));
-
-		ocs_memcpy(sli4->config.model, attr->model_number,
-				sizeof(sli4->config.model));
-
-		ocs_memcpy(sli4->config.serial_number, attr->serial_number,
-				sizeof(sli4->config.serial_number));
-
 	} else {
-		ocs_log_err(sli4->os, "%s: bad COMMON_GET_CNTL_ATTRIBUTES write\n", __func__);
+		ocs_log_err(sli4->os, "bad COMMON_GET_CNTL_ATTRIBUTES write\n");
 		return -1;
 	}
 
@@ -3900,14 +4362,12 @@ sli_get_config(sli4_t *sli4)
 			sli4_res_common_get_cntl_addl_attributes_t *attr = get_cntl_addl_data.virt;
 
 			if (sli_bmbx_command(sli4)) {
-				ocs_log_crit(sli4->os,
-					     "%s: bootstrap mailbox write fail (COMMON_GET_CNTL_ADDL_ATTRIBUTES)\n",
-					     __func__);
+				ocs_log_crit(sli4->os, "bootstrap mailbox write fail (COMMON_GET_CNTL_ADDL_ATTRIBUTES)\n");
 				ocs_dma_free(sli4->os, &get_cntl_addl_data);
 				return -1;
 			}
 			if (attr->hdr.status) {
-				ocs_log_err(sli4->os, "%s: COMMON_GET_CNTL_ADDL_ATTRIBUTES bad status %#x\n", __func__,
+				ocs_log_err(sli4->os, "COMMON_GET_CNTL_ADDL_ATTRIBUTES bad status %#x\n",
 					    attr->hdr.status);
 				ocs_dma_free(sli4->os, &get_cntl_addl_data);
 				return -1;
@@ -3917,7 +4377,7 @@ sli_get_config(sli4_t *sli4)
 
 			ocs_log_debug(sli4->os, "IPL:%s \n", (char*)sli4->config.ipl_name);
 		} else {
-			ocs_log_err(sli4->os, "%s: bad COMMON_GET_CNTL_ADDL_ATTRIBUTES write\n", __func__);
+			ocs_log_err(sli4->os, "bad COMMON_GET_CNTL_ADDL_ATTRIBUTES write\n");
 			ocs_dma_free(sli4->os, &get_cntl_addl_data);
 			return -1;
 		}
@@ -3930,7 +4390,7 @@ sli_get_config(sli4_t *sli4)
 			offsetof(sli4_cmd_sli_config_t, payload.embed));
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (COMMON_GET_PORT_NAME)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (COMMON_GET_PORT_NAME)\n");
 			return -1;
 		}
 
@@ -3942,12 +4402,11 @@ sli_get_config(sli4_t *sli4)
 		sli4_cmd_read_rev_t	*read_rev = sli4->bmbx.virt;
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (READ_REV)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (READ_REV)\n");
 			return -1;
 		}
 		if (read_rev->hdr.status) {
-			ocs_log_err(sli4->os, "%s: READ_REV bad status %#x\n", __func__,
-					read_rev->hdr.status);
+			ocs_log_err(sli4->os, "READ_REV bad status %#x\n", read_rev->hdr.status);
 			return -1;
 		}
 
@@ -3977,7 +4436,7 @@ sli_get_config(sli4_t *sli4)
 		}
 		sli4->vpd.length = read_rev->returned_vpd_length;
 	} else {
-		ocs_log_err(sli4->os, "%s: bad READ_REV write\n", __func__);
+		ocs_log_err(sli4->os, "bad READ_REV write\n");
 		return -1;
 	}
 
@@ -3985,12 +4444,11 @@ sli_get_config(sli4_t *sli4)
 		sli4_cmd_read_nvparms_t	*read_nvparms = sli4->bmbx.virt;
 
 		if (sli_bmbx_command(sli4)) {
-			ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (READ_NVPARMS)\n", __func__);
+			ocs_log_crit(sli4->os, "bootstrap mailbox write fail (READ_NVPARMS)\n");
 			return -1;
 		}
 		if (read_nvparms->hdr.status) {
-			ocs_log_err(sli4->os, "%s: READ_NVPARMS bad status %#x\n", __func__,
-					read_nvparms->hdr.status);
+			ocs_log_err(sli4->os, "READ_NVPARMS bad status %#x\n", read_nvparms->hdr.status);
 			return -1;
 		}
 
@@ -4016,7 +4474,7 @@ sli_get_config(sli4_t *sli4)
 				sli4->config.wwnn[6],
 				sli4->config.wwnn[7]);
 	} else {
-		ocs_log_err(sli4->os, "%s: bad READ_NVPARMS write\n", __func__);
+		ocs_log_err(sli4->os, "bad READ_NVPARMS write\n");
 		return -1;
 	}
 
@@ -4040,12 +4498,13 @@ sli_get_config(sli4_t *sli4)
 int32_t
 sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 {
-	uint32_t sli_intf = UINT32_MAX;
-	uint32_t pci_class_rev = 0;
-	uint32_t rev_id = 0;
-	uint32_t family = 0;
+	uint32_t sli_intf;
+	uint32_t pci_class_rev;
+	uint32_t family;
+	sli4_asic_family_t *asic_family;
+	sli4_asic_revision_t *asic_revision;
+	uint8_t rev_id;
 	uint32_t i;
-	sli4_asic_entry_t *asic;
 
 	ocs_memset(sli4, 0, sizeof(sli4_t));
 
@@ -4057,7 +4516,6 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 	 * and other capability information
 	 */
 	sli_intf = ocs_config_read32(os, SLI4_INTF_REG);
-
 	if (sli_intf_valid_check(sli_intf)) {
 		ocs_log_err(os, "SLI_INTF is not valid\n");
 		return -1;
@@ -4066,21 +4524,12 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 	/* driver only support SLI-4 */
 	sli4->sli_rev = sli_intf_sli_revision(sli_intf);
 	if (4 != sli4->sli_rev) {
-		ocs_log_err(os, "Unsupported SLI revision (intf=%#x)\n",
-				sli_intf);
+		ocs_log_err(os, "Unsupported SLI revision (intf=%#x)\n", sli_intf);
 		return -1;
 	}
 
 	sli4->sli_family = sli_intf_sli_family(sli_intf);
-
 	sli4->if_type = sli_intf_if_type(sli_intf);
-
-	if (SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type) {
-		ocs_log_debug(os, "status=%#x error1=%#x error2=%#x\n",
-				sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS),
-				sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR1),
-				sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR2));
-	}
 
 	/*
 	 * set the ASIC type and revision
@@ -4093,17 +4542,26 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 		family = sli_asic_gen(asic_id);
 	}
 
-	for (i = 0, asic = sli4_asic_table; i < ARRAY_SIZE(sli4_asic_table); i++, asic++) {
-		if ((rev_id == asic->rev_id) && (family == asic->family)) {
-			sli4->asic_type = asic->type;
-			sli4->asic_rev = asic->rev;
+	for (i = 0, asic_family = sli4_asic_family_table;
+	     i < ARRAY_SIZE(sli4_asic_family_table); i++, asic_family++) {
+		if (family == asic_family->family) {
+			sli4->asic_type = asic_family->type;
 			break;
 		}
 	}
-	/* Fail if no matching asic type/rev was found */
-	if( (sli4->asic_type == 0) || (sli4->asic_rev == 0)) {
-		ocs_log_err(os, "no matching asic family/rev found: %02x/%02x\n", family, rev_id);
+
+	if (!sli4->asic_type) {
+		ocs_log_err(os, "Unsupported ASIC family %02x-%02x\n", family, rev_id);
 		return -1;
+	}
+
+	sli4->asic_rev = SLI4_ASIC_REV_ANY;
+	for (i = 0, asic_revision = sli4_asic_rev_table;
+	     i < ARRAY_SIZE(sli4_asic_rev_table); i++, asic_revision++) {
+		if (rev_id == asic_revision->rev_id) {
+			sli4->asic_rev = asic_revision->rev;
+			break;
+		}
 	}
 
 	/*
@@ -4140,6 +4598,23 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 		return -1;
 	}
 
+	if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type) ||
+	    (SLI4_IF_TYPE_LANCER_G7 == sli4->if_type)) {
+		ocs_log_debug(os, "status=%#x error1=%#x error2=%#x\n",
+				sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS),
+				sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR1),
+				sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR2));
+	}
+
+	/*
+	 * Set SRIOV default config, if requested.
+	 * This command must be the first command to be executed.
+	 */
+	if (ocs_sriov_config_required(sli4->os) && sli_sriov_setup(sli4)) {
+		ocs_log_err(sli4->os, "SRIOV setup failed\n");
+		return -1;
+	}
+
 	/*
 	 * Set one of fcpi(initiator), fcpt(target), fcpc(combined) to true
 	 * in addition to any other desired features
@@ -4155,6 +4630,7 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 	sli4->config.features.flag.rxseq = TRUE;
 	sli4->config.features.flag.rxri = TRUE;
 	sli4->config.features.flag.mrqp = TRUE;
+	sli4->config.features.flag.ashdr = TRUE;
 
 	// use performance hints if available
 	if (sli4->config.perf_hint) {
@@ -4172,25 +4648,34 @@ sli_setup(sli4_t *sli4, ocs_os_handle_t os, sli4_port_type_e port_type)
 	return 0;
 }
 
+bool
+sli_feature_enabled(sli4_t *sli4, uint32_t feature)
+{
+	return (sli4->config.features.dword & feature);
+}
+
+void
+sli_config_set_features(sli4_t *sli4, uint32_t features)
+{
+	sli4->config.features.dword = features;
+}
+
+uint32_t
+sli_config_get_features(sli4_t *sli4)
+{
+	return sli4->config.features.dword;
+}
+
 int32_t
 sli_init(sli4_t *sli4)
 {
-
 	if (sli4->config.has_extents) {
-		/* TODO COMMON_ALLOC_RESOURCE_EXTENTS */;
-		ocs_log_test(sli4->os, "XXX need to implement extent allocation\n");
+		/* TODO COMMON_ALLOC_RESOURCE_EXTENTS */
+		ocs_log_warn(sli4->os, "Need to implement extent allocation\n");
 		return -1;
 	}
 
-	sli4->config.features.flag.hlm = sli4->config.high_login_mode;
-	sli4->config.features.flag.rxseq = FALSE;
-	sli4->config.features.flag.rxri  = FALSE;
-
-	if (sli_request_features(sli4, &sli4->config.features, FALSE)) {
-		return -1;
-	}
-
-	return 0;
+	return sli_request_features(sli4, &sli4->config.features, false);
 }
 
 int32_t
@@ -4213,12 +4698,13 @@ sli_reset(sli4_t *sli4)
 			ocs_bitmap_free(sli4->config.extent[i].use_map);
 			sli4->config.extent[i].use_map = NULL;
 		}
+
 		sli4->config.extent[i].base = NULL;
+		ocs_lock_free(&sli4->config.extent[i].lock);
 	}
 
-	if (sli_get_config(sli4)) {
+	if (sli_get_config(sli4))
 		return -1;
-	}
 
 	return 0;
 }
@@ -4250,7 +4736,7 @@ sli_fw_reset(sli4_t *sli4)
 	 */
 	ready = sli_wait_for_fw_ready(sli4, SLI4_FW_READY_TIMEOUT_MSEC);
 	if (!ready) {
-		ocs_log_crit(sli4->os, "%s FW status is NOT ready\n", __func__);
+		ocs_log_crit(sli4->os, "FW status is NOT ready\n");
 		return -1;
 	}
 	switch(sli4->if_type) {
@@ -4261,6 +4747,7 @@ sli_fw_reset(sli4_t *sli4)
 		ocs_config_write32(sli4->os, SLI4_PCI_SOFT_RESET_CSR, val);
 		break;
 	case SLI4_IF_TYPE_LANCER_FC_ETH:
+	case SLI4_IF_TYPE_LANCER_G7:
 		/* Lancer uses PHYDEV_CONTROL */
 
 		val = SLI4_PHYDEV_CONTROL_FRST;
@@ -4281,6 +4768,40 @@ sli_fw_reset(sli4_t *sli4)
 	return 0;
 }
 
+int32_t
+sli_port_migration(sli4_t *sli4)
+{
+	uint32_t ready;
+	uint32_t val;
+
+	/*
+	 * Firmware must be ready before setting port migration.
+	 */
+	ready = sli_wait_for_fw_ready(sli4, SLI4_FW_READY_TIMEOUT_MSEC);
+	if (!ready) {
+		ocs_log_crit(sli4->os, "FW status is NOT ready\n");
+		return -1;
+	}
+
+	switch (sli4->if_type) {
+	case SLI4_IF_TYPE_LANCER_G7:
+		val = BIT(SLI4_PORT_MIGRATION_BIT + sli4->physical_port);
+		ocs_log_debug(sli4->os, "PM: Setting SLI4_REG_PHYSDEV_CONTROL to val: 0x%x\n", val);
+		sli_reg_write(sli4, SLI4_REG_PHYSDEV_CONTROL, val);
+		break;
+	default:
+		ocs_log_test(sli4->os, "Unexpected iftype %d\n", sli4->if_type);
+		return -1;
+	}
+
+	/* wait for the FW to become ready after the reset */
+	ready = sli_wait_for_fw_ready(sli4, SLI4_FW_READY_TIMEOUT_MSEC);
+	if (!ready) {
+		ocs_log_crit(sli4->os, "Failed to become ready after firmware reset\n");
+	}
+
+	return 0;
+}
 /**
  * @ingroup sli
  * @brief Tear down a SLI context.
@@ -4305,14 +4826,13 @@ sli_teardown(sli4_t *sli4)
 		}
 
 		sli4->config.extent[i].base = NULL;
-
 		ocs_bitmap_free(sli4->config.extent[i].use_map);
 		sli4->config.extent[i].use_map = NULL;
+		ocs_lock_free(&sli4->config.extent[i].lock);
 	}
 
-	if (sli_fw_term(sli4)) {
+	if (sli_fw_term(sli4))
 		ocs_log_err(sli4->os, "FW deinitialization failed\n");
-	}
 
 	ocs_dma_free(sli4->os, &sli4->vpd.data);
 	ocs_dma_free(sli4->os, &sli4->bmbx);
@@ -4336,8 +4856,7 @@ sli_callback(sli4_t *sli4, sli4_callback_e which, void *func, void *arg)
 {
 
 	if (!sli4 || !func || (which >= SLI4_CB_MAX)) {
-		ocs_log_err(NULL, "%s bad parameter sli4=%p which=%#x func=%p\n",
-				__func__, sli4, which, func);
+		ocs_log_err(NULL, "bad parameter sli4=%p which=%#x func=%p\n", sli4, which, func);
 		return -1;
 	}
 
@@ -4350,12 +4869,89 @@ sli_callback(sli4_t *sli4, sli4_callback_e which, void *func, void *arg)
 		sli4->fip = func;
 		sli4->fip_arg = arg;
 		break;
+	case SLI4_CB_ERR:
+		sli4->reset_pending = func;
+		sli4->reset_pending_arg = arg;
+		break;
 	default:
 		ocs_log_test(sli4->os, "unknown callback %#x\n", which);
 		return -1;
 	}
 
 	return 0;
+}
+
+int32_t
+sli_queue_dma_free(sli4_t *sli4, sli4_queue_t *q)
+{
+	int32_t rc = 0;
+	uint32_t i;
+
+#if defined(OCS_USPACE_SPDK)
+	for (i = 0; i < SLI_Q_DMA_CHUNKS && q->dma[i].virt; i++) {
+		q->dma[i].virt = NULL;
+		q->dma[i].phys = 0;
+		q->dma[i].size = 0;
+	}
+
+	if (q->dma_single_chunk.virt) {
+		if (ocs_dma_free(sli4->os, &q->dma_single_chunk)) {
+			ocs_log_err(sli4->os, "%s queue ID %d DMA free failed\n", SLI_QNAME[q->type], q->id);
+			rc = -1;
+		}
+	}
+#else
+	for (i = 0; i < SLI_Q_DMA_CHUNKS && q->dma[i].virt; i++) {
+		if (ocs_dma_free(sli4->os, &q->dma[i])) {
+			ocs_log_err(sli4->os, "%s queue ID %d DMA[%d] free failed\n", SLI_QNAME[q->type], q->id, i);
+			rc = -1;
+		}
+	}
+#endif
+
+	return rc;
+}
+
+static int32_t
+sli_queue_dma_alloc(sli4_t *sli4, sli4_queue_t *q, size_t qmem_size, uint32_t qtype, uint32_t align)
+{
+	int32_t rc = 0;
+	uint32_t i, qpage_size, num_dma_chunks;
+
+	qpage_size = sli_get_qpage_size(qmem_size);
+	num_dma_chunks = sli_page_count(qmem_size, qpage_size);
+
+#if defined(OCS_USPACE_SPDK)
+	if (ocs_dma_alloc(sli4->os, &q->dma_single_chunk, qmem_size, align)) {
+		ocs_log_err(sli4->os, "%s DMA allocation failed\n", SLI_QNAME[qtype]);
+		rc = -1;
+		goto dma_err;
+	}
+
+	ocs_memset(q->dma_single_chunk.virt, 0, qmem_size);
+
+	for (i = 0; i < num_dma_chunks; i++) {
+		q->dma[i].virt = q->dma_single_chunk.virt + i * qpage_size;
+		q->dma[i].phys = q->dma_single_chunk.phys + i * qpage_size;
+		q->dma[i].size = qpage_size;
+	}
+#else
+	for (i = 0; i < num_dma_chunks; i++) {
+		if (ocs_dma_alloc(sli4->os, &q->dma[i], qpage_size, align)) {
+			ocs_log_err(sli4->os, "%s DMA[%d] allocation failed\n", SLI_QNAME[qtype], i);
+			rc = -1;
+			goto dma_err;
+		}
+
+		ocs_memset(q->dma[i].virt, 0, qpage_size);
+	}
+#endif
+
+dma_err:
+	if (rc)
+		sli_queue_dma_free(sli4, q);
+
+	return rc;
 }
 
 /**
@@ -4382,20 +4978,17 @@ int32_t
 __sli_queue_init(sli4_t *sli4, sli4_queue_t *q, uint32_t qtype,
 		size_t size, uint32_t n_entries, uint32_t align)
 {
+	if ((!q->dma[0].size) || (size != q->size) || (n_entries != q->length)) {
+		size_t qmem_size = (size * n_entries);
 
-	if ((q->dma.virt == NULL) || (size != q->size) || (n_entries != q->length)) {
-		if (q->dma.size) {
-			ocs_dma_free(sli4->os, &q->dma);
-		}
+		/* 'qmem_size' should be power of 2 */
+		ocs_hal_assert(ocs_power_of_2(qmem_size));
 
+		sli_queue_dma_free(sli4, q);
 		ocs_memset(q, 0, sizeof(sli4_queue_t));
 
-		if (ocs_dma_alloc(sli4->os, &q->dma, size * n_entries, align)) {
-			ocs_log_err(sli4->os, "%s allocation failed\n", SLI_QNAME[qtype]);
+		if (sli_queue_dma_alloc(sli4, q, qmem_size, qtype, align))
 			return -1;
-		}
-
-		ocs_memset(q->dma.virt, 0, size * n_entries);
 
 		ocs_lock_init(sli4->os, &q->lock, "%s lock[%d]", SLI_QNAME[qtype], ocs_instance(sli4->os));
 
@@ -4405,6 +4998,11 @@ __sli_queue_init(sli4_t *sli4, sli4_queue_t *q, uint32_t qtype,
 
 		/* Limit to half the queue size per interrupt */
 		q->proc_limit = n_entries / 2;
+
+		if ((q->type == SLI_QTYPE_EQ) || (q->type == SLI_QTYPE_CQ)) {
+			/* For prism, phase will be flipped after a sweep through eq and cq */
+			q->phase = 1;
+		}
 
 		switch(q->type) {
 		case SLI_QTYPE_EQ:
@@ -4438,42 +5036,39 @@ int32_t
 __sli_create_queue(sli4_t *sli4, sli4_queue_t *q)
 {
 	sli4_res_common_create_queue_t *res_q = NULL;
+	sli4_res_create_wq_t *wq_res_q = NULL;
 
 	if (sli_bmbx_command(sli4)){
-		ocs_log_crit(sli4->os, "bootstrap mailbox write fail %s\n",
-				SLI_QNAME[q->type]);
-		ocs_dma_free(sli4->os, &q->dma);
+		ocs_log_crit(sli4->os, "bootstrap mailbox write fail %s\n", SLI_QNAME[q->type]);
+		sli_queue_dma_free(sli4, q);
 		return -1;
 	}
 	if (sli_res_sli_config(sli4->bmbx.virt)) {
 		ocs_log_err(sli4->os, "bad status create %s\n", SLI_QNAME[q->type]);
-		ocs_dma_free(sli4->os, &q->dma);
+		sli_queue_dma_free(sli4, q);
 		return -1;
 	}
 	res_q = (void *)((uint8_t *)sli4->bmbx.virt +
 			offsetof(sli4_cmd_sli_config_t, payload));
 
 	if (res_q->hdr.status) {
-		ocs_log_err(sli4->os, "bad create %s status=%#x addl=%#x\n",
-				SLI_QNAME[q->type],
+		ocs_log_err(sli4->os, "bad create %s status=%#x addl=%#x\n", SLI_QNAME[q->type],
 				res_q->hdr.status, res_q->hdr.additional_status);
-		ocs_dma_free(sli4->os, &q->dma);
+		sli_queue_dma_free(sli4, q);
 		return -1;
 	} else {
 		q->id = res_q->q_id;
-		q->doorbell_offset = res_q->db_offset;
-		q->doorbell_rset = res_q->db_rs;
 
 		switch (q->type) {
 		case SLI_QTYPE_EQ:
 			/* No doorbell information in response for EQs */
-			q->doorbell_offset = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].off;
-			q->doorbell_rset = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].rset;
+			q->doorbell_offset = regmap[SLI4_REG_EQ_DOORBELL][sli4->if_type].off;
+			q->doorbell_rset = regmap[SLI4_REG_EQ_DOORBELL][sli4->if_type].rset;
 			break;
 		case SLI_QTYPE_CQ:
 			/* No doorbell information in response for CQs */
-			q->doorbell_offset = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].off;
-			q->doorbell_rset = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].rset;
+			q->doorbell_offset = regmap[SLI4_REG_CQ_DOORBELL][sli4->if_type].off;
+			q->doorbell_rset = regmap[SLI4_REG_CQ_DOORBELL][sli4->if_type].rset;
 			break;
 		case SLI_QTYPE_MQ:
 			/* No doorbell information in response for MQs */
@@ -4481,17 +5076,41 @@ __sli_create_queue(sli4_t *sli4, sli4_queue_t *q)
 			q->doorbell_rset = regmap[SLI4_REG_MQ_DOORBELL][sli4->if_type].rset;
 			break;
 		case SLI_QTYPE_RQ:
-			/* set the doorbell for non-skyhawks */
 			if (!sli4->config.dual_ulp_capable) {
+				/* set the doorbell for non-skyhawks */
 				q->doorbell_offset = regmap[SLI4_REG_FCOE_RQ_DOORBELL][sli4->if_type].off;
 				q->doorbell_rset = regmap[SLI4_REG_FCOE_RQ_DOORBELL][sli4->if_type].rset;
+			} else {
+				q->doorbell_offset = res_q->db_offset;
+				q->doorbell_rset = res_q->db_rs;
 			}
 			break;
 		case SLI_QTYPE_WQ:
-			/* set the doorbell for non-skyhawks */
+			wq_res_q = (sli4_res_create_wq_t *) res_q;
+			q->sfq_resp = wq_res_q->sfq;
+
+			if (sli4->config.dpp) {
+				q->u.dpp.enabled = wq_res_q->dpp;
+				/* Check if dpp is enabled */
+				if (wq_res_q->dpp) {
+					q->doorbell_rset = wq_res_q->wq_reg_set;
+					q->doorbell_offset = wq_res_q->wq_db_offset;
+					q->u.dpp.id = wq_res_q->dpp_id;
+					q->u.dpp.db_offset = wq_res_q->dpp_offset;
+					q->u.dpp.db_rset = wq_res_q->dpp_reg_set;
+					ocs_log_info(sli4->os, "DPP WQ Create success dpp_id = %d \n",
+						     wq_res_q->dpp_id);
+					break;
+				}
+			}
+			/* DPP Not enabled. Set the regualr wq doorbell register and offset */
 			if (!sli4->config.dual_ulp_capable) {
+				/* set the doorbell for non-skyhawks */
 				q->doorbell_offset = regmap[SLI4_REG_IO_WQ_DOORBELL][sli4->if_type].off;
 				q->doorbell_rset = regmap[SLI4_REG_IO_WQ_DOORBELL][sli4->if_type].rset;
+			} else {
+				q->doorbell_offset = res_q->db_offset;
+				q->doorbell_rset = res_q->db_rs;
 			}
 			break;
 		default:
@@ -4519,25 +5138,25 @@ sli_get_queue_entry_size(sli4_t *sli4, uint32_t qtype)
 	uint32_t	size = 0;
 
 	if (!sli4) {
-		ocs_log_err(NULL, "%s: bad parameter sli4=%p\n", __func__, sli4);
+		ocs_log_err(NULL, "bad parameter sli4=%p\n", sli4);
 		return -1;
 	}
 
 	switch (qtype) {
 	case SLI_QTYPE_EQ:
-		size = sizeof(uint32_t);
+		size = SLI4_EQE_BYTES;
 		break;
 	case SLI_QTYPE_CQ:
-		size = 16;
+		size = SLI4_CQE_BYTES;
 		break;
 	case SLI_QTYPE_MQ:
-		size = 256;
+		size = SLI4_MQE_BYTES;
 		break;
 	case SLI_QTYPE_WQ:
 		if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 			size = sli4->config.wqe_size;
 		} else {
-			// TODO
+			/* TODO */
 			ocs_log_test(sli4->os, "unsupported queue entry size\n");
 			return -1;
 		}
@@ -4571,11 +5190,11 @@ sli_eq_modify_delay(sli4_t *sli4, sli4_queue_t *eq, uint32_t num_eq, uint32_t sh
 	sli_cmd_common_modify_eq_delay(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, eq, num_eq, shift, delay_mult);
 
 	if (sli_bmbx_command(sli4)) {
-		ocs_log_crit(sli4->os, "%s: bootstrap mailbox write fail (MODIFY EQ DELAY)\n", __func__);
+		ocs_log_crit(sli4->os, "bootstrap mailbox write fail (MODIFY EQ DELAY)\n");
 		return -1;
 	}
 	if (sli_res_sli_config(sli4->bmbx.virt)) {
-		ocs_log_err(sli4->os, "%s: bad status MODIFY EQ DELAY\n", __func__);
+		ocs_log_err(sli4->os, "bad status MODIFY EQ DELAY\n");
 		return -1;
 	}
 
@@ -4595,19 +5214,19 @@ sli_eq_modify_delay(sli4_t *sli4, sli4_queue_t *eq, uint32_t num_eq, uint32_t sh
  * @param n_entries Number of entries to allocate.
  * @param assoc Associated queue (that is, the EQ for a CQ, the CQ for a MQ, and so on).
  * @param ulp The ULP to bind, which is only used for WQ and RQs
+ * @param sfq Send Frame WQ, valid for WQ creation only
  *
  * @return Returns 0 on success, or -1 otherwise.
  */
 int32_t
 sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entries,
-		sli4_queue_t *assoc, uint16_t ulp)
+		sli4_queue_t *assoc, uint16_t ulp, bool sfq)
 {
 	int32_t		size;
-	uint32_t	align = 0;
 	sli4_create_q_fn_t create = NULL;
 
 	if (!sli4 || !q) {
-		ocs_log_err(NULL, "%s: bad parameter sli4=%p q=%p\n", __func__, sli4, q);
+		ocs_log_err(NULL, "bad parameter sli4=%p q=%p\n", sli4, q);
 		return -1;
 	}
 
@@ -4615,7 +5234,6 @@ sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entrie
 	size = sli_get_queue_entry_size(sli4, qtype);
 	if (size < 0)
 		return -1;
-	align = SLI_PAGE_SIZE;
 
 	switch (qtype) {
 	case SLI_QTYPE_EQ:
@@ -4625,17 +5243,6 @@ sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entrie
 		create = sli_cmd_common_create_cq;
 		break;
 	case SLI_QTYPE_MQ:
-		/* Validate the number of entries */
-		switch (n_entries) {
-		case 16:
-		case 32:
-		case 64:
-		case 128:
-			break;
-		default:
-			ocs_log_test(sli4->os, "illegal n_entries value %d for MQ\n", n_entries);
-			return -1;
-		}
 		assoc->u.flag.is_mq = TRUE;
 		create = sli_cmd_common_create_mq_ext;
 		break;
@@ -4647,7 +5254,7 @@ sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entrie
 				create = sli_cmd_fcoe_wq_create_v1;
 			}
 		} else {
-			// TODO
+			/* TODO */
 			ocs_log_test(sli4->os, "unsupported WQ create\n");
 			return -1;
 		}
@@ -4658,12 +5265,13 @@ sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entrie
 	}
 
 
-	if (__sli_queue_init(sli4, q, qtype, size, n_entries, align)) {
+	if (__sli_queue_init(sli4, q, qtype, size, n_entries, SLI_PAGE_SIZE)) {
 		ocs_log_err(sli4->os, "%s allocation failed\n", SLI_QNAME[qtype]);
 		return -1;
 	}
 
-	if (create(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, &q->dma, assoc ? assoc->id : 0, ulp)) {
+	if (create(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, q->dma,
+		   assoc ? assoc->id : 0, ulp, sfq)) {
 
 		if (__sli_create_queue(sli4, q)) {
 			ocs_log_err(sli4->os, "create %s failed\n", SLI_QNAME[qtype]);
@@ -4693,48 +5301,38 @@ sli_queue_alloc(sli4_t *sli4, uint32_t qtype, sli4_queue_t *q, uint32_t n_entrie
  */
 int32_t
 sli_cq_alloc_set(sli4_t *sli4, sli4_queue_t *qs[], uint32_t num_cqs,
-		 uint32_t n_entries, sli4_queue_t *eqs[])
+			uint32_t n_entries, sli4_queue_t *eqs[])
 {
-	uint32_t i, offset = 0,  page_bytes = 0, payload_size, cmd_size = 0;
-	uint32_t p = 0, page_size = 0, n_cqe = 0, num_pages_cq;
-	uintptr_t addr;
-	ocs_dma_t dma;
-	sli4_req_common_create_cq_set_v0_t  *req = NULL;
+	sli4_req_common_create_cq_set_v0_t *req = NULL;
 	sli4_res_common_create_queue_set_t *res = NULL;
+	uint32_t	i, p, offset = 0;
+	uint32_t	cmd_size, payload_size;
+	uint32_t	num_pages_cq;
+	uintptr_t	addr;
+	ocs_dma_t	dma;
+	size_t		qmem_size;
+	uint32_t	qpage_size;
 
 	if (!sli4) {
-		ocs_log_err(NULL, "%s: bad parameter sli4=%p\n", __func__, sli4);
+		ocs_log_err(NULL, "bad parameter sli4=%p\n", sli4);
 		return -1;
 	}
 
+	ocs_memset(&dma, 0, sizeof(dma));
+
 	/* Align the queue DMA memory */
 	for (i = 0; i < num_cqs; i++) {
-		if (__sli_queue_init(sli4, qs[i], SLI_QTYPE_CQ, SLI4_CQE_BYTES,
-			n_entries, SLI_PAGE_SIZE)) {
-			ocs_log_err(sli4->os, "%s: Queue init failed.\n", __func__);
+		if (__sli_queue_init(sli4, qs[i], SLI_QTYPE_CQ, SLI4_CQE_BYTES, n_entries, SLI_PAGE_SIZE)) {
+			ocs_log_err(sli4->os, "Queue init failed\n");
 			goto error;
 		}
 	}
 
-	n_cqe = qs[0]->dma.size / SLI4_CQE_BYTES;
-	switch (n_cqe) {
-	case 256:
-	case 512:
-	case 1024:
-	case 2048:
-		page_size = 1;
-		break;
-	case 4096:
-		page_size = 2;
-		break;
-	default:
-		return -1;
-	}
-
-	page_bytes = page_size * SLI_PAGE_SIZE;
-	num_pages_cq = sli_page_count(qs[0]->dma.size, page_bytes);
-	cmd_size = sizeof(sli4_req_common_create_cq_set_v0_t) + (8 * num_pages_cq * num_cqs);
-	payload_size = max((size_t)cmd_size, sizeof(sli4_res_common_create_queue_set_t));
+	qmem_size = sli_get_qmem_size(qs[0]->dma);
+	qpage_size = sli_get_qpage_size(qmem_size);
+	num_pages_cq = sli_page_count(qmem_size, qpage_size);
+	cmd_size = (sizeof(sli4_req_common_create_cq_set_v0_t) + (8 * num_pages_cq * num_cqs));
+	payload_size = OCS_MAX((size_t)cmd_size, sizeof(sli4_res_common_create_queue_set_t));
 
 	if (ocs_dma_alloc(sli4->os, &dma, payload_size, SLI_PAGE_SIZE)) {
 		ocs_log_err(sli4->os, "DMA allocation failed\n");
@@ -4742,19 +5340,19 @@ sli_cq_alloc_set(sli4_t *sli4, sli4_queue_t *qs[], uint32_t num_cqs,
 	}
 	ocs_memset(dma.virt, 0, payload_size);
 
-	if (sli_cmd_sli_config(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE,
-			payload_size, &dma) == -1) {
+	if (sli_cmd_sli_config(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, payload_size, &dma) == -1) {
 		goto error;
 	}
 
 	/* Fill the request structure */
-
 	req = (sli4_req_common_create_cq_set_v0_t *)((uint8_t *)dma.virt);
 	req->hdr.opcode = SLI4_OPC_COMMON_CREATE_CQ_SET;
 	req->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
 	req->hdr.version = 0;
 	req->hdr.request_length = cmd_size - sizeof(sli4_req_hdr_t);
-	req->page_size = page_size;
+
+	/* Fill the page_size_multiplier */
+	req->page_size = (qpage_size / SLI_PAGE_SIZE);
 
 	req->num_pages = num_pages_cq;
 	switch (req->num_pages) {
@@ -4769,10 +5367,10 @@ sli_cq_alloc_set(sli4_t *sli4, sli4_queue_t *qs[], uint32_t num_cqs,
 		break;
 	case 8:
 		req->cqecnt = SLI4_CQ_CNT_LARGE;
-		req->cqe_count = n_cqe;
+		req->cqe_count = (qmem_size / SLI4_CQE_BYTES);
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: num_pages %d not valid\n", __func__, req->num_pages);
+		ocs_log_test(sli4->os, "num_pages %d not valid\n", req->num_pages);
 		goto error;
 	}
 
@@ -4781,10 +5379,14 @@ sli_cq_alloc_set(sli4_t *sli4, sli4_queue_t *qs[], uint32_t num_cqs,
 	req->arm = FALSE;
 	req->num_cq_req = num_cqs;
 
-	/* Fill page addresses of all the CQs. */
+	if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+		req->autovalid = TRUE;
+
+	/* Fill page addresses of all the CQs */
 	for (i = 0; i < num_cqs; i++) {
 		req->eq_id[i] = eqs[i]->id;
-		for (p = 0, addr = qs[i]->dma.phys; p < req->num_pages; p++, addr += page_bytes) {
+		for (p = 0; p < req->num_pages; p++) {
+			addr = qs[i]->dma[p].phys;
 			req->page_physical_address[offset].low = ocs_addr32_lo(addr);
 			req->page_physical_address[offset].high = ocs_addr32_hi(addr);
 			offset++;
@@ -4802,29 +5404,26 @@ sli_cq_alloc_set(sli4_t *sli4, sli4_queue_t *qs[], uint32_t num_cqs,
 			res->hdr.status, res->hdr.additional_status);
 		goto error;
 	} else {
-		/* Check if we got all requested CQs. */
+		/* Check if we got all requested CQs */
 		if (res->num_q_allocated != num_cqs) {
-			ocs_log_crit(sli4->os, "Requested count CQs doesnt match.\n");
+			ocs_log_crit(sli4->os, "Requested count CQs doesnt match\n");
 			goto error;
 		}
 
-		/* Fill the resp cq ids. */
+		/* Fill the resp cq ids */
 		for (i = 0; i < num_cqs; i++) {
 			qs[i]->id = res->q_id + i;
-			qs[i]->doorbell_offset = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].off;
-			qs[i]->doorbell_rset   = regmap[SLI4_REG_EQCQ_DOORBELL][sli4->if_type].rset;
+			qs[i]->doorbell_offset = regmap[SLI4_REG_CQ_DOORBELL][sli4->if_type].off;
+			qs[i]->doorbell_rset   = regmap[SLI4_REG_CQ_DOORBELL][sli4->if_type].rset;
 		}
 	}
 
 	ocs_dma_free(sli4->os, &dma);
-
 	return 0;
 
 error:
 	for (i = 0; i < num_cqs; i++) {
-		if (qs[i]->dma.size) {
-			ocs_dma_free(sli4->os, &qs[i]->dma);
-		}
+		sli_queue_dma_free(sli4, qs[i]);
 	}
 
 	if (dma.size) {
@@ -4833,8 +5432,6 @@ error:
 
 	return -1;
 }
-
-
 
 /**
  * @ingroup sli
@@ -4857,7 +5454,7 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 	int32_t		rc = -1;
 
 	if (!sli4 || !q) {
-		ocs_log_err(NULL, "%s: bad parameter sli4=%p q=%p\n", __func__, sli4, q);
+		ocs_log_err(NULL, "bad parameter sli4=%p q=%p\n", sli4, q);
 		return -1;
 	}
 
@@ -4876,7 +5473,7 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 			if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 				destroy = sli_cmd_fcoe_wq_destroy;
 			} else {
-				// TODO
+				/* TODO */
 				ocs_log_test(sli4->os, "unsupported WQ destroy\n");
 				return -1;
 			}
@@ -4885,14 +5482,13 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 			if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 				destroy = sli_cmd_fcoe_rq_destroy;
 			} else {
-				// TODO
+				/* TODO */
 				ocs_log_test(sli4->os, "unsupported RQ destroy\n");
 				return -1;
 			}
 			break;
 		default:
-			ocs_log_test(sli4->os, "%s: bad queue type %d\n", __func__,
-					q->type);
+			ocs_log_test(sli4->os, "bad queue type %d\n", q->type);
 			return -1;
 		}
 
@@ -4909,19 +5505,15 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 		if (destroy && destroy(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, q->id)) {
 			sli4_res_hdr_t	*res = NULL;
 
-			if (sli_bmbx_command(sli4)){
-				ocs_log_crit(sli4->os, "bootstrap mailbox write fail destroy %s\n",
-						SLI_QNAME[q->type]);
+			if (sli_bmbx_command(sli4)) {
+				ocs_log_crit(sli4->os, "bootstrap mailbox write fail destroy %s\n", SLI_QNAME[q->type]);
 			} else if (sli_res_sli_config(sli4->bmbx.virt)) {
 				ocs_log_err(sli4->os, "bad status destroy %s\n", SLI_QNAME[q->type]);
 			} else {
-				res = (void *)((uint8_t *)sli4->bmbx.virt +
-						offsetof(sli4_cmd_sli_config_t, payload));
-
+				res = (void *)((uint8_t *)sli4->bmbx.virt + offsetof(sli4_cmd_sli_config_t, payload));
 				if (res->status) {
 					ocs_log_err(sli4->os, "bad destroy %s status=%#x addl=%#x\n",
-							SLI_QNAME[q->type],
-							res->status, res->additional_status);
+						    SLI_QNAME[q->type], res->status, res->additional_status);
 				} else {
 					rc = 0;
 				}
@@ -4929,14 +5521,11 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 		}
 	}
 
+	sli_queue_reset(sli4, q);
+
 	if (free_memory) {
 		ocs_lock_free(&q->lock);
-
-		if (ocs_dma_free(sli4->os, &q->dma)) {
-			ocs_log_err(sli4->os, "%s queue ID %d free failed\n",
-					SLI_QNAME[q->type], q->id);
-			rc = -1;
-		}
+		rc = sli_queue_dma_free(sli4, q);
 	}
 
 	return rc;
@@ -4945,6 +5534,7 @@ sli_queue_free(sli4_t *sli4, sli4_queue_t *q, uint32_t destroy_queues, uint32_t 
 int32_t
 sli_queue_reset(sli4_t *sli4, sli4_queue_t *q)
 {
+	uint32_t i;
 
 	ocs_lock(&q->lock);
 
@@ -4955,8 +5545,8 @@ sli_queue_reset(sli4_t *sli4, sli4_queue_t *q)
 		q->u.r_idx = 0;
 	}
 
-	if (q->dma.virt != NULL) {
-		ocs_memset(q->dma.virt, 0, (q->size * q->length));
+	for (i = 0; i < SLI_Q_DMA_CHUNKS && q->dma[i].virt; i++) {
+		ocs_memset(q->dma[i].virt, 0, q->dma[i].size);
 	}
 
 	ocs_unlock(&q->lock);
@@ -4980,13 +5570,19 @@ int32_t
 sli_queue_is_empty(sli4_t *sli4, sli4_queue_t *q)
 {
 	int32_t		rc = TRUE;
-	uint8_t		*qe = q->dma.virt;
+	uint8_t		*qe;
+	uint32_t	index, offset, qpage_size;
 
 	ocs_lock(&q->lock);
 
-	ocs_dma_sync(&q->dma, OCS_DMASYNC_POSTREAD);
+	qpage_size = sli_get_qpage_size((size_t)(q->size * q->length));
 
-	qe += q->index * q->size;
+	index = ((q->index * q->size) / qpage_size);
+	offset = ((q->index * q->size) % qpage_size);
+
+	ocs_dma_sync(&q->dma[index], OCS_DMASYNC_POSTREAD);
+
+	qe = (uint8_t *)(((uint8_t *)q->dma[index].virt) + offset);
 
 	rc = !sli_queue_entry_is_valid(q, qe, FALSE);
 
@@ -5011,7 +5607,11 @@ sli_queue_eq_arm(sli4_t *sli4, sli4_queue_t *q, uint8_t arm)
 	uint32_t	val = 0;
 
 	ocs_lock(&q->lock);
-		val = sli_eq_doorbell(q->n_posted, q->id, arm);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+			val = sli_iftype6_eq_doorbell(q->n_posted, q->id, arm);
+		else
+			val = sli_eq_doorbell(q->n_posted, q->id, arm);
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		q->n_posted = 0;
 	ocs_unlock(&q->lock);
@@ -5038,18 +5638,25 @@ sli_queue_arm(sli4_t *sli4, sli4_queue_t *q, uint8_t arm)
 
 	switch (q->type) {
 	case SLI_QTYPE_EQ:
-		val = sli_eq_doorbell(q->n_posted, q->id, arm);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+			val = sli_iftype6_eq_doorbell(q->n_posted, q->id, arm);
+		else
+			val = sli_eq_doorbell(q->n_posted, q->id, arm);
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		q->n_posted = 0;
 		break;
 	case SLI_QTYPE_CQ:
-		val = sli_cq_doorbell(q->n_posted, q->id, arm);
+		if (sli4->if_type == SLI4_IF_TYPE_LANCER_G7)
+			val = sli_iftype6_cq_doorbell(q->n_posted, q->id, arm);
+		else
+			val = sli_cq_doorbell(q->n_posted, q->id, arm);
+
 		ocs_reg_write32(sli4->os, q->doorbell_rset, q->doorbell_offset, val);
 		q->n_posted = 0;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s should only be used for EQ/CQ, not %s\n",
-				__func__, SLI_QNAME[q->type]);
+		ocs_log_test(sli4->os, "Function should only be used for EQ/CQ, not %s\n", SLI_QNAME[q->type]);
 	}
 
 	ocs_unlock(&q->lock);
@@ -5073,15 +5680,26 @@ int32_t
 _sli_queue_write(sli4_t *sli4, sli4_queue_t *q, uint8_t *entry)
 {
 	int32_t		rc = 0;
-	uint8_t		*qe = q->dma.virt;
-	uint32_t	qindex;
+	uint8_t		*qe;
+	uint8_t		*tmp;
+	uint8_t		dpp = FALSE;
+	uint32_t	qindex = q->index;
+	uint32_t	i, index, offset, qpage_size;
 
-	qindex = q->index;
-	qe += q->index * q->size;
+	qpage_size = sli_get_qpage_size((size_t)(q->size * q->length));
+
+	index = ((q->index * q->size) / qpage_size);
+	offset = ((q->index * q->size) % qpage_size);
+
+	qe = (uint8_t *)(((uint8_t *)q->dma[index].virt) + offset);
 
 	if (entry) {
-		if ((SLI_QTYPE_WQ == q->type) && sli4->config.perf_wq_id_association) {
-			sli_set_wq_id_association(entry, q->id);
+		if (SLI_QTYPE_WQ == q->type) {
+			if (sli4->config.perf_wq_id_association)
+				sli_set_wq_id_association(entry, q->id);
+
+			if (q->u.dpp.enabled)
+				dpp = TRUE;
 		}
 #if defined(OCS_INCLUDE_DEBUG)
 		switch (q->type) {
@@ -5100,10 +5718,19 @@ _sli_queue_write(sli4_t *sli4, sli4_queue_t *q, uint8_t *entry)
 		}
 #endif
 		ocs_memcpy(qe, entry, q->size);
+		if (dpp) {
+			tmp = (uint8_t *)entry;
+			for (i = 0; i < q->size; i += sizeof(uint32_t)) {
+				ocs_reg_write32(sli4->os,
+						q->u.dpp.db_rset,
+						q->u.dpp.db_offset + i,
+						*((uint32_t *)(tmp + i)));
+			}
+		}
 		q->n_posted = 1;
 	}
 
-	ocs_dma_sync(&q->dma, OCS_DMASYNC_PREWRITE);
+	ocs_dma_sync(&q->dma[index], OCS_DMASYNC_PREWRITE);
 
 	rc = sli_queue_doorbell(sli4, q);
 
@@ -5158,10 +5785,12 @@ static uint8_t
 sli_queue_entry_is_valid(sli4_queue_t *q, uint8_t *qe, uint8_t clear)
 {
 	uint8_t		valid = FALSE;
+	uint8_t		valid_bit_set = 0;
+	uint32_t	index, qpage_size;
 
 	switch (q->type) {
 	case SLI_QTYPE_EQ:
-		valid = ((sli4_eqe_t *)qe)->vld;
+		valid = (((sli4_eqe_t *)qe)->vld == q->phase) ? 1 : 0;
 		if (valid && clear) {
 			((sli4_eqe_t *)qe)->vld = 0;
 		}
@@ -5171,7 +5800,10 @@ sli_queue_entry_is_valid(sli4_queue_t *q, uint8_t *qe, uint8_t clear)
 		 * For both MCQE and WCQE/RCQE, the valid bit
 		 * is bit 31 of dword 3 (0 based)
 		 */
-		valid = (qe[15] & 0x80) != 0;
+		valid_bit_set = (qe[15] & 0x80) != 0;
+		if (valid_bit_set == q->phase)
+			valid = 1;
+
 		if (valid & clear) {
 			qe[15] &= ~0x80;
 		}
@@ -5184,11 +5816,14 @@ sli_queue_entry_is_valid(sli4_queue_t *q, uint8_t *qe, uint8_t clear)
 		clear = FALSE;
 		break;
 	default:
-		ocs_log_test(NULL, "%s doesn't handle type=%#x\n", __func__, q->type);
+		ocs_log_test(NULL, "Function doesn't handle type=%#x\n", q->type);
 	}
 
 	if (clear) {
-		ocs_dma_sync(&q->dma, OCS_DMASYNC_PREWRITE);
+		qpage_size = sli_get_qpage_size((size_t)(q->size * q->length));
+		index = ((q->index * q->size) / qpage_size);
+
+		ocs_dma_sync(&q->dma[index], OCS_DMASYNC_PREWRITE);
 	}
 
 	return valid;
@@ -5208,8 +5843,10 @@ int32_t
 sli_queue_read(sli4_t *sli4, sli4_queue_t *q, uint8_t *entry)
 {
 	int32_t		rc = 0;
-	uint8_t		*qe = q->dma.virt;
+	uint8_t		*qe;
 	uint32_t	*qindex = NULL;
+	uint32_t	index, offset, qpage_size;
+	uint8_t 	clear = (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(sli4)) ?  FALSE : TRUE;
 
 	if (SLI_QTYPE_MQ == q->type) {
 		qindex = &q->u.r_idx;
@@ -5219,11 +5856,16 @@ sli_queue_read(sli4_t *sli4, sli4_queue_t *q, uint8_t *entry)
 
 	ocs_lock(&q->lock);
 
-	ocs_dma_sync(&q->dma, OCS_DMASYNC_POSTREAD);
+	qpage_size = sli_get_qpage_size((size_t)(q->size * q->length));
 
-	qe += *qindex * q->size;
+	index = ((*qindex * q->size) / qpage_size);
+	offset = ((*qindex * q->size) % qpage_size);
 
-	if (!sli_queue_entry_is_valid(q, qe, TRUE)) {
+	ocs_dma_sync(&q->dma[index], OCS_DMASYNC_POSTREAD);
+
+	qe = (uint8_t *)(((uint8_t *)q->dma[index].virt) + offset);
+
+	if (!sli_queue_entry_is_valid(q, qe, clear)) {
 		ocs_unlock(&q->lock);
 		return -1;
 	}
@@ -5254,6 +5896,13 @@ sli_queue_read(sli4_t *sli4, sli4_queue_t *q, uint8_t *entry)
 			*qindex = (*qindex + 1) & (q->length - 1);
 			if (SLI_QTYPE_MQ != q->type) {
 				q->n_posted++;
+				/*
+				 * For prism, the phase value will be used to check the validity of eq/cq entries.
+				 * The value toggles after a complete sweep through the queue.
+				 */
+				if ((SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(sli4)) && (*qindex == 0)) {
+					q->phase ^= (uint16_t) 0x1;
+				}
 			}
 			break;
 		default:
@@ -5290,22 +5939,28 @@ sli_queue_poke(sli4_t *sli4, sli4_queue_t *q, uint32_t index, uint8_t *entry)
 }
 
 int32_t
-_sli_queue_poke(sli4_t *sli4, sli4_queue_t *q, uint32_t index, uint8_t *entry)
+_sli_queue_poke(sli4_t *sli4, sli4_queue_t *q, uint32_t q_elem_index, uint8_t *entry)
 {
 	int32_t		rc = 0;
-	uint8_t		*qe = q->dma.virt;
+	uint8_t		*qe;
+	uint32_t	index, offset, qpage_size;
 
-	if (index >= q->length) {
+	if (q_elem_index >= q->length) {
 		return -1;
 	}
 
-	qe += index * q->size;
+	qpage_size = sli_get_qpage_size((size_t)(q->size * q->length));
+
+	index = ((q_elem_index * q->size) / qpage_size);
+	offset = ((q_elem_index * q->size) % qpage_size);
+
+	qe = (uint8_t *)(((uint8_t *)q->dma[index].virt) + offset);
 
 	if (entry) {
 		ocs_memcpy(qe, entry, q->size);
 	}
 
-	ocs_dma_sync(&q->dma, OCS_DMASYNC_PREWRITE);
+	ocs_dma_sync(&q->dma[index], OCS_DMASYNC_PREWRITE);
 
 	return rc;
 }
@@ -5336,20 +5991,23 @@ sli_resource_alloc(sli4_t *sli4, sli4_resource_e rtype, uint32_t *rid, uint32_t 
 	uint32_t	item_idx;
 	int		status;
 
-	*rid = UINT32_MAX;
-	*index = UINT32_MAX;
-
 	switch (rtype) {
 	case SLI_RSRC_FCOE_VFI:
 	case SLI_RSRC_FCOE_VPI:
 	case SLI_RSRC_FCOE_RPI:
 	case SLI_RSRC_FCOE_XRI:
+		ocs_lock(&sli4->config.extent[rtype].lock);
+
+		*rid = UINT32_MAX;
+		*index = UINT32_MAX;
 		status = ocs_bitmap_find(sli4->config.extent[rtype].use_map,
 				sli4->config.extent[rtype].map_size);
 		if (status < 0) {
-			ocs_log_err(sli4->os, "out of resource %d (alloc=%d)\n",
-					rtype, sli4->config.extent[rtype].n_alloc);
+			ocs_log_err(sli4->os, "out of resource %d (alloc=%d, status=%d, map_size=%d)\n",
+					rtype, sli4->config.extent[rtype].n_alloc,
+					status, sli4->config.extent[rtype].map_size);
 			rc = -1;
+			ocs_unlock(&sli4->config.extent[rtype].lock);
 			break;
 		} else {
 			*index = status;
@@ -5363,6 +6021,7 @@ sli_resource_alloc(sli4_t *sli4, sli4_resource_e rtype, uint32_t *rid, uint32_t 
 		*rid = sli4->config.extent[rtype].base[extent_idx] + item_idx;
 
 		sli4->config.extent[rtype].n_alloc++;
+		ocs_unlock(&sli4->config.extent[rtype].lock);
 		break;
 	default:
 		rc = -1;
@@ -5397,6 +6056,8 @@ sli_resource_free(sli4_t *sli4, sli4_resource_e rtype, uint32_t rid)
 	case SLI_RSRC_FCOE_VPI:
 	case SLI_RSRC_FCOE_RPI:
 	case SLI_RSRC_FCOE_XRI:
+		ocs_lock(&sli4->config.extent[rtype].lock);
+
 		/*
 		 * Figure out which extent contains the resource ID. I.e. find
 		 * the extent such that
@@ -5415,11 +6076,14 @@ sli_resource_free(sli4_t *sli4, sli4_resource_e rtype, uint32_t rid)
 					rid -= base[x];
 					ocs_bitmap_clear(sli4->config.extent[rtype].use_map,
 							 (x * size) + rid);
+					sli4->config.extent[rtype].n_alloc--;
 					rc = 0;
 					break;
 				}
 			}
 		}
+
+		ocs_unlock(&sli4->config.extent[rtype].lock);
 		break;
 	default:
 		;
@@ -5439,9 +6103,13 @@ sli_resource_reset(sli4_t *sli4, sli4_resource_e rtype)
 	case SLI_RSRC_FCOE_VPI:
 	case SLI_RSRC_FCOE_RPI:
 	case SLI_RSRC_FCOE_XRI:
+		ocs_lock(&sli4->config.extent[rtype].lock);
+
 		for (i = 0; i < sli4->config.extent[rtype].map_size; i++) {
 			ocs_bitmap_clear(sli4->config.extent[rtype].use_map, i);
 		}
+
+		ocs_unlock(&sli4->config.extent[rtype].lock);
 		rc = 0;
 		break;
 	default:
@@ -5471,8 +6139,7 @@ sli_eq_parse(sli4_t *sli4, uint8_t *buf, uint16_t *cq_id)
 	int32_t		rc = 0;
 
 	if (!sli4 || !buf || !cq_id) {
-		ocs_log_err(NULL, "%s: bad parameters sli4=%p buf=%p cq_id=%p\n", __func__,
-				sli4, buf, cq_id);
+		ocs_log_err(NULL, "bad parameters sli4=%p buf=%p cq_id=%p\n", sli4, buf, cq_id);
 		return -1;
 	}
 
@@ -5481,11 +6148,11 @@ sli_eq_parse(sli4_t *sli4, uint8_t *buf, uint16_t *cq_id)
 		*cq_id = eqe->resource_id;
 		break;
 	case SLI4_MAJOR_CODE_SENTINEL:
-		ocs_log_debug(sli4->os, "%s: sentinel EQE\n", __func__);
+		ocs_log_debug(sli4->os, "sentinel EQE\n");
 		rc = 1;
 		break;
 	default:
-		ocs_log_test(sli4->os, "%s: Unsupported EQE: major %x minor %x\n", __func__,
+		ocs_log_test(sli4->os, "Unsupported EQE: major %x minor %x\n",
 				eqe->major_code, eqe->minor_code);
 		rc = -1;
 	}
@@ -5516,8 +6183,8 @@ sli_cq_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *etype,
 	int32_t	rc = 0;
 
 	if (!sli4 || !cq || !cqe || !etype) {
-		ocs_log_err(NULL, "%s: bad parameters sli4=%p cq=%p cqe=%p etype=%p q_id=%p\n",
-				__func__, sli4, cq, cqe, etype, q_id);
+		ocs_log_err(NULL, "bad parameters sli4=%p cq=%p cqe=%p etype=%p q_id=%p\n",
+				sli4, cq, cqe, etype, q_id);
 		return -1;
 	}
 
@@ -5534,8 +6201,7 @@ sli_cq_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *etype,
 	} else if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		rc = sli_fc_cqe_parse(sli4, cq, cqe, etype, q_id);
 	} else {
-		ocs_log_test(sli4->os, "%s: implement CQE parsing type = %#x\n",
-				__func__, sli4->port_type);
+		ocs_log_test(sli4->os, "implement CQE parsing type = %#x\n", sli4->port_type);
 		rc = -1;
 	}
 
@@ -5572,20 +6238,26 @@ int32_t sli_raise_ue(sli4_t *sli4, uint8_t dump)
 			break;
 		}
 		default:
-			ocs_log_test(sli4->os, "%s: invalid asic type %d\n",
-				__func__, sli_get_asic_type(sli4));
+			ocs_log_test(sli4->os, "invalid asic type %d\n", sli_get_asic_type(sli4));
 			return -1;
 		}
-	} else if (SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(sli4)) {
-		uint32_t value = SLI4_PHYDEV_CONTROL_FRST;
-		if (dump) {
-			value |= SLI4_PHYDEV_CONTROL_DD;
+	} else if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(sli4)) ||
+		   (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(sli4))) {
+		if (OCS_FW_FUNC_DESC_DUMP == dump) {
+			sli_reg_write(sli4, SLI4_REG_SLIPORT_CONTROL, SLI4_SLIPORT_CONTROL_FDD | SLI4_SLIPORT_CONTROL_IP);
+		} else {
+			uint32_t value = SLI4_PHYDEV_CONTROL_FRST;
+
+			if (OCS_FW_CHIP_LEVEL_DUMP == dump)
+				value |= SLI4_PHYDEV_CONTROL_DD;
+
+			sli_reg_write(sli4, SLI4_REG_PHYSDEV_CONTROL, value);
 		}
-		sli_reg_write(sli4, SLI4_REG_PHYSDEV_CONTROL, value);
 	} else {
-		ocs_log_test(sli4->os, "%s: invalid iftype=%d\n", __func__, sli_get_if_type(sli4));
+		ocs_log_err(sli4->os, "invalid iftype=%d\n", sli_get_if_type(sli4));
 		return -1;
 	}
+
 	return 0;
 }
 
@@ -5595,11 +6267,16 @@ int32_t sli_raise_ue(sli4_t *sli4, uint8_t dump)
  *
  * @param sli4 SLI context.
  *
- * @return  Returns 1 if the chip is ready, or 0 if the chip is not ready.
+ * @return
+ * - -1 if the call failed.
+ * - 0 if the chip is not ready.
+ * - 1 if the chip dump is ready.
+ * - 2 if the func dump is ready.
+ * - 3 if the FW has skipped the dump generation.
  */
 int32_t sli_dump_is_ready(sli4_t *sli4)
 {
-	int32_t	rc = 0;
+	int32_t	rc = OCS_FW_DUMP_READY_STATUS_NOT_READY;
 	uint32_t port_val;
 	uint32_t bmbx_val;
 	uint32_t uerr_lo;
@@ -5614,10 +6291,10 @@ int32_t sli_dump_is_ready(sli4_t *sli4)
 		uerr_mask_lo = sli_reg_read(sli4, SLI4_REG_UERR_MASK_LO);
 		uerr_mask_hi = sli_reg_read(sli4, SLI4_REG_UERR_MASK_HI);
 		if ((uerr_lo & ~uerr_mask_lo) || (uerr_hi & ~uerr_mask_hi)) {
-			rc = 1;
+			rc = OCS_FW_DUMP_READY_STATUS_DD_PRESENT;
 		}
-
-	} else if (SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(sli4)) {
+	} else if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(sli4)) ||
+		   (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(sli4))) {
 		/*
 		 * Ensure that the port is ready AND the mailbox is
 		 * ready before signaling that the dump is ready to go.
@@ -5625,15 +6302,36 @@ int32_t sli_dump_is_ready(sli4_t *sli4)
 		port_val = sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS);
 		bmbx_val = sli_reg_read(sli4, SLI4_REG_BMBX);
 
-		if ((bmbx_val & SLI4_BMBX_RDY) &&
-		    SLI4_PORT_STATUS_READY(port_val) &&
-		    SLI4_PORT_STATUS_DUMP_PRESENT(port_val)) {
-			rc = 1;
+		if ((bmbx_val & SLI4_BMBX_RDY) && SLI4_PORT_STATUS_READY(port_val)) {
+			if (SLI4_PORT_STATUS_DUMP_PRESENT(port_val)) {
+				rc = OCS_FW_DUMP_READY_STATUS_DD_PRESENT;
+			} else if (SLI4_PORT_STATUS_FDP_PRESENT(port_val)) {
+				rc = OCS_FW_DUMP_READY_STATUS_FDB_PRESENT;
+			} else {
+				/* Chip is in ready state but no dump was generated by the FW */
+				rc = OCS_FW_DUMP_READY_STATUS_SKIP_DUMP;
+			}
+		} else if (SLI4_PORT_STATUS_SPP & port_val) {
+			uint32_t skip_dump = FALSE;
+			uint32_t flags = SLI4_PHYDEV_CONTROL_CFP;
+
+			/*
+			 * If SLI is in a paused state, set CFP bit to resume and
+			 * skip the dump based on pause errors list.
+			 */
+			sli_validate_pause_errors(sli4, &skip_dump);
+			if (skip_dump)
+				rc = OCS_FW_DUMP_READY_STATUS_SKIP_DUMP;
+			else
+				flags |= SLI4_PHYDEV_CONTROL_DD;
+
+			sli_reg_write(sli4, SLI4_REG_PHYSDEV_CONTROL, flags);
 		}
 	} else {
-		ocs_log_test(sli4->os, "%s: invalid iftype=%d\n", __func__, sli_get_if_type(sli4));
-		return -1;
+		ocs_log_test(sli4->os, "invalid iftype=%d\n", sli_get_if_type(sli4));
+		rc = OCS_FW_DUMP_READY_STATUS_FAILED;
 	}
+
 	return rc;
 }
 
@@ -5653,24 +6351,26 @@ int32_t sli_dump_is_present(sli4_t *sli4)
 	uint32_t val;
 	uint32_t ready;
 
-	if (SLI4_IF_TYPE_LANCER_FC_ETH != sli_get_if_type(sli4)) {
-		ocs_log_test(sli4->os, "%s: Function only supported for I/F type 2", __func__);
+	if ((SLI4_IF_TYPE_LANCER_FC_ETH != sli_get_if_type(sli4)) &&
+	    (SLI4_IF_TYPE_LANCER_G7 != sli_get_if_type(sli4))) {
+		ocs_log_test(sli4->os, "Function only supported for I/F type 2/6");
 		return -1;
 	}
 
 	/* If the chip is not ready, then there cannot be a dump */
 	ready = sli_wait_for_fw_ready(sli4, SLI4_INIT_PORT_DELAY_US);
 	if (!ready) {
+		ocs_log_err(sli4->os, "Chip is not in ready state\n");
 		return 0;
 	}
 
 	val = sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS);
 	if (UINT32_MAX == val) {
-		ocs_log_err(sli4->os, "%s: error reading SLIPORT_STATUS\n", __func__);
+		ocs_log_err(sli4->os, "error reading SLIPORT_STATUS\n");
 		return -1;
-	} else {
-		return ((val & SLI4_PORT_STATUS_DIP) ? 1 : 0);
 	}
+
+	return ((SLI4_PORT_STATUS_DUMP_PRESENT(val) || SLI4_PORT_STATUS_FDP_PRESENT(val)) ? 1 : 0);
 }
 
 /**
@@ -5689,13 +6389,13 @@ int32_t sli_reset_required(sli4_t *sli4)
 	uint32_t val;
 
 	if (SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(sli4)) {
-		ocs_log_test(sli4->os, "%s: reset required N/A for iftype 0\n", __func__);
+		ocs_log_test(sli4->os, "reset required N/A for iftype 0\n");
 		return 0;
 	}
 
 	val = sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS);
 	if (UINT32_MAX == val) {
-		ocs_log_err(sli4->os, "%s: error reading SLIPORT_STATUS\n", __func__);
+		ocs_log_err(sli4->os, "error reading SLIPORT_STATUS\n");
 		return -1;
 	} else {
 		return ((val & SLI4_PORT_STATUS_RN) ? 1 : 0);
@@ -5721,7 +6421,7 @@ int32_t sli_fw_error_status(sli4_t *sli4)
 
 	sliport_semaphore = sli_reg_read(sli4, SLI4_REG_SLIPORT_SEMAPHORE);
 	if (UINT32_MAX == sliport_semaphore) {
-		ocs_log_err(sli4->os, "%s: error reading SLIPORT_SEMAPHORE register\n", __func__);
+		ocs_log_err(sli4->os, "error reading SLIPORT_SEMAPHORE register\n");
 		return -1;
 	}
 	rc = (SLI4_PORT_SEMAPHORE_IN_ERR(sliport_semaphore) ? 1 : 0);
@@ -5740,7 +6440,8 @@ int32_t sli_fw_error_status(sli4_t *sli4)
 			    (uerr_mask_hi & uerr_status_hi) != 0) {
 				rc = 1;
 			}
-		} else if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type)) {
+		} else if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type) ||
+			   (SLI4_IF_TYPE_LANCER_G7 == sli4->if_type)) {
 			uint32_t sliport_status;
 
 			sliport_status = sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS);
@@ -5776,10 +6477,12 @@ sli_fw_ready(sli4_t *sli4)
 		rc = ((SLI4_PORT_SEMAPHORE_STATUS_POST_READY ==
 		       SLI4_PORT_SEMAPHORE_PORT(val)) &&
 		      (!SLI4_PORT_SEMAPHORE_IN_ERR(val)) ? 1 : 0);
-	} else if (SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type) {
+	} else if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli4->if_type) ||
+		   (SLI4_IF_TYPE_LANCER_G7 == sli4->if_type)) {
 		val = sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS);
 		rc = (SLI4_PORT_STATUS_READY(val) ? 1 : 0);
 	}
+
 	return rc;
 }
 
@@ -5808,6 +6511,7 @@ int32_t sli_link_is_configurable(sli4_t *sli)
 		rc = 1;
 		break;
 	case SLI4_ASIC_TYPE_LANCERG6:
+	case SLI4_ASIC_TYPE_LANCERG7:
 	case SLI4_ASIC_TYPE_BE3:
 	default:
 		rc = 0;
@@ -5818,4 +6522,277 @@ int32_t sli_link_is_configurable(sli4_t *sli)
 
 }
 
-/* vim: set noexpandtab textwidth=120: */
+int32_t
+sli_is_paused(sli4_t *sli4)
+{
+	int32_t rc = FALSE;
+
+	if (SLI4_PORT_STATUS_SPP & sli_reg_read(sli4, SLI4_REG_SLIPORT_STATUS))
+		rc = TRUE;
+
+	return rc;
+}
+
+void
+sli_validate_pause_errors(sli4_t *sli4, uint32_t *skip_dump)
+{
+	int32_t i;
+	uint32_t err1 = sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR1);
+	uint32_t err2 = sli_reg_read(sli4, SLI4_REG_SLIPORT_ERROR2);
+
+	ocs_log_debug(sli4->os, "error1: 0x%x\n", err1);
+	ocs_log_debug(sli4->os, "error2: 0x%x\n", err2);
+
+	for (i = 0; i < SLI4_PAUSE_ERRX_PAIR_CNT; i++) {
+		if ((err1 == sli4->pause_errx_pair[i].err1) &&
+		    ((0xFFFFFFFF == sli4->pause_errx_pair[i].err2) ||
+		     (err2 == sli4->pause_errx_pair[i].err2))) {
+			*skip_dump = TRUE;
+			break;
+		}
+	}
+
+	if (*skip_dump)
+		ocs_log_crit(sli4->os, "Skipping diagnostic dump for (error1, error2) = (%#x, %#x)\n", err1, err2);
+}
+
+/**
+ * @brief Decode the link speed
+ *
+ * @param in_link_speed: bits 15:8 of the field 'Current Link Speed' from 'Read Topo SLI CMD'
+ *                       Refer table 12 SLI4_FC_FCOE_CMDREF
+ * @param out_link_speed: link speed in Mbps
+ *
+ * @return None.
+ */
+void
+sli4_decode_link_speed(uint32_t in_link_speed, uint32_t *out_link_speed)
+{
+	switch (in_link_speed) {
+	case SLI4_READ_TOPOLOGY_SPEED_1G:
+		*out_link_speed =  1 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_2G:
+		*out_link_speed =  2 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_4G:
+		*out_link_speed =  4 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_8G:
+		*out_link_speed =  8 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_16G:
+		*out_link_speed = 16 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_32G:
+		*out_link_speed = 32 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_64G:
+		*out_link_speed = 64 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_128G:
+		*out_link_speed = 128 * 1000;
+		break;
+	case SLI4_READ_TOPOLOGY_SPEED_256G:
+		*out_link_speed = 256 * 1000;
+		break;
+	default:
+		ocs_log_err(NULL, "Invalid link_speed = %d\n", in_link_speed);
+	}
+}
+
+int32_t
+sli_parse_fw_dual_dump_state(sli4_t *sli4, void *buf, size_t size, bool *dd_state)
+{
+	sli4_res_common_set_features_t *resp = NULL;
+	uint32_t sli_config_off = offsetof(sli4_cmd_sli_config_t, payload);
+	sli4_res_common_set_features_dual_dump_param_t *param;
+	uint32_t exp_param_len = sizeof(*param);
+
+	resp = (sli4_res_common_set_features_t *)((uint8_t *)buf + sli_config_off);
+	param = (sli4_res_common_set_features_dual_dump_param_t *)resp->params;
+
+	if (resp->hdr.status || resp->hdr.additional_status) {
+		ocs_log_err(sli4->os, "Dual dump: request failed with status=%#x, additional status=%#x\n",
+			    resp->hdr.status, resp->hdr.additional_status);
+		return -1;
+	}
+
+	if (resp->feature != SLI4_SET_FEATURES_CONFIG_DUAL_DUMP) {
+		ocs_log_err(sli4->os, "Dual dump: invalid feature code: expected=%#x, received=%#x\n",
+			    SLI4_SET_FEATURES_CONFIG_DUAL_DUMP, resp->feature);
+		return -1;
+	}
+
+	if (resp->param_len != exp_param_len) {
+		/* Potentially a FW book keeping mistake. Treat this as a non-fatal error,
+		 * log the event and continue to process the response.
+		 */
+		ocs_log_err(sli4->os, "Dual dump: invalid param length: expected=%#x, received=%#x\n",
+			    exp_param_len, resp->param_len);
+	}
+
+	*dd_state = (bool)param->dual_dump;
+	ocs_log_debug(sli4->os, "Dual dump: feature is %s\n", param->dual_dump ? "enabled" : "disabled");
+
+	return 0;
+}
+
+/**
+ * @ingroup sli
+ * @brief Set SRIOV default config 
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param nr_vfs Number of VFs to be configured 
+ * @param wwna WWN assign requests Port to assign WWNs to VFs
+ * @param priv_mask Privilege mask for the VFs
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_common_set_sriov_default_config_v2(sli4_t *sli4, void *buf, size_t size,
+					   uint8_t nr_vfs, bool wwna, uint32_t priv_mask)
+{
+	sli4_req_common_set_sriov_default_config_v2_t *req_v2;
+	uint32_t sli_config_off = 0;
+	uint32_t payload_size;
+
+	/* Payload length must accomodate both request and response */
+	payload_size = max(sizeof(sli4_req_common_set_sriov_default_config_v2_t),
+			   sizeof(sli4_res_common_query_fw_config_t));
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size,
+						    payload_size,
+						    NULL);
+	}
+
+	req_v2 = (sli4_req_common_set_sriov_default_config_v2_t *)((uint8_t*)buf + sli_config_off);
+	req_v2->vf_count = nr_vfs;
+	req_v2->wwna = wwna;
+	req_v2->privilege_mask = priv_mask;
+	req_v2->hdr.opcode = SLI4_OPC_COMMON_SET_SRIOV_DEFAULT_CONFIG;
+	req_v2->hdr.subsystem = SLI4_SUBSYSTEM_COMMON;
+	req_v2->hdr.request_length = payload_size - sizeof(sli4_req_hdr_t);
+	req_v2->hdr.version = 2;
+	
+	return sli_config_off + sizeof(sli4_req_common_set_sriov_default_config_v2_t);
+
+}
+
+/**
+ * @ingroup sli
+ * @brief Set SRIOV default config 
+ *
+ * @param sli4 SLI context.
+ * @param nr_vfs Number of VFs to be configured 
+ * @param wwna WWN assign requests Port to assign WWNs to VFs
+ * @param priv_mask Privilege mask for the VFs
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_sriov_set_default_config(sli4_t *sli4, uint16_t nr_vfs,
+			     bool wwna, uint32_t priv_mask)
+{
+	if (sli_cmd_common_set_sriov_default_config_v2(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE,
+						       nr_vfs, wwna, priv_mask)) {
+		sli4_res_hdr_t *resp;
+
+		if (sli_bmbx_command(sli4)) {
+			ocs_log_crit(sli4->os, "Bootstrap SET_SRIOV_DEFAULT_CONFIG failed\n");
+			return -1;
+		}
+
+		resp = (sli4_res_hdr_t *)((uint8_t *)sli4->bmbx.virt +
+					  offsetof(sli4_cmd_sli_config_t, payload));
+
+		if (resp->status == SLI4_MGMT_STATUS_COMMAND_NOT_SUPPORTED &&
+		    resp->additional_status == SLI4_CFG_ADD_STATUS_NO_STATUS) {
+			ocs_log_err(sli4->os, "Set SRIOV default config command is unsupported\n");
+			return -1;
+		} else if (resp->status) {
+			ocs_log_err(sli4->os, "Set SRIOV default config command bad status %#x (%#x) \n",
+				    resp->status, resp->additional_status);
+			return -1;
+		}
+	} else {
+		ocs_log_err(sli4->os, "Error in preparing SET_SRIOV_DEFAULT_CONFIG req\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ * @ingroup sli
+ * @brief COMMON_COMMON_SET_PROFILE_CONFIG V0 command.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the command.
+ * @param size Buffer size, in bytes.
+ * @param dma DMA capable memory containing profile.
+ * @param profile_id Profile ID to configure.
+ * @param descriptor_count Number of descriptors in DMA buffer.
+ *
+ * @return Returns the number of bytes written.
+ */
+int32_t
+sli_cmd_common_set_profile_config_v0(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *dma,
+				     uint8_t profile_id, uint32_t descriptor_count)
+{
+	sli4_req_common_set_profile_config_v0_t *req = NULL;
+	uint32_t cmd_off = 0;
+	uint32_t payload_size;
+
+	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
+		cmd_off = sli_cmd_sli_config(sli4, buf, size,
+					     sizeof(sli4_req_common_set_profile_config_v0_t),
+					     dma);
+	}
+
+	if (dma != NULL) {
+		req = dma->virt;
+		ocs_memset(req, 0, dma->size);
+		payload_size = dma->size;
+	} else {
+		req = (sli4_req_common_set_profile_config_v0_t *)((uint8_t *)buf + cmd_off);
+		payload_size = sizeof(sli4_req_common_set_profile_config_v0_t);
+	}
+
+        req->hdr.opcode = SLI4_OPC_COMMON_SET_PROFILE_CONFIG;
+        req->hdr.subsystem = SLI4_SUBSYSTEM_COMMON;
+        req->hdr.request_length = payload_size - sizeof(sli4_req_hdr_t);
+        req->hdr.version = 0;
+        req->profile_id = profile_id;
+        req->desc_count = descriptor_count;
+
+        return(cmd_off + sizeof(sli4_req_common_set_profile_config_t));
+}
+
+static int32_t
+sli_sriov_setup(sli4_t *sli4)
+{
+	uint16_t nr_vfs = ocs_sriov_get_nr_vfs(sli4->os);
+	uint16_t max_nr_vfs = ocs_sriov_get_max_nr_vfs(sli4->os);
+
+	if (nr_vfs > max_nr_vfs) {
+		ocs_log_err(sli4->os,
+			    "Requested vfs (%d) greater than supported vfs (%d)\n",
+			    nr_vfs, max_nr_vfs);
+		return -1;
+	}
+
+	if (sli_sriov_set_default_config(sli4, nr_vfs, true,
+					 SLI4_FUNC_PRIV_LINK_DEVSEC |
+					 SLI4_FUNC_PRIV_LINK_DEVCFG)) {
+		ocs_log_err(sli4->os, "Set SRIOV default config failed\n");
+		return -1;
+	}
+
+	ocs_log_info(sli4->os, "SRIOV functions (nr_vfs %d) privileged successfully\n",
+		     nr_vfs);
+	return 0;
+}

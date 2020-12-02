@@ -52,7 +52,7 @@
 struct spdk_ocs_t {
 	uint32_t instance_index;
 	void	*pdev;
-	spdk_ocs_memref_t bars[PCI_MAX_BAR];
+	ocsu_memref_t bars[PCI_MAX_BAR];
 	uint32_t bar_count;
 	const char *desc;
 	uint16_t pci_vendor;

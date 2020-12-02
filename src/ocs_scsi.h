@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -42,7 +41,6 @@
 
 #include "ocs_ddump.h"
 #include "ocs_mgmt.h"
-
 
 /* ocs_scsi_rcv_cmd() ocs_scsi_rcv_tmf() flags */
 #define OCS_SCSI_CMD_DIR_IN		(1U << 0)
@@ -60,6 +58,9 @@
 #define OCS_SCSI_NO_AUTO_RESPONSE	(1U << 1)
 #define OCS_SCSI_LOW_LATENCY		(1U << 2)
 
+#define OCS_SCSI_MAX_CDB_LEN		128
+#define OCS_SCSI_SNS_BUF_VALID(sense)	((sense) && (0x70 == (((const uint8_t *)(sense))[0] & 0x70)))
+
 #define OCS_SCSI_WQ_STEERING_SHIFT	(16)
 #define OCS_SCSI_WQ_STEERING_MASK	(0xf << OCS_SCSI_WQ_STEERING_SHIFT)
 #define OCS_SCSI_WQ_STEERING_CLASS	(0 << OCS_SCSI_WQ_STEERING_SHIFT)
@@ -72,22 +73,7 @@
 
 #define OCS_SCSI_WQ_CLASS_LOW_LATENCY	(1)
 
-#ifndef MAX_WWN_NAME_LEN
-#define MAX_WWN_NAME_LEN        128
-#endif
-
-struct spdk_fc_hba_port {
-	int  id;
-
-	int mrqs;
-	bool initiator;
-	bool target;
-
-	char wwnn[MAX_WWN_NAME_LEN];
-	char wwpn[MAX_WWN_NAME_LEN];
-
-	TAILQ_ENTRY(spdk_fc_hba_port) tailq;
-};
+#define OCS_SCSI_MAX_LOG_LEN		256
 
 /*!
  * @defgroup scsi_api_base SCSI Base Target/Initiator
@@ -137,8 +123,7 @@ typedef enum {
 } ocs_scsi_io_status_e;
 
 /* Callback used by send_rd_data(), recv_wr_data(), send_resp() */
-typedef int32_t (*ocs_scsi_io_cb_t)(ocs_io_t *io, ocs_scsi_io_status_e status, uint32_t flags,
-	void *arg);
+typedef int32_t (*ocs_scsi_io_cb_t)(ocs_io_t *io, ocs_scsi_io_status_e status, uint32_t flags, void *arg);
 
 /* Callback used by send_rd_io(), send_wr_io() */
 typedef int32_t (*ocs_scsi_rsp_io_cb_t)(ocs_io_t *io, ocs_scsi_io_status_e status, ocs_scsi_cmd_resp_t *rsp,
@@ -151,7 +136,8 @@ typedef int32_t (*ocs_scsi_rsp_io_cb_t)(ocs_io_t *io, ocs_scsi_io_status_e statu
 
 /* ocs_scsi_recv_tmf() request values */
 typedef enum {
-	OCS_SCSI_TMF_ABORT_TASK = 1,
+	OCS_SCSI_TMF_NONE = 0,
+	OCS_SCSI_TMF_ABORT_TASK,
 	OCS_SCSI_TMF_QUERY_TASK_SET,
 	OCS_SCSI_TMF_ABORT_TASK_SET,
 	OCS_SCSI_TMF_CLEAR_TASK_SET,
@@ -171,28 +157,9 @@ typedef enum {
 	OCS_SCSI_TMF_SERVICE_DELIVERY,
 } ocs_scsi_tmf_resp_e;
 
-typedef enum {
-	OCS_SCSI_TARGET_DELETED,
-	OCS_SCSI_TARGET_MISSING,
-} ocs_scsi_del_target_reason_e;
-
-typedef enum {
-	OCS_SCSI_INITIATOR_DELETED,
-	OCS_SCSI_INITIATOR_MISSING,
-} ocs_scsi_del_initiator_reason_e;
-
-typedef enum {
-	OCS_SCSI_DDUMP_DEVICE,
-	OCS_SCSI_DDUMP_DOMAIN,
-	OCS_SCSI_DDUMP_SPORT,
-	OCS_SCSI_DDUMP_NODE,
-	OCS_SCSI_DDUMP_IO,
-} ocs_scsi_ddump_type_e;
-
 /**
  * @brief property names for ocs_scsi_get_property() functions
  */
-
 typedef enum {
 	OCS_SCSI_MAX_SGE,
 	OCS_SCSI_MAX_SGL,
@@ -228,6 +195,7 @@ typedef enum {
 	OCS_SCSI_DIF_OPER_IN_CHKSUM_OUT_CRC,
 	OCS_SCSI_DIF_OPER_IN_RAW_OUT_RAW,
 } ocs_scsi_dif_oper_e;
+
 #define OCS_SCSI_DIF_OPER_PASS_THRU	OCS_SCSI_DIF_OPER_IN_CRC_OUT_CRC
 #define OCS_SCSI_DIF_OPER_STRIP		OCS_SCSI_DIF_OPER_IN_CRC_OUT_NODIF
 #define OCS_SCSI_DIF_OPER_INSERT	OCS_SCSI_DIF_OPER_IN_NODIF_OUT_CRC
@@ -247,18 +215,15 @@ typedef enum {
 /**
  * @brief generic scatter-gather list structure
  */
-
 typedef struct ocs_scsi_sgl_s {
 	uintptr_t	addr;			/**< physical address */
 	uintptr_t	dif_addr;		/**< address of DIF segment, zero if DIF is interleaved */
 	size_t		len;			/**< length */
 } ocs_scsi_sgl_t;
 
-
 /**
  * @brief T10 DIF information passed to the transport
  */
-
 typedef struct {
 	ocs_scsi_dif_oper_e dif_oper;
 	ocs_scsi_dif_blk_size_e blk_size;
@@ -279,8 +244,12 @@ typedef struct {
 } ocs_scsi_dif_info_t;
 
 /* Return values for calls from base driver to target-server/initiator-client */
+#define OCS_CALL_COMPLETE	0 // All work is done
+#define OCS_CALL_ASYNC		1 // Work will be completed asynchronously
 #define OCS_SCSI_CALL_COMPLETE	0 // All work is done
 #define OCS_SCSI_CALL_ASYNC	1 // Work will be completed asynchronously
+#define OCS_NVME_CALL_COMPLETE	0 // All work is done
+#define OCS_NVME_CALL_ASYNC	1 // Work will be completed asynchronously
 
 /* Calls from target/initiator to base driver */
 
@@ -291,54 +260,58 @@ typedef enum {
 
 extern void ocs_scsi_io_alloc_enable(ocs_node_t *node);
 extern void ocs_scsi_io_alloc_disable(ocs_node_t *node);
+extern int32_t ocs_scsi_io_alloc_enabled(ocs_node_t *node);
 extern ocs_io_t *ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role);
 extern void ocs_scsi_io_free(ocs_io_t *io);
 extern ocs_io_t *ocs_io_get_instance(ocs_t *ocs, uint32_t index);
-
 extern void ocs_scsi_register_bounce(ocs_t *ocs, void(*fctn)(void(*fctn)(void *arg), void *arg,
-							     uint32_t s_id, uint32_t d_id, uint32_t ox_id));
+				     uint32_t s_id, uint32_t d_id, uint32_t ox_id));
 
 /* Calls from base driver to target-server */
 
 extern int32_t ocs_scsi_tgt_driver_init(void);
 extern int32_t ocs_scsi_tgt_driver_exit(void);
+extern uint32_t ocs_scsi_tgt_io_state(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_io_init(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_io_exit(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_new_device(ocs_t *ocs);
 extern int32_t ocs_scsi_tgt_del_device(ocs_t *ocs);
 extern int32_t ocs_scsi_tgt_new_domain(ocs_domain_t *domain);
-extern void ocs_scsi_tgt_del_domain(ocs_domain_t *domain);
+extern int ocs_scsi_tgt_del_domain(ocs_domain_t *domain);
 extern int32_t ocs_scsi_tgt_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_tgt_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_validate_initiator(ocs_node_t *node);
 extern int32_t ocs_scsi_new_initiator(ocs_node_t *node);
+
+typedef enum {
+	OCS_SCSI_INITIATOR_DELETED,
+	OCS_SCSI_INITIATOR_MISSING,
+} ocs_scsi_del_initiator_reason_e;
+
 extern int32_t ocs_scsi_del_initiator(ocs_node_t *node, ocs_scsi_del_initiator_reason_e reason);
-extern int32_t ocs_scsi_recv_cmd(ocs_io_t *io, uint32_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags);
-extern int32_t ocs_scsi_recv_cmd_first_burst(ocs_io_t *io, uint32_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags,
-	ocs_dma_t first_burst_buffers[], uint32_t first_burst_bytes);
+extern int32_t ocs_scsi_recv_cmd(ocs_io_t *io, uint64_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags);
+extern int32_t ocs_scsi_recv_cmd_first_burst(ocs_io_t *io, uint64_t lun, uint8_t *cdb, uint32_t cdb_len,
+	uint32_t flags, ocs_dma_t first_burst_buffers[], uint32_t first_burst_bytes);
 extern int32_t ocs_scsi_recv_tmf(ocs_io_t *tmfio, uint64_t lun, ocs_scsi_tmf_cmd_e cmd, ocs_io_t *abortio,
 	uint32_t flags);
 extern ocs_sport_t *ocs_sport_get_instance(ocs_domain_t *domain, uint32_t index);
 extern ocs_domain_t *ocs_domain_get_instance(ocs_t *ocs, uint32_t index);
-extern struct spdk_fc_hba_port *ocs_spdk_tgt_find_hba_port(int instance);
-
-void spdk_fc_cf_cleanup_cfg(void);
 
 /* Calls from target-server to base driver */
 
 extern int32_t ocs_scsi_send_rd_data(ocs_io_t *io, uint32_t flags,
 	ocs_scsi_dif_info_t *dif_info,
 	ocs_scsi_sgl_t *sgl, uint32_t sgl_count,
-	uint32_t wire_len, ocs_scsi_io_cb_t cb, void *arg);
+	uint64_t wire_len, ocs_scsi_io_cb_t cb, void *arg);
 extern int32_t ocs_scsi_recv_wr_data(ocs_io_t *io, uint32_t flags,
 	ocs_scsi_dif_info_t *dif_info,
 	ocs_scsi_sgl_t *sgl, uint32_t sgl_count,
-	uint32_t wire_len, ocs_scsi_io_cb_t cb, void *arg);
+	uint64_t wire_len, ocs_scsi_io_cb_t cb, void *arg);
 extern int32_t ocs_scsi_send_resp(ocs_io_t *io, uint32_t flags, ocs_scsi_cmd_resp_t *rsp,
 		ocs_scsi_io_cb_t cb, void *arg);
 extern int32_t ocs_scsi_send_tmf_resp(ocs_io_t *io, ocs_scsi_tmf_resp_e rspcode, uint8_t addl_rsp_info[3],
 		ocs_scsi_io_cb_t cb, void *arg);
-extern int32_t ocs_scsi_tgt_abort_io(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg);
+extern int32_t ocs_scsi_tgt_abort_io(ocs_io_t *io, bool send_abts, ocs_scsi_io_cb_t cb, void *arg);
 extern void ocs_scsi_io_complete(ocs_io_t *io);
 extern uint32_t ocs_scsi_get_property(ocs_t *ocs, ocs_scsi_property_e prop);
 extern void *ocs_scsi_get_property_ptr(ocs_t *ocs, ocs_scsi_property_e prop);
@@ -349,18 +322,29 @@ extern void ocs_scsi_update_first_burst_transferred(ocs_io_t *io, uint32_t trans
 
 /* Calls from base driver to initiator-client */
 
-extern int32_t ocs_scsi_ini_driver_init(int32_t);
-extern int32_t ocs_scsi_ini_driver_exit(int32_t);
+extern int32_t ocs_scsi_ini_driver_init(int32_t initiator);
+extern int32_t ocs_scsi_ini_driver_exit(int32_t initiator);
 extern int32_t ocs_scsi_ini_io_init(ocs_io_t *io);
 extern int32_t ocs_scsi_ini_io_exit(ocs_io_t *io);
+extern int32_t ocs_scsi_host_ml_registered(ocs_t *ocs);
+extern int ocs_scsi_ini_update_fc_host(ocs_t *ocs, uint64_t port_name, uint64_t node_name);
 extern int32_t ocs_scsi_ini_new_device(ocs_t *ocs);
 extern int32_t ocs_scsi_ini_del_device(ocs_t *ocs);
 extern int32_t ocs_scsi_ini_new_domain(ocs_domain_t *domain);
+extern int32_t ocs_scsi_host_update_supported_speed(ocs_t *ocs);
 extern void ocs_scsi_ini_del_domain(ocs_domain_t *domain);
 extern int32_t ocs_scsi_ini_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_ini_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_new_target(ocs_node_t *node);
 
+extern void ocs_get_os_host_name(ocs_t *ocs, void *os_ver_name_str, size_t size);
+extern void ocs_get_os_version_and_name(ocs_t *ocs, void *os_ver_name_str, size_t size);
+extern void ocs_scsi_get_host_name(ocs_t *ocs, void *host_name, size_t size);
+
+typedef enum {
+	OCS_SCSI_TARGET_DELETED,
+	OCS_SCSI_TARGET_MISSING,
+} ocs_scsi_del_target_reason_e;
 extern int32_t ocs_scsi_del_target(ocs_node_t *node, ocs_scsi_del_target_reason_e reason);
 
 /* Calls from the initiator-client to the base driver */
@@ -379,6 +363,15 @@ extern int32_t ocs_scsi_send_tmf(ocs_node_t *node, ocs_io_t *io, ocs_io_t *io_to
 	ocs_scsi_tmf_cmd_e tmf, ocs_scsi_sgl_t *sgl, uint32_t sgl_count, uint32_t len, ocs_scsi_rsp_io_cb_t cb, void *arg);
 extern int32_t ocs_scsi_send_nodata_io(ocs_node_t *node, ocs_io_t *io, uint64_t lun, void *cdb, uint32_t cdb_len, ocs_scsi_rsp_io_cb_t cb, void *arg);
 extern void ocs_scsi_del_target_complete(ocs_node_t *node);
+extern void ocs_scsi_io_timedout(ocs_io_t *io);
+
+typedef enum {
+	OCS_SCSI_DDUMP_DEVICE,
+	OCS_SCSI_DDUMP_DOMAIN,
+	OCS_SCSI_DDUMP_SPORT,
+	OCS_SCSI_DDUMP_NODE,
+	OCS_SCSI_DDUMP_IO,
+} ocs_scsi_ddump_type_e;
 
 /* base driver to target/initiator */
 
@@ -386,10 +379,22 @@ typedef struct {
 	void *vaddr;
 	uint32_t length;
 } ocs_scsi_vaddr_len_t;
+
 extern int32_t ocs_scsi_get_block_vaddr(ocs_io_t *io, uint64_t blocknumber, ocs_scsi_vaddr_len_t addrlen[],
 	uint32_t max_addrlen, void **dif_vaddr);
 
+extern void ocs_fc_encode_lun(ocs_node_t *node, uint64_t lun, uint8_t *lu);
+extern uint64_t ocs_fc_decode_lun(ocs_node_t *node, uint8_t *lu);
+
 extern void ocs_scsi_ini_ddump(ocs_textbuf_t *textbuf, ocs_scsi_ddump_type_e type, void *obj);
 extern void ocs_scsi_tgt_ddump(ocs_textbuf_t *textbuf, ocs_scsi_ddump_type_e type, void *obj);
+extern void ocs_scsi_tgt_notify_node_force_free(ocs_node_t *node);
+
+void ocs_scsi_tgt_cancel_io(ocs_t *ocs);
+void ocs_scsi_tgt_sess_del_wait(ocs_sport_t *sport);
+void ocs_scsi_tgt_vport_node_shutdown(ocs_sport_t *sport);
+void ocs_scsi_tgt_count_sessions(ocs_t *ocs, uint64_t wwpn);
+int32_t ocs_scsi_tgt_port_online(ocs_t *ocs);
+extern void ocs_vport_logout_notify(ocs_node_t *node);
 
 #endif // __OCS_SCSI_H__

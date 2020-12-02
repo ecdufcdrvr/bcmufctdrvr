@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -58,18 +57,28 @@ ocs_process_sli_config(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd, ocs_dma_t *dma)
 				  	(sli4_req_common_read_object_t *)sli_config->payload.embed;
 
 				if (ocs_dma_alloc(ocs, dma, mcmd->out_bytes, 4096)) {
-					ocs_log_err(ocs, "%s: COMMON_READ_OBJECT - %" PRIX64 " allocation failed\n",
-							__func__, mcmd->out_bytes);
+					ocs_log_err(ocs, "COMMON_READ_OBJECT - %" PRIX64 " allocation failed\n",
+						    mcmd->out_bytes);
 					return ENXIO;
 				}
 
-				memset(dma->virt, 0, mcmd->out_bytes);
+				ocs_memset(dma->virt, 0, mcmd->out_bytes);
 
 				rdobj->host_buffer_descriptor[0].bde_type = SLI4_BDE_TYPE_BDE_64;
 				rdobj->host_buffer_descriptor[0].buffer_length = mcmd->out_bytes;
 				rdobj->host_buffer_descriptor[0].u.data.buffer_address_low = ocs_addr32_lo(dma->phys);
 				rdobj->host_buffer_descriptor[0].u.data.buffer_address_high = ocs_addr32_hi(dma->phys);
 
+				if (ocs->fw_dump.type == OCS_FW_DUMP_TYPE_FLASH) {
+					if (0 == ocs_strncmp(rdobj->object_name, READ_OBJECT_NAME_DUMP,
+							     sizeof(rdobj->object_name))) {
+						/*
+						 * Reset FW dump flags here when the first readobject for dump
+						 * was requested.
+						 */
+						ocs_fw_dump_state_set(ocs, OCS_FW_DUMP_STATE_NONE);
+					}
+				}
 			}
 			break;
 		case SLI4_OPC_COMMON_WRITE_OBJECT:
@@ -78,8 +87,8 @@ ocs_process_sli_config(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd, ocs_dma_t *dma)
 			  	(sli4_req_common_write_object_t *)sli_config->payload.embed;
 
 			if (ocs_dma_alloc(ocs, dma, wrobj->desired_write_length, 4096)) {
-				ocs_log_err(ocs, "%s: COMMON_WRITE_OBJECT - %d allocation failed\n",
-						__func__, wrobj->desired_write_length);
+				ocs_log_err(ocs, "COMMON_WRITE_OBJECT - %d allocation failed\n",
+					    wrobj->desired_write_length);
 				return ENXIO;
 			}
 			// setup the descriptor
@@ -90,7 +99,7 @@ ocs_process_sli_config(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd, ocs_dma_t *dma)
 
 			// copy the data into the DMA buffer
 			if (ocs_copy_from_user(dma->virt, (void *)mcmd->in_addr, mcmd->in_bytes)) {
-				ocs_log_warn(ocs, "%s: copy_from_user() failed\n", __func__);
+				ocs_log_warn(ocs, "copy_from_user() failed\n");
 				return EFAULT;
 			}
 
@@ -103,8 +112,8 @@ ocs_process_sli_config(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd, ocs_dma_t *dma)
 				sli4_req_common_read_object_list_t *rdobj =
 					(sli4_req_common_read_object_list_t *)sli_config->payload.embed;
 				if (ocs_dma_alloc(ocs, dma, mcmd->out_bytes, 4096)) {
-					ocs_log_err(ocs, "%s: COMMON_READ_OBJECT_LIST - %" PRIX64 " allocation failed\n",
-							__func__, mcmd->out_bytes);
+					ocs_log_err(ocs, "COMMON_READ_OBJECT_LIST - %" PRIX64 " allocation failed\n",
+						    mcmd->out_bytes);
 					return ENXIO;
 				}
 
@@ -119,24 +128,28 @@ ocs_process_sli_config(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd, ocs_dma_t *dma)
 			break;
 		case SLI4_OPC_COMMON_READ_TRANSCEIVER_DATA:
 			break;
+		case SLI4_OPC_FCOE_SET_LINK_DIAG_STATE:
+		case SLI4_OPC_FCOE_SET_LINK_DIAG_LOOPBACK:
+		case SLI4_OPC_FCOE_SET_DPORT_MODE:
+		case SLI4_OPC_FCOE_GET_DPORT_RESULTS:
+			break;
+
 		default:
-			ocs_log_info(ocs, "%s: in=%p (%" PRIX64 ") out=%p (%" PRIX64 ")\n", __func__,
+			ocs_log_info(ocs, "in=%p (%" PRIX64 ") out=%p (%" PRIX64 ")\n",
 					(void *)mcmd->in_addr, mcmd->in_bytes,
 					(void *)mcmd->out_addr, mcmd->out_bytes);
-			ocs_log_info(ocs, "%s: unknown (opc=%#x)\n", __func__,
-					req->opcode);
+			ocs_log_info(ocs, "unknown (opc=%#x)\n", req->opcode);
 			break;
 		}
 	} else {
 		uint32_t max_bytes = max(mcmd->in_bytes, mcmd->out_bytes);
 		if (ocs_dma_alloc(ocs, dma, max_bytes, 4096)) {
-			ocs_log_err(ocs, "%s: non-embedded - %u allocation failed\n",
-					__func__, max_bytes);
+			ocs_log_err(ocs, "non-embedded - %u allocation failed\n", max_bytes);
 			return ENXIO;
 		}
 
 		if (ocs_copy_from_user(dma->virt, (void *)mcmd->in_addr, mcmd->in_bytes)) {
-			ocs_log_warn(ocs, "%s: copy_from_user failed\n", __func__);
+			ocs_log_warn(ocs, "copy_from_user failed\n");
 			return ENXIO;
 		}
 
@@ -158,8 +171,7 @@ ocs_elxu(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd)
 	// sanity checks
 	if ((ELXU_BSD_MAGIC != mcmd->magic) ||
 			(sizeof(*mcmd) != mcmd->size)) {
-		ocs_log_debug(ocs, "%s: malformed command m=%08x s=%08x\n",
-				__func__, mcmd->magic, mcmd->size);
+		ocs_log_debug(ocs, "malformed command m=%08x s=%08x\n", mcmd->magic, mcmd->size);
 		return EINVAL;
 	}
 
@@ -174,11 +186,12 @@ ocs_elxu(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd)
 	case SLI4_MBOX_COMMAND_READ_STATUS:
 	case SLI4_MBOX_COMMAND_READ_LNK_STAT:
 	case SLI4_MBOX_COMMAND_DUMP:
+	case SLI4_OPC_COMMON_RUN_BIU_DIAG:
 		break;
 
 	default:
-		ocs_log_debug(NULL, "command %d\n",((sli4_mbox_command_header_t *)mcmd->payload)->command);
-		ocs_log_debug(NULL, "%s, command not support\n", __func__);
+		ocs_log_debug(NULL, "command %d not supported\n",
+			((sli4_mbox_command_header_t *)mcmd->payload)->command);
 		goto no_support;
 		break;
 
@@ -194,12 +207,12 @@ ocs_elxu(ocs_t *ocs, ocs_ioctl_elxu_mbox_t *mcmd)
 		if(SLI4_MBOX_COMMAND_SLI_CONFIG == ((sli4_mbox_command_header_t *)mcmd->payload)->command &&
 			mcmd->out_bytes && dma.virt) {
 			if (ocs_copy_to_user((void *)mcmd->out_addr, dma.virt, mcmd->out_bytes)) {
-				ocs_log_warn(ocs, "%s: copy_to_user failed\n", __func__);
+				ocs_log_warn(ocs, "copy_to_user failed\n");
 				rc = -ENXIO;
 			}
 		}
 	} else {
-		ocs_log_warn(ocs, "%s: hal command was interrupted\n", __func__);
+		ocs_log_warn(ocs, "hal command was interrupted\n");
 		rc = -ENXIO;
 	}
 

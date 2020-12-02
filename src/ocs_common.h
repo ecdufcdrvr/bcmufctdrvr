@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -43,6 +42,8 @@
 #include "ocs_common_shared.h"
 #include "ocs_sm.h"
 #include "spv.h"
+#include "ocs_auth.h"
+#include "ocs_mgmt.h"
 
 typedef enum {OCS_XPORT_FC, OCS_XPORT_ISCSI} ocs_xport_e;
 
@@ -51,6 +52,12 @@ typedef enum {OCS_XPORT_FC, OCS_XPORT_ISCSI} ocs_xport_e;
 #define OCS_DISPLAY_BUS_INFO_LENGTH		16
 
 #define OCS_WWN_LENGTH				32
+
+#define OCS_INITIATOR_TYPE_FCP			0x1
+#define OCS_INITIATOR_TYPE_NVME			0x2
+
+#define OCS_TARGET_TYPE_FCP			0x1
+#define OCS_TARGET_TYPE_NVME			0x2
 
 typedef struct ocs_hal_s ocs_hal_t;
 typedef struct ocs_domain_s ocs_domain_t;
@@ -167,11 +174,17 @@ struct ocs_sli_port_s {
 	ocs_sm_ctx_t	sm;			/**< sport context state machine */
 	sparse_vector_t lookup;			/**< fc_id to node lookup object */
 	ocs_list_link_t link;
+	ocs_ref_t	ref;			/**< refcount object */
 	uint32_t	enable_ini:1,		/**< SCSI initiator enabled for this node */
 			enable_tgt:1,		/**< SCSI target enabled for this node */
 			enable_rscn:1,		/**< This SPORT will be expecting RSCN */
 			shutting_down:1,	/**< sport in process of shutting down */
-			p2p_winner:1;		/**< TRUE if we're the point-to-point winner */
+			p2p_winner:1,		/**< TRUE if we're the point-to-point winner */
+			unreg_rpi_all:1,	/**< unreg all RPIs for a given VPI */
+			re_enable:1;		/**< TRUE if sport need to schedule for re-enable */
+
+	uint8_t		ini_fc_types;		/**< NVME/SCSI initiator */
+	uint8_t		tgt_fc_types;		/**< NVME/SCSI target */
 
 	ocs_sport_topology_e topology;		/**< topology: fabric/p2p/unknown */
 	uint8_t		service_params[OCS_SERVICE_PARMS_LENGTH]; /**< Login parameters */
@@ -183,6 +196,8 @@ struct ocs_sli_port_s {
 	uint32_t	node_group_dir_next_instance; /**< HLM next node group directory instance value */
 	uint32_t	node_group_next_instance; /**< HLM next node group instance value */
 	ocs_list_t	node_group_dir_list;
+	uint32_t	fdmi_hba_mask;
+	uint32_t	fdmi_port_mask;
 };
 
 /**
@@ -200,6 +215,7 @@ struct ocs_domain_s {
 	ocs_scsi_ini_domain_t ini_domain;	/**< initiator backend private domain data */
 	ocs_scsi_tgt_domain_t tgt_domain;	/**< target backend private domain data */
 	ocs_mgmt_functions_t *mgmt_functions;
+	uint32_t	evtdepth; 	/**< current event posting nesting depth. Free doing only when 0 */
 
 	/* Declarations private to HAL/SLI */
 	ocs_hal_t	*hal;		/**< pointer to HAL */
@@ -223,7 +239,8 @@ struct ocs_domain_s {
 			is_nlport:1,	/**< is public loop */
 			domain_found_pending:1,	/**< A domain found is pending, drec is updated */
 			req_domain_free:1,	/**< True if domain object should be free'd */
-			req_accept_frames:1;	/**< set in domain state machine to enable frames */
+			req_accept_frames:1,	/**< set in domain state machine to enable frames */
+			domain_notify_pend:1;  /** Set in domain SM to avoid duplicate node event post */
 	ocs_domain_record_t pending_drec; /**< Pending drec if a domain found is pending */
 	uint8_t		service_params[OCS_SERVICE_PARMS_LENGTH]; /**< any sports service parameters */
 	uint8_t		flogi_service_params[OCS_SERVICE_PARMS_LENGTH]; /**< Fabric/P2p service parameters from FLOGI */
@@ -246,6 +263,30 @@ struct ocs_domain_s {
 	ocs_bitmap_t *portid_pool;
 	ocs_ns_t *ocs_ns;			/*>> Directory(Name) services data */
 };
+
+struct ocs_domain_exec_arg_s;
+
+typedef struct ocs_sport_exec_arg_s {
+	uint32_t arg_in_length;
+	void *arg_in;
+	uint32_t arg_out_length;
+	void *arg_out;
+	int32_t retval;
+	struct ocs_domain_exec_arg_s *domain_exec_args;
+	void (*exec_cb)(ocs_sport_t *sport, void *arg);
+} ocs_sport_exec_arg_t;
+
+typedef struct ocs_domain_exec_arg_s {
+	uint32_t arg_in_length;
+	void *arg_in;
+	uint32_t arg_out_length;
+	void *arg_out;
+	int32_t retval;
+	ocs_sem_t sem;
+	ocs_atomic_t ref_cnt;
+	ocs_sport_exec_arg_t sport_exec_args;
+	void (*exec_cb)(ocs_domain_t *, void *arg);
+} ocs_domain_exec_arg_t;
 
 /**
  * @brief Remote Node object
@@ -298,10 +339,10 @@ typedef enum {
 } ocs_node_shutd_rsn_e;
 
 typedef enum {
-	OCS_NODE_SEND_LS_ACC_NONE = 0,
-	OCS_NODE_SEND_LS_ACC_PLOGI,
-	OCS_NODE_SEND_LS_ACC_PRLI,
-} ocs_node_send_ls_acc_e;
+	OCS_NODE_SEND_LS_RSP_NONE = 0,
+	OCS_NODE_SEND_LS_RSP_PLOGI,
+	OCS_NODE_SEND_LS_RSP_PRLI,
+} ocs_node_send_ls_rsp_e;
 
 /**
  * @brief FC Node object
@@ -311,13 +352,12 @@ struct ocs_node_s {
 
 	ocs_t *ocs;				/**< pointer back to ocs structure */
 	uint32_t instance_index;		/**< unique instance index value */
-	char display_name[2 * OCS_DISPLAY_NAME_LENGTH]; /**< Node display name */
+	char display_name[OCS_DISPLAY_NAME_LENGTH]; /**< Node display name */
 	ocs_sport_t *sport;
-	uint32_t hold_frames:1;			/**< hold incoming frames if true */
 	ocs_rlock_t lock;			/**< node wide lock */
 	ocs_lock_t active_ios_lock;		/**< active SCSI and XPORT I/O's for this node */
 	ocs_list_t active_ios;			/**< active I/O's for this node */
-	uint32_t max_wr_xfer_size;		/**< Max write IO size per phase for the transport */
+	uint64_t max_wr_xfer_size;		/**< Max write IO size per phase for the transport */
 	ocs_scsi_ini_node_t ini_node;		/**< backend initiator private node data */
 	ocs_scsi_tgt_node_t tgt_node;		/**< backend target private node data */
 	ocs_mgmt_functions_t *mgmt_functions;
@@ -329,24 +369,35 @@ struct ocs_node_s {
 	ocs_sm_ctx_t		sm;		/**< state machine context */
 	uint32_t		evtdepth;	/**< current event posting nesting depth */
 	uint32_t		req_free:1,	/**< this node is to be free'd */
+				mark_for_deletion:1, /**< this node is marked for deletion */
+				hold_frames:1,	/**< hold incoming frames if true */
 				attached:1,	/**< node is attached (REGLOGIN complete) */
 				fcp_enabled:1,	/**< node is enabled to handle FCP */
 				rscn_pending:1,	/**< for name server node RSCN is pending */
 				send_plogi:1,	/**< if initiator, send PLOGI at node initialization */
-				send_plogi_acc:1,/**< send PLOGI accept, upon completion of node attach */
+				send_plogi_acc:1, /**< send PLOGI accept, upon completion of node attach */
 				io_alloc_enabled:1; /**< TRUE if ocs_scsi_io_alloc() and ocs_els_io_alloc() are enabled */
-	ocs_node_send_ls_acc_e	send_ls_acc;	/**< type of LS acc to send */
-	ocs_io_t		*ls_acc_io;	/**< SCSI IO for LS acc */
-	uint32_t		ls_acc_oxid;	/**< OX_ID for pending accept */
-	uint32_t		ls_acc_did;	/**< D_ID for pending accept */
+
+	uint16_t		ini_fct_prli_success; /** initiator mode SCSI/NVME PRLI success */
+	uint16_t		tgt_fct_prli_success; /** target mode SCSI/NVME PRLI success */
+	uint16_t		prli_rsp_pend;	/** prli sent and waiting for response */
+
+	ocs_node_send_ls_rsp_e	send_ls_rsp;	/**< type of LS rsp to send */
+	ocs_io_t		*ls_rsp_io;	/**< SCSI IO for LS response */
+	uint32_t		ls_rsp_oxid;	/**< OX_ID for pending accept */
+	uint32_t		ls_rsp_did;	/**< D_ID for pending accept */
+	uint32_t		ls_rjt_reason_code; /** < Reason code for LS RJT */
+	uint32_t		ls_rjt_reason_expl_code; /** < Reason explanation code for LS RJT */
+	uint32_t		ls_rsp_fctype;	/**< FC_TYPE for pending request */
 	ocs_node_shutd_rsn_e	shutdown_reason;/**< reason for node shutdown */
 	ocs_dma_t		sparm_dma_buf;	/**< service parameters buffer */
 	uint8_t			service_params[OCS_SERVICE_PARMS_LENGTH]; /**< plogi/acc frame from remote device */
+	int32_t			suppress_rsp;	/**< Suppress Response requested */
 	ocs_lock_t		pend_frames_lock; /**< lock for inbound pending frames list */
 	ocs_list_t		pend_frames;	/**< inbound pending frames list */
-	uint32_t		pend_frames_processed;	/**< count of frames processed in hold frames interval */
+	uint32_t		pend_frames_processed; /**< count of frames processed in hold frames interval */
 	uint32_t		ox_id_in_use;	/**< used to verify one at a time us of ox_id */
-	uint32_t		els_retries_remaining;	/**< for ELS, number of retries remaining */
+	uint32_t		els_retries_remaining; /**< for ELS, number of retries remaining */
 	uint32_t		els_req_cnt;	/**< number of outstanding ELS requests */
 	uint32_t		els_cmpl_cnt;	/**< number of outstanding ELS completions */
 	uint32_t		abort_cnt;	/**< Abort counter for debugging purpose */
@@ -355,33 +406,44 @@ struct ocs_node_s {
 	char prev_state_name[OCS_DISPLAY_NAME_LENGTH]; /**< previous node state */
 	ocs_sm_event_t		current_evt;	/**< current event */
 	ocs_sm_event_t		prev_evt;	/**< current event */
-
-	uint32_t		targ:1,		/**< node is target capable */
-				init:1,		/**< node is init capable */
-				nvme_init:1,	/**< node is NVME tgt capable */
+	uint32_t		targ:1,		/**< node is scsi target capable */
+				init:1,		/**< node is scsi init capable */
+				nvme_init:1,	/**< node is NVME init capable */
 				nvme_tgt:1,	/**< node is NVME tgt capable */
-				refound:1;	/**< Handle node refound case when node is being deleted  */
-
-	uint32_t		nvme_prli_service_params;	
-
-	ocs_list_t		els_io_pend_list;   /**< list of pending (not yet processed) ELS IOs */
+				refound:1,	/**< Handle node refound case when node is being deleted */
+				unreg_rpi:1,	/**< Used for synchronizing unreg_rpi / unreg_rpi_all */
+				first_burst:1,
+				nvme_sler:1,
+				nvme_conf:1,
+				:23;
+	uint32_t		nvme_prli_service_params;
+	ocs_list_t		els_io_pend_list; /**< list of pending (not yet processed) ELS IOs */
 	ocs_list_t		els_io_active_list; /**< list of active (processed) ELS IOs */
 
 	ocs_sm_function_t	nodedb_state;	/**< Node debugging, saved state */
 
-	ocs_timer_t		gidft_delay_timer;	/**< GIDFT delay timer */
-	time_t			time_last_gidft_msec;	/**< Start time of last target RSCN GIDFT  */
+	ocs_timer_t		gidpt_delay_timer; /**< GIDPT delay timer */
+	time_t			time_last_gidpt_msec; /**< Start time of last target RSCN GIDPT */
 
 	/* WWN */
 	char wwnn[OCS_WWN_LENGTH];		/**< remote port WWN (uses iSCSI naming) */
 	char wwpn[OCS_WWN_LENGTH];		/**< remote port WWN (uses iSCSI naming) */
 
 	/* Statistics */
-	uint32_t		chained_io_count;	/**< count of IOs with chained SGL's */
+	uint32_t		chained_io_count; /**< count of IOs with chained SGL's */
 
 	ocs_list_link_t		link;		/**< node list link */
 
 	ocs_remote_node_group_t	*node_group;	/**< pointer to node group (if HLM enabled) */
+
+	/* runtime auth negotiation info with remote node */
+	union ocs_auth_info	auth;
+	/* copy of the auth cfg info for the local/remote node pair */
+	struct ocs_auth_cfg_info auth_cfg;
+	struct ocs_auth_cfg_pass auth_pass;
+#if !defined(OCS_USPACE)
+	ocs_ratelimit_state_t ratelimit;
+#endif
 };
 
 /**
@@ -398,14 +460,16 @@ struct ocs_vport_spec_s {
 	uint64_t wwpn;				/*>> port name */
 	uint32_t fc_id;				/*>> port id */
 	uint32_t enable_tgt:1,			/*>> port is a target */
-		 enable_ini:1,			/*>> port is an initiator */
-		 enable_nvme_tgt:1;		/**< NVME target functionality */
-
+		 enable_ini:1;			/*>> port is an initiator */
+	uint32_t ini_fc_types;			/*>> initiator mode FCP/NVME */
+	uint32_t tgt_fc_types;			/*>> target mode FCP/NVME */
 	ocs_list_link_t link;			/*>> link */
-	void	*tgt_data;			/**< target backend pointer */
-	void	*ini_data;			/**< initiator backend pointer */
+	void *tgt_data;				/**< target backend pointer */
+	void *ini_data;				/**< initiator backend pointer */
 	ocs_sport_t *sport;			/**< Used to match record after attaching for update */
 };
 
+extern void ocs_mgmt_domain_exec_cb(ocs_domain_t *domain, void *);
+extern void ocs_mgmt_sport_exec_cb(ocs_sport_t *sport, void *);
 
 #endif // __OCS_COMMON_H__

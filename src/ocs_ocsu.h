@@ -42,15 +42,20 @@
 
 extern int ocsu_init(void);
 extern int ocsu_wait(void);
-extern int32_t ocsu_create_event_threads(ocs_t *ocs, uint32_t num_interrupts);
 extern int32_t ocsu_terminate_event_threads(ocs_t *ocs);
 extern int32_t ocsu_wait_event(ocs_t *ocs, uint32_t num_interrupts);
 extern int32_t ocsu_wait_event_list(ocs_t *devlist[], uint8_t *pending, uint32_t devcount);
 extern int32_t ocsu_process_events(ocs_t *ocs);
-extern int ocs_spdk_fc_poller(void *arg);
-extern void ocs_spdk_poller_stop(ocs_t *ocs);
+extern int ocs_spdk_poller_stop(ocs_t *ocs);
+extern int ocs_spdk_poller_start(ocs_t *ocs);
 extern bool ocsu_device_remove(struct spdk_pci_addr *pci_addr);
 extern bool ocsu_device_add(struct spdk_pci_addr *pci_addr);
-extern struct spdk_thread *ocs_get_rsvd_thread(void);
+extern int32_t ocs_ioctl_server(ocs_thread_t *mythread);
+extern int32_t ocsu_spdk_worker_thread(ocs_thread_t *mythread);
+extern void ocs_device_delete_worker_thread(ocs_t *ocs);
+extern int ocs_send_msg_to_worker(ocs_t *ocs, ocs_spdk_worker_msg_t msg, bool sync,
+		       ocs_spdk_worker_func func, void *func_arg1);
+extern int32_t ocsu_spdk_shutdown_thread(ocs_thread_t *mythread);
+extern void ocsu_shutdown(void);
 
 #endif // __OCS_OCSU_H__

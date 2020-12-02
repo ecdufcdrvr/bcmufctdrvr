@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (c) 2011-2015, Emulex
+ * All rights reserved.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -46,7 +45,7 @@
 #include <stdarg.h>
 #include <sys/user.h>
 
-#include "dslab.h"
+#include <dslab.h>
 
 #define roundup(x,y)	((((x) + (y) - 1) / (y)) * (y))
 #define min(a,b)		((a) < (b) ? (a) : (b))
@@ -87,11 +86,12 @@ dslab_dir_new(void *os, dslab_callbacks_t *callbacks, uint32_t entry_count, uint
 		dir->entries = zalloc(sizeof(dslab_entry_t) * entry_count);
 		if (dir->entries == NULL) {
 			free(dir);
-			dir = NULL;
+			return NULL;	
 		}
 		for (i = 0, entry = dir->entries; i < dir->entry_count; i ++, entry ++) {
 			dslab_entry_init(dir, entry, 0);
 		}
+		pthread_mutex_init(&dir->lock, NULL);
 	}
 	return dir;
 }
@@ -110,6 +110,7 @@ dslab_dir_del(dslab_dir_t *dir)
 		if (dir->entries != NULL) {
 			free(dir->entries);
 		}
+		pthread_mutex_destroy(&dir->lock);
 		free(dir);
 	}
 }
@@ -238,6 +239,8 @@ dslab_item_new(dslab_dir_t *dir, uint32_t len)
 	dslab_item_t *item = NULL;
 	dslab_entry_t *entry;
 
+	pthread_mutex_lock(&dir->lock);
+
 	/* round up len to multiple of 16 */
 	len = roundup(len, 16);
 
@@ -254,6 +257,7 @@ dslab_item_new(dslab_dir_t *dir, uint32_t len)
 			/* Add a new slab to this entry */
 			if (dslab_slab_new(entry)) {
 				printf("Error: %s: dslab_slab_alloc() failed\n", __func__);
+				pthread_mutex_unlock(&dir->lock);
 				return NULL;
 			}
 		}
@@ -262,6 +266,7 @@ dslab_item_new(dslab_dir_t *dir, uint32_t len)
 		ocs_list_add_tail(&entry->inuse_list, item);
 	}
 
+	pthread_mutex_unlock(&dir->lock);
 	return item;
 }
 
@@ -273,8 +278,11 @@ dslab_item_del(dslab_item_t *item)
 	assert(item->dslab);
 	assert(item->dslab->entry);
 	entry = item->dslab->entry;
+
+	pthread_mutex_lock(&entry->dir->lock);
 	ocs_list_remove(&entry->inuse_list, item);
 	ocs_list_add_tail(&entry->free_list, item);
+	pthread_mutex_unlock(&entry->dir->lock);
 }
 
 static dslab_entry_t *

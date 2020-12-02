@@ -31,13 +31,13 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "ocs_internal.h"
-#include "ocs_pci.h"
 #include "ocs.h"
 #include "ocs_ocsu.h"
+#include "ocs_internal.h"
+#include "ocs_pci.h"
 #include "fc.h"
 #include "ocs_spdk.h"
-#include "ocs_impl.h"
+#include "ocs_impl_spdk.h"
 #include "nvmf_fc.h"
 
 struct spdk_ocs_t *spdk_ocs_devices[MAX_OCS_DEVICES];
@@ -54,19 +54,13 @@ static struct ocs_driver g_ocs_driver = {
 
 struct spdk_ocs_t *spdk_ocs_attach(void *device);
 static uint32_t spdk_ocs_instance;
-void ocs_spdk_exit(void);
+void ocsu_exit(void);
 void ocs_pci_set_bus_master(struct spdk_ocs_t *, bool );
-
-void spdk_fc_shutdown(void)
-{
-	printf("Shutting down all OCS devices\n");
-	ocs_spdk_exit();
-}
 
 static int
 ocs_map_pci_bar(struct spdk_ocs_t *ocs)
 {
-	int bar, rc = 0;
+	int bar, rc = 0, bar_idx = 0;
 	void *addr;
 	uint64_t phys_addr, size;
 
@@ -74,20 +68,28 @@ ocs_map_pci_bar(struct spdk_ocs_t *ocs)
 	for (bar = 0; bar < PCI_MAX_BAR; bar++) {
 		size = 0;
 		rc = spdk_pci_device_map_bar(ocs->pdev, bar, &addr, &phys_addr, &size);
+		
+		if (rc && bar) {
+			/* If bar 0 is mapped, neglect failures for other bars. */
+		}	rc = 0;
+
 		if (rc) {
 			printf("Failed to map bar: %d\n", bar);
-			rc = 0;
+			return rc;
 		}
 
 		if (size) {
-			ocs->bars[bar].paddr = phys_addr;
-			ocs->bars[bar].vaddr = addr;
-			ocs->bars[bar].size  = size;
-			ocs_spdk_printf(ocs, "%s:bar[%d] mapped\n", __func__, bar);
-		}
+			ocs->bars[bar_idx].paddr = phys_addr;
+			ocs->bars[bar_idx].vaddr = addr;
+			ocs->bars[bar_idx].size  = size;
+			ocs_spdk_printf(ocs, "PCI function [%s] BAR-%d mapped\n",
+					ocs->businfo, bar);
 
-		ocs->bar_count++;
+			bar_idx++;
+		}
 	}
+
+	ocs->bar_count = bar_idx;
 
 	return rc;
 }

@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -41,6 +40,7 @@
 #include "ocs_ddump.h"
 
 #define DEFAULT_SAVED_DUMP_SIZE		(4*1024*1024)
+#define OCS_DDUMP_MAX_SIZE		(32*1024*1024)
 
 void hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal);
 
@@ -60,11 +60,16 @@ void hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal);
  */
 
 static void
-ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal, sli4_queue_t *q, uint32_t q_count, uint32_t qentries)
+ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal,
+			sli4_queue_t **queue, uint32_t q_count, uint32_t qentries)
 {
-	uint32_t i;
+	uint32_t i, j;
 
-	for (i = 0; i < q_count; i ++, q ++) {
+	for (i = 0; i < q_count; i++) {
+		sli4_queue_t *q = queue[i];
+
+		ocs_assert(q);
+		ocs_lock(&q->lock);
 		ocs_ddump_section(textbuf, name, i);
 		ocs_ddump_value(textbuf, "index", "%d", q->index);
 		ocs_ddump_value(textbuf, "size", "%d", q->size);
@@ -76,8 +81,6 @@ ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal, s
 		ocs_ddump_value(textbuf, "posted_limit", "%d", q->posted_limit);
 		ocs_ddump_value(textbuf, "max_num_processed", "%d", q->max_num_processed);
 		ocs_ddump_value(textbuf, "max_process_time", "%ld", q->max_process_time);
-		ocs_ddump_value(textbuf, "virt_addr", "%p", q->dma.virt);
-		ocs_ddump_value(textbuf, "phys_addr", "%lx", q->dma.phys);
 
 		/* queue-specific information */
 		switch (q->type) {
@@ -86,8 +89,12 @@ ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal, s
 			break;
 		case SLI_QTYPE_CQ:
 			ocs_ddump_value(textbuf, "is_mq", "%d", q->u.flag.is_mq);
+			ocs_ddump_value(textbuf, "cq_last_processed_time", "%u", q->last_processed_time);
 			break;
 		case SLI_QTYPE_WQ:
+			break;
+		case SLI_QTYPE_EQ:
+			ocs_ddump_value(textbuf, "eq_last_processed_time", "%u", q->last_processed_time);
 			break;
 		case SLI_QTYPE_RQ: {
 			uint32_t i;
@@ -101,9 +108,11 @@ ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal, s
 			/* loop through RQ tracker to see how many RQEs were produced */
 			for (i = 0; i < hal->hal_rq_count; i++) {
 				rq = hal->hal_rq[i];
-				for (j = 0; j < rq->entry_count; j++) {
-					if (rq->rq_tracker[j] != NULL) {
-						rqe_count++;
+				if (rq) {
+					for (j = 0; j < rq->entry_count; j++) {
+						if (rq->rq_tracker[j] != NULL) {
+							rqe_count++;
+						}
 					}
 				}
 			}
@@ -111,9 +120,16 @@ ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal, s
 			break;
 		}
 		}
-		ocs_ddump_queue_entries(textbuf, q->dma.virt, q->size, q->length,
-					((q->type == SLI_QTYPE_MQ) ? q->u.r_idx : q->index),
-					qentries);
+
+		for (j = 0; j < SLI_Q_DMA_CHUNKS && q->dma[j].virt; j++) {
+			uint32_t page_num_qes = (q->dma[j].size / q->size); // (dma_page_size / qentry_size)
+
+			ocs_ddump_value(textbuf, "virt_addr", "[%d]: %p", j, q->dma[j].virt);
+			ocs_ddump_value(textbuf, "phys_addr", "[%d]: %lx", j, q->dma[j].phys);
+			ocs_ddump_queue_entries(textbuf, q->dma[j].virt, q->size, page_num_qes,
+				((q->type == SLI_QTYPE_MQ) ? q->u.r_idx : q->index), qentries);
+		}
+		ocs_unlock(&q->lock);
 		ocs_ddump_endsection(textbuf, name, i);
 	}
 }
@@ -178,24 +194,55 @@ ocs_ddump_sli(ocs_textbuf_t *textbuf, sli4_t *sli4)
 	ocs_ddump_value(textbuf, "if_type", "%d", sli4->if_type);
 
 	switch(sli4->asic_type) {
-	case SLI4_ASIC_TYPE_BE3:	p = "BE3"; break;
-	case SLI4_ASIC_TYPE_SKYHAWK:	p = "Skyhawk"; break;
-	case SLI4_ASIC_TYPE_LANCER:	p = "Lancer"; break;
-	case SLI4_ASIC_TYPE_LANCERG6:	p = "LancerG6"; break;
-	default:			p = "unknown"; break;
+	case SLI4_ASIC_TYPE_BE3:
+		p = "BE3";
+		break;
+	case SLI4_ASIC_TYPE_SKYHAWK:
+		p = "Skyhawk";
+		break;
+	case SLI4_ASIC_TYPE_LANCER:
+		p = "Lancer";
+		break;
+	case SLI4_ASIC_TYPE_LANCERG6:
+		p = "LancerG6";
+		break;
+	case SLI4_ASIC_TYPE_LANCERG7:
+		p = "LancerG7";
+		break;
+	default:
+		p = "Unknown";
+		break;
 	}
 	ocs_ddump_value(textbuf, "asic_type", "%s", p);
 
 	switch(sli4->asic_rev) {
-	case SLI4_ASIC_REV_FPGA:	p = "fpga"; break;
-	case SLI4_ASIC_REV_A0:		p = "A0"; break;
-	case SLI4_ASIC_REV_A1:		p = "A1"; break;
-	case SLI4_ASIC_REV_A2:		p = "A2"; break;
-	case SLI4_ASIC_REV_A3:		p = "A3"; break;
-	case SLI4_ASIC_REV_B0:		p = "B0"; break;
-	case SLI4_ASIC_REV_C0:		p = "C0"; break;
-	case SLI4_ASIC_REV_D0:		p = "D0"; break;
-	default:			p = "unknown"; break;
+	case SLI4_ASIC_REV_FPGA:
+		p = "FPGA";
+		break;
+	case SLI4_ASIC_REV_A0:
+		p = "A0";
+		break;
+	case SLI4_ASIC_REV_A1:
+		p = "A1";
+		break;
+	case SLI4_ASIC_REV_A2:
+		p = "A2";
+		break;
+	case SLI4_ASIC_REV_A3:
+		p = "A3";
+		break;
+	case SLI4_ASIC_REV_B0:
+		p = "B0";
+		break;
+	case SLI4_ASIC_REV_C0:
+		p = "C0";
+		break;
+	case SLI4_ASIC_REV_D0:
+		p = "D0";
+		break;
+	default:
+		p = "Unknown";
+		break;
 	}
 	ocs_ddump_value(textbuf, "asic_rev", "%s", p);
 
@@ -285,7 +332,7 @@ ocs_ddump_hal_io(ocs_textbuf_t *textbuf, ocs_hal_io_t *io)
 	ocs_ddump_value(textbuf, "ref_count", "%d", ocs_ref_read_count(&io->ref));
 
 	/* just to make it obvious, display abort bit from tag */
-	ocs_ddump_value(textbuf, "abort", "0x%x", io->abort_in_progress);
+	ocs_ddump_value(textbuf, "abort_issued", "0x%x", io->abort_issued);
 	ocs_ddump_value(textbuf, "wq_index", "%d", (io->wq == NULL ? 0xffff : io->wq->instance));
 	ocs_ddump_value(textbuf, "type", "%d", io->type);
 	ocs_ddump_value(textbuf, "xbusy", "%d", io->xbusy);
@@ -299,7 +346,6 @@ ocs_ddump_hal_io(ocs_textbuf_t *textbuf, ocs_hal_io_t *io)
 }
 
 #if defined(OCS_DEBUG_QUEUE_HISTORY)
-
 /**
  * @brief Generate queue history ddump
  *
@@ -310,6 +356,9 @@ static void
 ocs_ddump_queue_history(ocs_textbuf_t *textbuf, ocs_hal_q_hist_t *q_hist)
 {
 	uint32_t x;
+
+	if (!textbuf)
+		return;
 
 	ocs_ddump_section(textbuf, "q_hist", 0);
 	ocs_ddump_value(textbuf, "count", "%ld", OCS_Q_HIST_SIZE);
@@ -447,6 +496,7 @@ ocs_ddump_hal(ocs_textbuf_t *textbuf, ocs_hal_t *hal, uint32_t flags, uint32_t q
 	ocs_ddump_value(textbuf, "n_io", "%d", hal->config.n_io);
 
 	ocs_ddump_value(textbuf, "queue_topology", "%s", hal->config.queue_topology);
+	ocs_ddump_value(textbuf, "rr_quanta", "%d", hal->config.rr_quanta);
 	for (i = 0; i < ARRAY_SIZE(hal->config.filter_def); i++) {
 		ocs_ddump_value(textbuf, "filter_def", "%08X", hal->config.filter_def[i]);
 	}
@@ -515,7 +565,9 @@ ocs_ddump_hal(ocs_textbuf_t *textbuf, ocs_hal_t *hal, uint32_t flags, uint32_t q
 	/* now check the IOs not in a list; i.e. sequence coalescing xris */
 	ocs_ddump_section(textbuf, "port_owned_ios", ocs->instance_index);
 	for (i = 0; i < hal->config.n_io; i++) {
-		io = &hal->io[i];
+		io = hal->io[i];
+		if (!io)
+			continue;
 
 		if (ocs_hal_is_xri_port_owned(hal, io->indicator)) {
 			if (ocs_ref_read_count(&io->ref)) {
@@ -586,6 +638,7 @@ hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal)
 					OCS_STAT(ocs_ddump_value(textbuf, "use_count", "%d", wq->use_count));
 					ocs_ddump_value(textbuf, "wqec_count", "%d", wq->wqec_count);
 					ocs_ddump_value(textbuf, "free_count", "%d", wq->free_count);
+					ocs_ddump_value(textbuf, "fw_sfq_enabled", "%d", wq->fw_sfq_enabled);
 					OCS_STAT(ocs_ddump_value(textbuf, "wq_pending_count", "%d",
 								 wq->wq_pending_count));
 					ocs_ddump_endsection(textbuf, "wq", wq->instance);
@@ -607,6 +660,8 @@ hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal)
 						OCS_STAT(ocs_ddump_value(textbuf, "payload-id", "%d", rq->data->id));
 						OCS_STAT(ocs_ddump_value(textbuf, "payload_use_count", "%d", rq->payload_use_count));
 					}
+					ocs_ddump_value(textbuf, "rq_empty_warn_count", "%d", rq->rq_empty_warn_count);
+					ocs_ddump_value(textbuf, "rq_empty_err_count", "%d", rq->rq_empty_err_count);
 					ocs_ddump_endsection(textbuf, "rq", rq->instance);
 					break;
 				default:
@@ -650,9 +705,8 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 	ocs_ddump_section(textbuf, "ocs", ocs->instance_index);
 
 	ocs_ddump_section(textbuf, "ocs_os", ocs->instance_index);
-#ifdef OCS_ENABLE_NUMA_SUPPORT
 	ocs_ddump_value(textbuf, "numa_node", "%d", ocs->ocs_os.numa_node);
-#endif
+
 	ocs_ddump_endsection(textbuf, "ocs_os", ocs->instance_index);
 
 	ocs_ddump_value(textbuf, "drv_name", "%s", DRV_NAME);
@@ -660,47 +714,76 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 	ocs_ddump_value(textbuf, "display_name", "%s", ocs->display_name);
 	ocs_ddump_value(textbuf, "enable_ini", "%d", ocs->enable_ini);
 	ocs_ddump_value(textbuf, "enable_tgt", "%d", ocs->enable_tgt);
-	ocs_ddump_value(textbuf, "nodes_count", "%d", xport->nodes_count);
 	ocs_ddump_value(textbuf, "enable_hlm", "%d", ocs->enable_hlm);
 	ocs_ddump_value(textbuf, "hlm_group_size", "%d", ocs->hlm_group_size);
-	ocs_ddump_value(textbuf, "auto_xfer_rdy_size", "%d", ocs->auto_xfer_rdy_size);
-	ocs_ddump_value(textbuf, "io_alloc_failed_count", "%d", ocs_atomic_read(&xport->io_alloc_failed_count));
-	ocs_ddump_value(textbuf, "io_active_count", "%d", ocs_atomic_read(&xport->io_active_count));
-	ocs_ddump_value(textbuf, "io_pending_count", "%d", ocs_atomic_read(&xport->io_pending_count));
-	ocs_ddump_value(textbuf, "io_total_alloc", "%d", ocs_atomic_read(&xport->io_total_alloc));
-	ocs_ddump_value(textbuf, "io_total_free", "%d", ocs_atomic_read(&xport->io_total_free));
-	ocs_ddump_value(textbuf, "io_total_pending", "%d", ocs_atomic_read(&xport->io_total_pending));
-	ocs_ddump_value(textbuf, "io_pending_recursing", "%d", ocs_atomic_read(&xport->io_pending_recursing));
-	ocs_ddump_value(textbuf, "max_isr_time_msec", "%d", ocs->max_isr_time_msec);
-	for (i = 0; i < SLI4_MAX_FCFI; i++) {
-		ocs_lock(&xport->fcfi[i].pend_frames_lock);
-		if (!ocs_list_empty(&xport->fcfi[i].pend_frames)) {
-			ocs_hal_sequence_t *frame;
-			ocs_ddump_section(textbuf, "pending_frames", i);
-			ocs_ddump_value(textbuf, "hold_frames", "%d", xport->fcfi[i].hold_frames);
-			ocs_list_foreach(&xport->fcfi[i].pend_frames, frame) {
-				fc_header_t *hdr;
-				char buf[128];
+	ocs_ddump_value(textbuf, "fw_dump_type", "%d", ocs->fw_dump.type);
 
-				hdr = frame->header->dma.virt;
-				ocs_snprintf(buf, sizeof(buf), "%02x/%04x/%04x len %ld",
-				 hdr->r_ctl, ocs_be16toh(hdr->ox_id), ocs_be16toh(hdr->rx_id),
-				 frame->payload->dma.len);
-				ocs_ddump_value(textbuf, "frame", "%s", buf);
+	/* Dump XPORT data */
+	if (xport) {
+		ocs_ddump_value(textbuf, "nodes_count", "%d", xport->nodes_count);
+		ocs_ddump_value(textbuf, "io_alloc_failed_count", "%d", ocs_atomic_read(&xport->io_alloc_failed_count));
+#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+		ocs_ddump_value(textbuf, "io_active_count", "%lld", percpu_counter_sum_positive(&xport->io_active_count));
+		ocs_ddump_value(textbuf, "io_total_alloc", "%lld", percpu_counter_sum_positive(&xport->io_total_alloc));
+		ocs_ddump_value(textbuf, "io_total_free", "%lld", percpu_counter_sum_positive(&xport->io_total_free));
+#else
+		ocs_ddump_value(textbuf, "io_active_count", "%d", ocs_atomic_read(&xport->io_active_count));
+		ocs_ddump_value(textbuf, "io_total_alloc", "%d", ocs_atomic_read(&xport->io_total_alloc));
+		ocs_ddump_value(textbuf, "io_total_free", "%d", ocs_atomic_read(&xport->io_total_free));
+#endif
+		ocs_ddump_value(textbuf, "io_pending_count", "%d", ocs_atomic_read(&xport->io_pending_count));
+		ocs_ddump_value(textbuf, "io_total_pending", "%d", ocs_atomic_read(&xport->io_total_pending));
+		ocs_ddump_value(textbuf, "io_pending_recursing", "%d", ocs_atomic_read(&xport->io_pending_recursing));
+		ocs_ddump_value(textbuf, "max_isr_time_msec", "%d", ocs->max_isr_time_msec);
+		for (i = 0; i < SLI4_MAX_FCFI; i++) {
+			ocs_lock(&xport->fcfi[i].pend_frames_lock);
+			if (!ocs_list_empty(&xport->fcfi[i].pend_frames)) {
+				ocs_hal_sequence_t *frame;
+				ocs_ddump_section(textbuf, "pending_frames", i);
+				ocs_ddump_value(textbuf, "hold_frames", "%d", xport->fcfi[i].hold_frames);
+				ocs_list_foreach(&xport->fcfi[i].pend_frames, frame) {
+					fc_header_t *hdr;
+					char buf[256];
+
+					hdr = frame->header.data;
+					ocs_snprintf(buf, sizeof(buf), "%02x/%06x/%02x/%02x/%04x/%04x len 0x%x",
+						     hdr->type, fc_be24toh(hdr->f_ctl), hdr->r_ctl, hdr->info,
+						     ocs_be16toh(hdr->ox_id), ocs_be16toh(hdr->rx_id),
+						     frame->payload.data_len);
+					ocs_ddump_value(textbuf, "frame", "%s", buf);
+				}
+				ocs_ddump_endsection(textbuf, "pending_frames", i);
 			}
-			ocs_ddump_endsection(textbuf, "pending_frames", i);
+			ocs_unlock(&xport->fcfi[i].pend_frames_lock);
 		}
-		ocs_unlock(&xport->fcfi[i].pend_frames_lock);
-	}
 
-	ocs_lock(&xport->io_pending_lock);
+		ocs_lock(&xport->io_pending_lock);
 		ocs_ddump_section(textbuf, "io_pending_list", ocs->instance_index);
 		ocs_list_foreach(&xport->io_pending_list, io) {
 			ocs_ddump_io(textbuf, io);
 		}
 		ocs_ddump_endsection(textbuf, "io_pending_list", ocs->instance_index);
-	ocs_unlock(&xport->io_pending_lock);
+		ocs_unlock(&xport->io_pending_lock);
 
+
+		/* Dump any pending vports */
+		if (ocs_device_lock_try(ocs) != TRUE) {
+			/* Didn't get the lock */
+			return -1;
+		}
+		instance = 0;
+		ocs_list_foreach(&xport->vport_list, vport) {
+			ocs_ddump_section(textbuf, "vport_spec", instance);
+			ocs_ddump_value(textbuf, "domain_instance", "%d", vport->domain_instance);
+			ocs_ddump_value(textbuf, "wwnn", "%" PRIx64, vport->wwnn);
+			ocs_ddump_value(textbuf, "wwpn", "%" PRIx64, vport->wwpn);
+			ocs_ddump_value(textbuf, "fc_id", "0x%x", vport->fc_id);
+			ocs_ddump_value(textbuf, "enable_tgt", "%d", vport->enable_tgt);
+			ocs_ddump_value(textbuf, "enable_ini", "%d" PRIx64, vport->enable_ini);
+			ocs_ddump_endsection(textbuf, "vport_spec", instance ++);
+		}
+		ocs_device_unlock(ocs);
+	}
 #if defined(ENABLE_LOCK_DEBUG)
 	/* Dump the lock list */
 	ocs_ddump_section(textbuf, "locks", 0);
@@ -719,25 +802,6 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 	} ocs_unlock(&ocs->ocs_os.locklist_lock);
 	ocs_ddump_endsection(textbuf, "locks", 0);
 #endif
-
-	/* Dump any pending vports */
-	if (ocs_device_lock_try(ocs) != TRUE) {
-		/* Didn't get the lock */
-		return -1;
-	}
-		instance = 0;
-		ocs_list_foreach(&xport->vport_list, vport) {
-			ocs_ddump_section(textbuf, "vport_spec", instance);
-			ocs_ddump_value(textbuf, "domain_instance", "%d", vport->domain_instance);
-			ocs_ddump_value(textbuf, "wwnn", "%" PRIx64, vport->wwnn);
-			ocs_ddump_value(textbuf, "wwpn", "%" PRIx64, vport->wwpn);
-			ocs_ddump_value(textbuf, "fc_id", "0x%x", vport->fc_id);
-			ocs_ddump_value(textbuf, "enable_tgt", "%d", vport->enable_tgt);
-			ocs_ddump_value(textbuf, "enable_ini", "%d" PRIx64, vport->enable_ini);
-			ocs_ddump_endsection(textbuf, "vport_spec", instance ++);
-		}
-	ocs_device_unlock(ocs);
-
 	/* Dump target and initiator private data */
 	ocs_scsi_ini_ddump(textbuf, OCS_SCSI_DDUMP_DEVICE, ocs);
 	ocs_scsi_tgt_ddump(textbuf, OCS_SCSI_DDUMP_DEVICE, ocs);
@@ -800,11 +864,6 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 int32_t
 ocs_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries)
 {
-	if (ocs_textbuf_get_written(&ocs->ddump_saved) > 0) {
-		ocs_log_debug(ocs, "Saved ddump already exists\n");
-		return 1;
-	}
-
 	if (!ocs_textbuf_initialized(&ocs->ddump_saved)) {
 		ocs_log_err(ocs, "Saved ddump not allocated\n");
 		return -1;
@@ -812,8 +871,86 @@ ocs_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries)
 
 	ocs_log_debug(ocs, "Saving ddump\n");
 	ocs_ddump(ocs, &ocs->ddump_saved, flags, qentries);
-	ocs_log_debug(ocs, "Saved ddump: %d bytes written\n", ocs_textbuf_get_written(&ocs->ddump_saved));
+	ocs_log_debug(ocs, "Saved ddump: %d bytes written, max size = %d\n", ocs_textbuf_get_written(&ocs->ddump_saved), ocs->ddump_max_size);
+
 	return 0;
+}
+
+/**
+ * @brief Set the driver dump state
+ * 
+ * Valid state changes
+ * DDUMP_NONE ---> DDUMP_ALLOCATING
+ * DDUMP_ALLOCATING --> DDUMP_ALLOCATED
+ * DDUMP_ALLOCATED --> DDUMP_STARTED
+ * DDUMP_STARTED --> DDUMP_PRESENT
+ * DDUMP_PRESENT --> DDUMP_RETRIEVING
+ * DDUMP_RETRIEVING --> DDUMP_NONE
+ *
+ * A thread has the ownership of the ddump data structure when in the following states:
+ *
+ *  - DDUMP_ALLOCATING
+ *  - DDUMP_STARTED
+ *  - DDUMP_RETRIEVING
+ *
+ * so it should move the state to one of the other 3 states after finishing processing
+ * to givie up the ownership
+ *
+ * @param ocs pointer to device context
+ * @param state driver dump state to change
+ *
+ * @return: TRUE <if status changed successfully> or
+ *          FALSE <failed to set dump status>
+ */
+
+bool
+ocs_ddump_state_set(ocs_t *ocs, uint8_t state)
+{
+	bool set_state = FALSE;
+
+	ocs_assert(ocs, FALSE);
+
+	ocs_device_lock(ocs);
+
+	switch (state) {
+	/* caller setting these states should have the ownership */
+	case OCS_DDUMP_NONE:
+	case OCS_DDUMP_ALLOCATED:
+	case OCS_DDUMP_PRESENT:
+		ocs->ddump_state = state;
+		set_state = TRUE;
+		break;
+
+	/* caller setting these states is trying to "win" the ownership */
+	case OCS_DDUMP_ALLOCATING:
+		if (ocs->ddump_state == OCS_DDUMP_NONE) {
+			ocs->ddump_state = state;
+			set_state = TRUE;
+		}
+		break;
+	case OCS_DDUMP_STARTED:
+		if (ocs->ddump_state == OCS_DDUMP_ALLOCATED) {
+			ocs->ddump_state = state;
+			set_state = TRUE;
+		}
+		break;
+	case OCS_DDUMP_RETRIEVING:
+		if (ocs->ddump_state == OCS_DDUMP_PRESENT) {
+			ocs->ddump_state = state;
+			set_state = TRUE;
+		}
+		break;
+	}
+
+	if (set_state) {
+		ocs_log_debug(ocs, "Driver dump state set to %d successfully\n", state);
+	} else {
+		ocs_log_err(ocs, "failed to set driver dump state(%d) present state: %d\n", state, ocs->ddump_state);
+	}
+
+	ocs_device_unlock(ocs);
+
+	return set_state;
 }
 
 /**
@@ -836,21 +973,139 @@ ocs_save_ddump_all(uint32_t flags, uint32_t qentries, uint32_t alloc_flag)
 	uint32_t i;
 	int32_t rc = 0;
 
-	for_each_ocs(i, ocs) {
-		if (!ocs)
-			continue;
-		if (alloc_flag && (!ocs_textbuf_initialized(&ocs->ddump_saved))) {
-			rc = ocs_textbuf_alloc(ocs, &ocs->ddump_saved, DEFAULT_SAVED_DUMP_SIZE);
-			if (rc) {
-				break;
-			}
-		}
-
-		rc = ocs_save_ddump(ocs, flags, qentries);
+	for (i = 0; (ocs = ocs_get_instance(i)) != NULL; i++) {
+		rc = ocs_get_saved_ddump(ocs, flags, qentries, alloc_flag);
 		if (rc < 0) {
+			ocs_log_err(ocs, "save ddump failed\n");
 			break;
 		}
 	}
+	return rc;
+}
+
+/**
+ * @brief Clear the previously saved ddump, and collect
+ *        the ddump for all OCS instances of the adapter
+ */
+int32_t
+ocs_adapter_ddump_clear_and_save(ocs_t *ocs, uint8_t bus, uint8_t dev,
+				 uint32_t flags, uint32_t qentries, uint32_t alloc_flag)
+{
+	ocs_t *other_ocs;
+	uint8_t other_bus, other_dev, other_func;
+	int32_t index = 0, rc = 0;
+
+	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
+		if ((bus == other_bus) && (dev == other_dev)) {
+			if (alloc_flag) {
+				/* Clear the previously saved ddump */
+				ocs_clear_saved_ddump(other_ocs);
+
+				rc = ocs_textbuf_alloc(other_ocs, &other_ocs->ddump_saved, DEFAULT_SAVED_DUMP_SIZE);
+				if (rc) {
+					ocs_log_err(other_ocs, "textbuf_alloc failed\n");
+					goto clear_ddump;
+				}
+			}
+
+			rc = ocs_save_ddump(other_ocs, flags, qentries);
+			if (rc < 0) {
+				ocs_log_err(other_ocs, "Save ddump failed\n");
+				goto clear_ddump;
+			}
+
+			ocs_log_debug(other_ocs, "Saved the driver dump successfully\n");
+		}
+	}
+
+	return rc;
+
+clear_ddump:
+	index = 0;
+	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
+		if ((bus == other_bus) && (dev == other_dev))
+			ocs_clear_saved_ddump(other_ocs);
+	}
+
+	return rc;
+}
+
+int8_t
+ocs_get_saved_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries, uint32_t alloc_flag)
+{
+	int rc = 0;
+
+	if (alloc_flag && ocs_ddump_state_set(ocs, OCS_DDUMP_ALLOCATING)) {
+		ocs->ddump_max_size = OCS_DDUMP_MAX_SIZE;
+		ocs_log_debug(ocs, "Allocating driver dump buffer pool\n");
+		rc = ocs_textbuf_pool_alloc(ocs, &ocs->ddump_saved, ocs->ddump_max_size);
+		if (rc) {
+			ocs_log_err(ocs, "textbuf_alloc failed\n");
+			ocs_ddump_state_set(ocs, OCS_DDUMP_NONE);
+			return -1;
+		}
+		ocs_ddump_state_set(ocs, OCS_DDUMP_ALLOCATED);
+	}
+
+	if (!ocs_ddump_state_set(ocs, OCS_DDUMP_STARTED))
+		return 1;
+
+	/* Clear ddump if it's already exists */
+	ocs_clear_saved_ddump(ocs);
+
+	rc = ocs_save_ddump(ocs, flags, qentries);
+	if (rc == 0) {
+		ocs_ddump_state_set(ocs, OCS_DDUMP_PRESENT);
+	} else {
+		if (ocs->ddump_pre_alloc) {
+			ocs_clear_saved_ddump(ocs);
+			ocs_ddump_state_set(ocs, OCS_DDUMP_ALLOCATED);
+		} else {
+			ocs_textbuf_free(ocs, &ocs->ddump_saved);
+			ocs_ddump_state_set(ocs, OCS_DDUMP_NONE);
+		}
+	}
+
+	return rc;
+}
+
+/**
+ * @brief Capture and save ddump for all OCS instances of adapter
+ *
+ * Calls ocs_save_ddump() for each OCS instance of HBA
+ *
+ * @param flags ddump flags
+ * @param qentries number of queue entries to dump
+ * @param alloc_flag allocate dump buffer if not already allocated
+ * @param adapter_dump function or adapter specific dump
+ *
+ * @return 0 if ddump was saved; < 0 error
+ */
+
+int32_t
+ocs_adapter_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries, uint32_t alloc_flag, bool adapter_dump)
+{
+	ocs_t *other_ocs;
+	uint32_t i;
+	int32_t rc = 0;
+	uint8_t bus, dev, func;
+	uint8_t other_bus, other_dev, other_func;
+
+	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
+	for (i = 0; (other_ocs = ocs_get_instance(i)) != NULL; i++) {
+		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
+		if ((bus == other_bus) && (dev == other_dev)) {
+			if (!adapter_dump && (func != other_func))
+				continue;
+
+			rc = ocs_get_saved_ddump(other_ocs, flags, qentries, alloc_flag);
+			if (rc < 0)
+				return rc;
+		}
+	}
+
 	return rc;
 }
 
@@ -869,11 +1124,11 @@ ocs_clear_saved_ddump(ocs_t *ocs)
 {
 	/* if there's a saved ddump, copy to newly allocated textbuf */
 	if (ocs_textbuf_get_written(&ocs->ddump_saved)) {
-		ocs_log_debug(ocs, "%s: saved ddump cleared\n", __func__);
+		ocs_log_debug(ocs, "saved ddump cleared\n");
 		ocs_textbuf_reset(&ocs->ddump_saved);
 		return 0;
 	} else {
-		ocs_log_debug(ocs, "%s: no saved ddump found\n", __func__);
+		ocs_log_debug(ocs, "no saved ddump found\n");
 		return 1;
 	}
 }

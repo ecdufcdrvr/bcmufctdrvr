@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -121,9 +120,11 @@ typedef struct sli4_req_fcoe_wq_create_v1_s {
 			cq_id:16;
 	uint32_t	page_size:8,
 			wqe_size:4,
-			:4,
+			:3,
+			dpp:1,
 			wqe_count:16;
-	uint32_t	rsvd6;
+	uint32_t	sfq:1,
+			rsvd6:31;
 	sli4_physical_page_descriptor_t page_physical_address[8];
 #else
 #error big endian version not defined
@@ -152,17 +153,19 @@ typedef struct sli4_req_fcoe_wq_destroy_s {
  *
  * Register the scatter gather list (SGL) memory and associate it with an XRI.
  */
+typedef struct sli4_fcoe_post_sgl_page_desc_s {
+	uint32_t	page0_low;
+	uint32_t	page0_high;
+	uint32_t	page1_low;
+	uint32_t	page1_high;
+} sli4_fcoe_post_sgl_page_desc_t;
+
 typedef struct sli4_req_fcoe_post_sgl_pages_s {
 	sli4_req_hdr_t	hdr;
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	xri_start:16,
 			xri_count:16;
-	struct {
-		uint32_t	page0_low;
-		uint32_t	page0_high;
-		uint32_t	page1_low;
-		uint32_t	page1_high;
-	} page_set[10];
+	sli4_fcoe_post_sgl_page_desc_t page_desc[0];
 #else
 #error big endian version not defined
 #endif
@@ -432,7 +435,7 @@ typedef struct sli4_req_fcoe_rediscover_fcf_s {
 #define SLI4_WQE_EXT_BYTES		(32 * sizeof(uint32_t))
 
 /* Mask for ccp (CS_CTL) */
-#define SLI4_MASK_CCP	0xfe /* Upper 7 bits of CS_CTL is priority */
+#define SLI4_MASK_CCP			0xff
 
 /**
  * @brief Generic WQE
@@ -736,7 +739,7 @@ typedef struct sli4_fcp_iread64_wqe_s {
 #else
 #error big endian version not defined
 #endif
-	sli4_bde_t	first_data_bde;	/* reserved if performance hints disabled */
+	sli4_bde_t	first_data_bde;	/* For performance hints */
 } sli4_fcp_iread64_wqe_t;
 
 /**
@@ -792,8 +795,12 @@ typedef struct sli4_fcp_iwrite64_wqe_s {
 #else
 #error big endian version not defined
 #endif
-	sli4_bde_t	first_data_bde;
+	sli4_bde_t	first_data_bde;	/* For performance hints */
 } sli4_fcp_iwrite64_wqe_t;
+
+typedef struct sli4_fcp_128byte_wqe_s {
+	uint32_t dw[32];	
+} sli4_fcp_128byte_wqe_t;
 
 /**
  * @brief WQE used to create an FCP target receive, and FCP target
@@ -831,10 +838,12 @@ typedef struct sli4_fcp_treceive64_wqe_s {
 	uint32_t	request_tag:16,
 			remote_xid:16;
 	uint32_t	ebde_cnt:4,
-			:3,
+			:1,
+			app_id_valid:1,
+			:1,
 			len_loc:2,
 			qosd:1,
-			:1,
+			wchn:1,
 			xbl:1,
 			hlm:1,
 			iod:1,
@@ -848,7 +857,9 @@ typedef struct sli4_fcp_treceive64_wqe_s {
 			ccpe:1,
 			ccp:8;
 	uint32_t	cmd_type:4,
-			:3,
+			irsp:1,
+			pbde:1,
+			:1,
 			wqec:1,
 			:8,
 			cq_id:16;
@@ -856,7 +867,7 @@ typedef struct sli4_fcp_treceive64_wqe_s {
 #else
 #error big endian version not defined
 #endif
-	sli4_bde_t	first_data_bde;	/* reserved if performance hints disabled */
+	sli4_bde_t	first_data_bde;	/* For performance hints */
 } sli4_fcp_treceive64_wqe_t;
 
 /**
@@ -889,10 +900,12 @@ typedef struct sli4_fcp_trsp64_wqe_s {
 	uint32_t	request_tag:16,
 			remote_xid:16;
 	uint32_t	ebde_cnt:4,
-			:3,
+			:1,
+			app_id_valid:1,
+			:1,
 			len_loc:2,
 			qosd:1,
-			:1,
+			wchn:1,
 			xbl:1,
 			hlm:1,
 			iod:1,
@@ -949,10 +962,12 @@ typedef struct sli4_fcp_tsend64_wqe_s {
 	uint32_t	request_tag:16,
 			remote_xid:16;
 	uint32_t	ebde_cnt:4,
-			:3,
+			:1,
+			app_id_valid:1,
+			:1,
 			len_loc:2,
 			qosd:1,
-			:1,
+			wchn:1,
 			xbl:1,
 			hlm:1,
 			iod:1,
@@ -966,7 +981,8 @@ typedef struct sli4_fcp_tsend64_wqe_s {
 			ccpe:1,
 			ccp:8;
 	uint32_t	cmd_type:4,
-			:3,
+			:2,
+			suppress_rsp:1,
 			wqec:1,
 			:8,
 			cq_id:16;
@@ -974,13 +990,14 @@ typedef struct sli4_fcp_tsend64_wqe_s {
 #else
 #error big endian version not defined
 #endif
-	sli4_bde_t	first_data_bde;	/* reserved if performance hints disabled */
+	sli4_bde_t	first_data_bde;	/* For performance hints */
 } sli4_fcp_tsend64_wqe_t;
 
 #define SLI4_IO_CONTINUATION		BIT(0)	/** The XRI associated with this IO is already active */
 #define SLI4_IO_AUTO_GOOD_RESPONSE	BIT(1)	/** Automatically generate a good RSP frame */
 #define SLI4_IO_NO_ABORT		BIT(2)
 #define SLI4_IO_DNRX			BIT(3)	/** Set the DNRX bit because no auto xref rdy buffer is posted */
+#define SLI4_IO_SUPPRESS_RESPONSE	BIT(4)	/** Suppress resp is supported only when AutoResp is enabled */
 
 /* WQE DIF field contents */
 #define SLI4_DIF_DISABLED		0
@@ -1187,7 +1204,9 @@ typedef struct sli4_requeue_xri_wqe_s {
 	uint32_t	request_tag:16,
 			:16;
 	uint32_t	ebde_cnt:4,
-			:3,
+			rsvd_w10b4:1,
+			disable_cqe:1,
+			oas:1,
 			len_loc:2,
 			qosd:1,
 			wchn:1,
@@ -1453,6 +1472,7 @@ typedef struct sli4_link_state_s {
 #define SLI4_LINK_ATTN_TYPE_LINK_UP		0x01
 #define SLI4_LINK_ATTN_TYPE_LINK_DOWN		0x02
 #define SLI4_LINK_ATTN_TYPE_NO_HARD_ALPA	0x03
+#define SLI4_LINK_ATTN_TYPE_TRUNK_EVENT		0x07
 
 #define SLI4_LINK_ATTN_P2P			0x01
 #define SLI4_LINK_ATTN_FC_AL			0x02
@@ -1465,9 +1485,29 @@ typedef struct sli4_link_state_s {
 #define SLI4_LINK_ATTN_8G			0x08
 #define SLI4_LINK_ATTN_10G			0x0a
 #define SLI4_LINK_ATTN_16G			0x10
+#define SLI4_LINK_ATTN_32G			0x20
+#define SLI4_LINK_ATTN_64G			0x21
+#define SLI4_LINK_ATTN_128G			0x22
+#define SLI4_LINK_ATTN_256G			0x23
 
 #define SLI4_LINK_TYPE_ETHERNET			0x0
 #define SLI4_LINK_TYPE_FC			0x1
+
+#define SLI4_FC_TRUNK_CONFIG_MASK		0xF0
+#define SLI4_FC_TRUNK_LINK_STATE_MASK		0x0F
+
+/*
+ * 2 links per trunk config, trunk incorporates either,
+ *   a) port 0/1 of a 4-port device
+ *   b) both ports of a 2-port device
+ */
+#define SLI4_FC_TRUNK_2_PORT_CONFIG 		0x30
+
+/* 2 links per trunk config that incorporates port 2/3 of a 4-port device */
+#define SLI4_FC_TRUNK_2_PORT_HI_CONFIG		0xC0
+
+/* 4 links per trunk config that incorporates all ports of a 4-port device */
+#define SLI4_FC_TRUNK_4_PORT_CONFIG		0xF0
 
 /**
  * @brief Asynchronouse Event: FC Link Attention Event.
@@ -1561,7 +1601,8 @@ typedef struct sli4_fc_wcqe_s {
 			pri:3,
 			pv:1,
 			xb:1,
-			:2,
+			rha:1,
+			:1,
 			vld:1;
 #else
 #error big endian version not defined
@@ -1598,7 +1639,6 @@ typedef struct sli4_fc_wqec_s {
 #define SLI4_FC_WCQE_STATUS_NPORT_BSY		0x06
 #define SLI4_FC_WCQE_STATUS_FABRIC_BSY		0x07
 #define SLI4_FC_WCQE_STATUS_LS_RJT		0x09
-#define SLI4_FC_WCQE_STATUS_RX_BUFF_OVERRUN	0x0a
 #define SLI4_FC_WCQE_STATUS_CMD_REJECT		0x0b
 #define SLI4_FC_WCQE_STATUS_FCP_TGT_LENCHECK	0x0c
 #define SLI4_FC_WCQE_STATUS_RQ_BUF_LEN_EXCEEDED	0x11
@@ -1626,7 +1666,7 @@ typedef struct sli4_fc_wqec_s {
 #define SLI4_FC_DI_ERROR_RE	(1 << 2) /* Reference Tag Error */
 #define SLI4_FC_DI_ERROR_TDPV	(1 << 3) /* Total Data Placed Valid */
 #define SLI4_FC_DI_ERROR_UDB	(1 << 4) /* Uninitialized DIF Block */
-#define SLI4_FC_DI_ERROR_EDIR   (1 << 5) /* Error direction */
+#define SLI4_FC_DI_ERROR_EDIR	(1 << 5) /* Error direction */
 
 /**
  * @brief Local Reject Reason Codes.
@@ -1639,6 +1679,7 @@ typedef struct sli4_fc_wqec_s {
 #define SLI4_FC_LOCAL_REJECT_ILLEGAL_COMMAND	0x06
 #define SLI4_FC_LOCAL_REJECT_XCHG_DROPPED	0x07
 #define SLI4_FC_LOCAL_REJECT_ILLEGAL_FIELD	0x08
+#define SLI4_FC_LOCAL_REJECT_RPI_SUSPENDED	0x09
 #define SLI4_FC_LOCAL_REJECT_NO_ABORT_MATCH	0x0c
 #define SLI4_FC_LOCAL_REJECT_TX_DMA_FAILED	0x0d
 #define SLI4_FC_LOCAL_REJECT_RX_DMA_FAILED	0x0e
@@ -1706,8 +1747,8 @@ typedef struct sli4_fc_async_rcqe_v1_s {
 #if BYTE_ORDER == LITTLE_ENDIAN
 	uint32_t	:8,
 			status:8,
-			rq_element_index:12,
-			:4;
+			rq_element_index:15,
+			:1;
 	uint32_t	fcfi:6,
 			:26;
 	uint32_t	rq_id:16,
@@ -1722,6 +1763,23 @@ typedef struct sli4_fc_async_rcqe_v1_s {
 #error big endian version not defined
 #endif
 } sli4_fc_async_rcqe_v1_t;
+
+typedef struct sli4_fc_marker_rcqe_s {
+#if BYTE_ORDER == LITTLE_ENDIAN
+	uint32_t	rsvd0:8,
+			status:8,
+			rq_element_index:15,
+			rsvd1:1;
+	uint32_t	tag_lower;
+	uint32_t	tag_higher;
+	uint32_t	rq_id:16,
+			code:8,
+			:7,
+			vld:1;
+#else
+#error big endian version not defined
+#endif
+} sli4_fc_marker_rcqe_t;
 
 #define SLI4_FC_ASYNC_RQ_SUCCESS		0x10
 #define SLI4_FC_ASYNC_RQ_BUF_LEN_EXCEEDED	0x11
@@ -1759,7 +1817,7 @@ typedef struct sli4_fc_optimized_write_cmd_cqe_s {
 	uint32_t	fcfi:6,
 			:8,
 			oox:1,
-			agxr:1,
+			tow:1,
 			xri:16;
 	uint32_t	rq_id:16,
 			payload_data_placement_length:16;
@@ -1829,9 +1887,11 @@ typedef struct sli4_fc_xri_aborted_cqe_s {
 #define SLI4_CQE_CODE_RQ_ASYNC_V1		0x09
 #define SLI4_CQE_CODE_OPTIMIZED_WRITE_CMD	0x0B
 #define SLI4_CQE_CODE_OPTIMIZED_WRITE_DATA	0x0C
+#define SLI4_CQE_CODE_MARKER			0x1D
 
 extern int32_t sli_fc_process_link_state(sli4_t *, void *);
 extern int32_t sli_fc_process_link_attention(sli4_t *, void *);
+extern int32_t sli_fc_process_sli_port_event(sli4_t *, void *);
 extern int32_t sli_fc_cqe_parse(sli4_t *, sli4_queue_t *, uint8_t *, sli4_qentry_e *, uint16_t *);
 extern uint32_t sli_fc_response_length(sli4_t *, uint8_t *);
 extern uint32_t sli_fc_io_length(sli4_t *, uint8_t *);
@@ -1839,8 +1899,8 @@ extern int32_t sli_fc_els_did(sli4_t *, uint8_t *, uint32_t *);
 extern uint32_t sli_fc_ext_status(sli4_t *, uint8_t *);
 extern int32_t sli_fc_rqe_rqid_and_index(sli4_t *, uint8_t *, uint16_t *, uint32_t *);
 extern int32_t sli_fc_process_fcoe(sli4_t *, void *);
-extern int32_t sli_cmd_fcoe_wq_create(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t);
-extern int32_t sli_cmd_fcoe_wq_create_v1(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t);
+extern int32_t sli_cmd_fcoe_wq_create(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, bool);
+extern int32_t sli_cmd_fcoe_wq_create_v1(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, bool);
 extern int32_t sli_cmd_fcoe_wq_destroy(sli4_t *, void *, size_t, uint16_t);
 extern int32_t sli_cmd_fcoe_post_sgl_pages(sli4_t *, void *, size_t, uint16_t, uint32_t, ocs_dma_t **, ocs_dma_t **,
 ocs_dma_t *);
@@ -1860,10 +1920,10 @@ extern int32_t sli_fcp_iread64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32
 extern int32_t sli_fcp_iwrite64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_fcp_icmnd64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint8_t);
 
-extern int32_t sli_fcp_treceive64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t);
-extern int32_t sli_fcp_trsp64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t);
-extern int32_t sli_fcp_tsend64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t);
-extern int32_t sli_fcp_cont_treceive64_wqe(sli4_t *, void*, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t);
+extern int32_t sli_fcp_treceive64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint8_t);
+extern int32_t sli_fcp_trsp64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint32_t);
+extern int32_t sli_fcp_tsend64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t);
+extern int32_t sli_fcp_cont_treceive64_wqe(sli4_t *, void*, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint8_t);
 extern int32_t sli_gen_request64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t,uint8_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eof, uint32_t *hdr,
 				  ocs_dma_t *payload, uint32_t req_len, uint8_t timeout,
@@ -1874,6 +1934,9 @@ extern int32_t sli_xmit_bls_rsp64_wqe(sli4_t *, void *, size_t, sli_bls_payload_
 extern int32_t sli_xmit_els_rsp64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint16_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, uint32_t, uint32_t);
 extern int32_t sli_requeue_xri_wqe(sli4_t *, void *, size_t, uint16_t, uint16_t, uint16_t);
 extern void sli4_cmd_lowlevel_set_watchdog(sli4_t *sli4, void *buf, size_t size, uint16_t timeout);
+extern void sli4_cmd_lowlevel_enable_ras(sli4_t *sli4, void *buf, size_t size, int loglevel, uint32_t unit_size, int32_t buf_count, uint32_t *phys_addr, uintptr_t lwpd_phys_addr);
+extern void sli4_cmd_lowlevel_disable_ras(sli4_t *sli4, void *buf, size_t size);
+extern void sli4_cmd_lowlevel_get_itcm_parity_stats(sli4_t *sli4, void *buf, size_t size, bool clear_stats);
 
 /**
  * @ingroup sli_fc

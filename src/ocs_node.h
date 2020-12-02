@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -43,18 +42,38 @@
 #define node_sm_trace()  \
 	do { \
 		if (OCS_LOG_ENABLE_SM_TRACE(node->ocs)) \
-			ocs_log_info(node->ocs, "[%s] %-20s %-20s\n", node->display_name, __func__, ocs_sm_event_name(evt)); \
+			ocs_log_info(node->ocs, "[%s] %-20s\n", node->display_name, ocs_sm_event_name(evt)); \
 	} while (0)
 
-#define node_printf(node, fmt, ...) ocs_log_debug(node->ocs, "[%s] %-20s " fmt, node->display_name, __func__, ##__VA_ARGS__)
+#define node_printf(node, fmt, ...)		ocs_log_info(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
+#define node_printf_test(node, fmt, ...)	ocs_log_test(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
+#define node_printf_err(node, fmt, ...)		ocs_log_err(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 
-#define std_node_state_decl(...) \
-	ocs_node_t *node = NULL; \
-	ocs_t *ocs = NULL; \
-	node = ctx->app; \
-	ocs_assert(node, NULL); \
-	ocs = node->ocs; \
-	ocs_assert(ocs, NULL); \
+#if !defined(OCS_USPACE)
+#define node_printf_ratelimited(node, fmt, ...)							\
+        do {											\
+                if (ocs_ratelimit(&node->ratelimit))						\
+			ocs_log_info(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__) \
+        } while(0)
+
+#define node_printf_test_ratelimited(node, fmt, ...)						\
+        do {											\
+                if (ocs_ratelimit(&node->ratelimit))						\
+			ocs_log_test(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__) \
+        } while(0)
+
+#define node_printf_err_ratelimited(node, fmt, ...)						\
+        do {											\
+                if (ocs_ratelimit(&node->ratelimit))						\
+			ocs_log_err(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)	\
+        } while(0)
+#else
+#define node_printf_ratelimited(node, fmt, ...) node_printf(node, fmt, ##__VA_ARGS__)
+#define node_printf_test_ratelimited(node, fmt, ...) node_printf_test(node, fmt, ##__VA_ARGS__)
+#define node_printf_err_ratelimited(node, fmt, ...) node_printf_err(node, fmt, ##__VA_ARGS__)
+#endif
+
+#define node_sm_prologue() \
 	if (evt == OCS_EVT_ENTER) { \
 		ocs_strncpy(node->current_state_name, __func__, sizeof(node->current_state_name)); \
 	} else if (evt == OCS_EVT_EXIT) { \
@@ -63,6 +82,15 @@
 	} \
 	node->prev_evt = node->current_evt; \
 	node->current_evt = evt;
+
+#define std_node_state_decl(...) \
+	ocs_node_t *node = NULL; \
+	ocs_t *ocs = NULL; \
+	node = ctx->app; \
+	ocs_assert(node, NULL); \
+	ocs = node->ocs; \
+	ocs_assert(ocs, NULL); \
+	node_sm_prologue();
 
 #define OCS_NODEDB_PAUSE_FABRIC_LOGIN		(1U << 0)
 #define OCS_NODEDB_PAUSE_NAMESERVER		(1U << 1)
@@ -78,8 +106,9 @@ struct ocs_node_cb_s {
 	ocs_io_t *io;			/**< SCSI IO for sending response */
 	int32_t status;			/**< completion status */
 	int32_t ext_status;		/**< extended completion status */
-	ocs_hal_rq_buffer_t *header;	/**< completion header buffer */
-	ocs_hal_rq_buffer_t *payload;	/**< completion payload buffers */
+	void *header;   /**< completion header buffer */
+	void *payload;  /**< completion payload buffers */
+	size_t payload_len;
 	ocs_io_t *els;			/**< ELS IO object */
 };
 
@@ -153,56 +182,36 @@ ocs_node_unlock(ocs_node_t *node)
 }
 
 /**
- * @brief Node initiator/target enable defines
+ * @ingroup node_common
  *
- * All combinations of the SLI port (sport) initiator/target enable, and remote
- * node initiator/target enable are enumerated.
+ * @brief Return node suppress_rsp state
  *
+ * @return true if suppress response is enabled for the node, otherwise false
  */
-
-typedef enum {
-	OCS_NODE_ENABLE_x_TO_x,
-	OCS_NODE_ENABLE_x_TO_T,
-	OCS_NODE_ENABLE_x_TO_I,
-	OCS_NODE_ENABLE_x_TO_IT,
-	OCS_NODE_ENABLE_T_TO_x,
-	OCS_NODE_ENABLE_T_TO_T,
-	OCS_NODE_ENABLE_T_TO_I,
-	OCS_NODE_ENABLE_T_TO_IT,
-	OCS_NODE_ENABLE_I_TO_x,
-	OCS_NODE_ENABLE_I_TO_T,
-	OCS_NODE_ENABLE_I_TO_I,
-	OCS_NODE_ENABLE_I_TO_IT,
-	OCS_NODE_ENABLE_IT_TO_x,
-	OCS_NODE_ENABLE_IT_TO_T,
-	OCS_NODE_ENABLE_IT_TO_I,
-	OCS_NODE_ENABLE_IT_TO_IT,
-} ocs_node_enable_e;
-
-static inline ocs_node_enable_e ocs_node_get_enable(ocs_node_t *node)
+static inline bool
+ocs_node_suppress_resp(ocs_remote_node_t *rnode)
 {
-	uint32_t retval = 0;
+	ocs_node_t *node = (ocs_node_t *)rnode->node;
 
-	if (node->sport->enable_ini) retval |= (1U << 3);
-	if (node->sport->enable_tgt) retval |= (1U << 2);
-	if (node->init) retval |= (1U << 1);
-	if (node->targ) retval |= (1U << 0);
-	return (ocs_node_enable_e) retval;
+	ocs_assert(node, false);
+	return node->suppress_rsp;
 }
 
 typedef void* (*ocs_node_common_func_t)(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 
 extern int32_t node_check_els_req(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg, uint8_t cmd, ocs_node_common_func_t node_common_func, const char *funcname);
-extern int32_t node_check_ns_req(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg, uint32_t cmd, ocs_node_common_func_t node_common_func, const char *funcname);
+extern int32_t node_check_ct_req(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg, uint32_t cmd, ocs_node_common_func_t node_common_func, const char *funcname);
+extern int32_t node_check_ct_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 extern int32_t ocs_remote_node_cb(void *arg, ocs_hal_remote_node_event_e event, void *data);
 extern int32_t ocs_node_attach(ocs_node_t *node);
 extern ocs_node_t *ocs_node_find(ocs_sport_t *sport, uint32_t port_id);
 extern ocs_node_t *ocs_node_find_wwpn(ocs_sport_t *sport, uint64_t wwpn);
-extern ocs_node_t * ocs_node_find_wwnn(ocs_sport_t *sport, uint64_t wwnn);
+extern ocs_node_t *ocs_node_find_wwnn(ocs_sport_t *sport, uint64_t wwnn);
 extern void ocs_node_dump(ocs_t *ocs);
 extern ocs_node_t *ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ);
 extern int32_t ocs_node_free(ocs_node_t *node);
 extern void ocs_node_force_free(ocs_node_t *node);
+extern void ocs_notify_node_force_free(ocs_node_t *node);
 extern void ocs_node_fcid_display(uint32_t fc_id, char *buffer, uint32_t buffer_length);
 extern void ocs_node_update_display_name(ocs_node_t *node);
 
@@ -232,10 +241,15 @@ extern int ocs_node_active_ios_empty(ocs_node_t *node);
 extern void ocs_node_send_ls_io_cleanup(ocs_node_t *node);
 
 extern int32_t ocs_node_recv_link_services_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
-extern int32_t ocs_node_recv_abts_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
+extern int32_t ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
 extern int32_t ocs_node_recv_els_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
 extern int32_t ocs_node_recv_ct_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
 extern int32_t ocs_node_recv_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq);
+extern int32_t ocs_node_recv_tow_data(ocs_node_t *node, ocs_hal_sequence_t *seq);
+
 extern int32_t ocs_node_recv_bls_no_sit(ocs_node_t *node, ocs_hal_sequence_t *seq);
+
+extern int32_t ocs_node_is_remote_node(ocs_remote_node_t *rnode);
+extern int32_t ocs_node_nsler_capable(ocs_node_t *node);
 
 #endif // __OCS_NODE_H__

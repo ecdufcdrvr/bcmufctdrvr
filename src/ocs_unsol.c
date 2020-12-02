@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -55,21 +54,30 @@
 			(hdr)->r_ctl, ocs_be16toh((hdr)->ox_id), ocs_be16toh((hdr)->rx_id), ##__VA_ARGS__); \
 	} while(0)
 
+#define frame_printf_ratelimited(ocs, hdr, fmt, ...) \
+	do { \
+		char s_id_text[16]; \
+		ocs_node_fcid_display(fc_be24toh((hdr)->s_id), s_id_text, sizeof(s_id_text)); \
+		ocs_log_debug_ratelimited(ocs, "[%06x.%s] %02x/%04x/%04x: " fmt, fc_be24toh((hdr)->d_id), s_id_text, \
+			(hdr)->r_ctl, ocs_be16toh((hdr)->ox_id), ocs_be16toh((hdr)->rx_id), ##__VA_ARGS__); \
+	} while(0)
+
 static int32_t ocs_unsol_process(ocs_t *ocs, ocs_hal_sequence_t *seq);
 static int32_t ocs_dispatch_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq);
-static int32_t ocs_dispatch_fcp_cmd_auto_xfer_rdy(ocs_node_t *node, ocs_hal_sequence_t *seq);
+static int32_t ocs_dispatch_tow_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq);
 static int32_t ocs_dispatch_fcp_data(ocs_node_t *node, ocs_hal_sequence_t *seq);
-static uint32_t ocs_fc_decode_lun(uint8_t *lu);
 static int32_t ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq);
 static int32_t ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq);
 static int32_t ocs_fc_tmf_rejected_cb(ocs_io_t *io, ocs_scsi_io_status_e scsi_status, uint32_t flags, void *arg);
-static ocs_hal_sequence_t *ocs_frame_next(ocs_list_t *pend_list, ocs_lock_t *list_lock);
 static uint8_t ocs_node_frames_held(void *arg);
 static uint8_t ocs_domain_frames_held(void *arg);
 static int32_t ocs_purge_pending(ocs_t *ocs, ocs_list_t *pend_list, ocs_lock_t *list_lock);
-static int32_t ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq);
+static int32_t ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq, int32_t force_busy);
+ocs_hal_sequence_t *
+ocs_pend_frame_seq_alloc(ocs_t *ocs, ocs_hal_sequence_t *seq);
 
 #define OCS_MAX_FRAMES_BEFORE_YEILDING 10000
+#define OCS_PEND_FRAMES_WATERMARK 8000
 
 /**
  * @brief Process the RQ circular buffer and process the incoming frames.
@@ -86,7 +94,7 @@ ocs_unsol_rq_thread(ocs_thread_t *mythread)
 	ocs_hal_sequence_t *seq;
 	uint32_t yield_count = OCS_MAX_FRAMES_BEFORE_YEILDING;
 
-	ocs_log_debug(ocs, "%s %s: running\n", __func__, mythread->name);
+	ocs_log_debug(ocs, "%s running\n", mythread->name);
 	while (!ocs_thread_terminate_requested(mythread)) {
 		seq = ocs_cbuf_get(thread_data->seq_cbuf, 100000);
 		if (seq == NULL) {
@@ -104,7 +112,7 @@ ocs_unsol_rq_thread(ocs_thread_t *mythread)
 			yield_count = OCS_MAX_FRAMES_BEFORE_YEILDING;
 		}
 	}
-	ocs_log_debug(ocs, "%s %s: exiting\n", __func__, mythread->name);
+	ocs_log_debug(ocs, "%s exiting\n", mythread->name);
 	thread_data->thread_started = FALSE;
 	return 0;
 }
@@ -122,12 +130,69 @@ ocs_unsol_abort_cb (ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t len, i
 	ocs_t *ocs = arg;
 	ocs_assert(hio, -1);
 	ocs_assert(arg, -1);
-	ocs_log_debug(ocs, "%s: xri=0x%x tag=0x%x\n", __func__, hio->indicator, hio->reqtag);
+	ocs_log_debug(ocs, "xri=0x%x tag=0x%x\n", hio->indicator, hio->reqtag);
 	ocs_hal_io_free(&ocs->hal, hio);
 	return 0;
 }
 
+ocs_hal_sequence_t *
+ocs_pend_frame_seq_alloc(ocs_t *ocs, ocs_hal_sequence_t *seq)
+{
+	ocs_hal_sequence_t *pend_seq;
 
+	pend_seq = ocs_malloc(ocs, sizeof(ocs_hal_sequence_t), OCS_M_NOWAIT | OCS_M_ZERO);
+	if (pend_seq == NULL) {
+		ocs_log_err(ocs, "Failed to allocate seq buff for pending frame.\n");
+		goto fail_and_exit;
+	}
+	pend_seq->pend_frame_seq = true;
+	pend_seq->hal = seq->hal;
+	pend_seq->hal_priv = seq->hal_priv;
+	pend_seq->fcfi = seq->fcfi;
+	pend_seq->status = seq->status;
+
+	/* Fill sequence coalescing and auto xfer ready info */
+	pend_seq->tow = seq->tow;
+	pend_seq->tow_oox = seq->tow_oox;
+	pend_seq->xri = seq->xri;
+	pend_seq->hio = seq->hio;
+
+	if (seq->header.data_len) {
+		pend_seq->header.data = ocs_malloc(ocs, seq->header.data_len,
+				OCS_M_NOWAIT | OCS_M_ZERO);
+		if (!pend_seq->header.data) {
+			ocs_log_err(ocs, "header alloc failed to hold pend frame.\n");
+			goto fail_and_exit;
+		}
+		pend_seq->header.data_len = seq->header.data_len;
+		ocs_memcpy((uint8_t *) pend_seq->header.data, seq->header.data,
+			  seq->header.data_len);
+		pend_seq->header.tow_buf = seq->header.tow_buf;
+	}
+
+	if (seq->payload.data_len) {
+		pend_seq->payload.data = ocs_malloc(ocs, seq->payload.data_len,
+				OCS_M_NOWAIT | OCS_M_ZERO);
+		if (!pend_seq->payload.data) {
+			ocs_log_err(ocs, "payload alloc failed to hold pend frame.\n");
+			goto fail_and_exit;
+		}
+		pend_seq->payload.data_len = seq->payload.data_len;
+		ocs_memcpy((uint8_t *) pend_seq->payload.data, seq->payload.data,
+				seq->payload.data_len);
+		pend_seq->payload.tow_buf = seq->payload.tow_buf;
+	}
+
+	ocs_atomic_add_return(&ocs->hal.pend_frames_count, 1);
+
+	return pend_seq;
+
+fail_and_exit:
+	frame_printf(ocs, (fc_header_t*)seq->header.data, "Dropping frame\n");
+	if (pend_seq)
+		ocs_hal_sequence_free(&ocs->hal, pend_seq);
+	return NULL;
+}
 /**
  * @ingroup unsol
  * @brief Abort either a RQ Pair auto XFER RDY XRI.
@@ -137,16 +202,66 @@ static void
 ocs_port_owned_abort(ocs_t *ocs, ocs_hal_io_t *hio)
 {
 	ocs_hal_rtn_e hal_rc;
-	hal_rc = ocs_hal_io_abort(&ocs->hal, hio, FALSE,
-				  ocs_unsol_abort_cb, ocs);
-	if((hal_rc == OCS_HAL_RTN_IO_ABORT_IN_PROGRESS) ||
-	   (hal_rc == OCS_HAL_RTN_IO_PORT_OWNED_ALREADY_ABORTED)) {
-		ocs_log_debug(ocs, "%s: already aborted XRI 0x%x\n",
-			__func__, hio->indicator);
-	} else if(hal_rc != OCS_HAL_RTN_SUCCESS) {
-		ocs_log_debug(ocs, "%s: Error aborting XRI 0x%x status %d\n",
-			__func__, hio->indicator, hal_rc);
+
+	hal_rc = ocs_hal_io_abort(&ocs->hal, hio, FALSE, ocs_unsol_abort_cb, ocs);
+	if ((hal_rc == OCS_HAL_RTN_IO_ABORT_IN_PROGRESS) || (hal_rc == OCS_HAL_RTN_IO_PORT_OWNED_ALREADY_ABORTED)) {
+		ocs_log_debug(ocs, "already aborted XRI 0x%x\n", hio->indicator);
+	} else if (hal_rc != OCS_HAL_RTN_SUCCESS) {
+		ocs_log_debug(ocs, "Error aborting XRI 0x%x status %d\n", hio->indicator, hal_rc);
 	}
+}
+
+/**
+ * @ingroup unsol 
+ * @brief Abort/Error TOW sequence 
+ *
+ * <h3 class="desc">Description</h3>
+ * A TOW data frame is dispatched to the node state machine.
+ * A TOW command frame is aborted
+ *
+ * @param node Node that originated the frame.
+ * @param seq header/payload sequence buffers
+ *
+ * @return Returns 0 if frame processed and RX buffers cleaned
+ * up appropriately, -1 if frame not handled.
+ */
+static int32_t
+ocs_port_owned_abort_sequence(ocs_t *ocs, ocs_hal_sequence_t *seq)
+{
+	int32_t rc = -1;
+	ocs_assert(seq->hio, rc);
+	ocs_assert(seq->hio->is_port_owned, rc);
+
+	/* Port Owned XRIs are used only for TOW */
+	ocs_assert(seq->tow, rc);
+	
+	if (seq->hio->tow_buf->data_cqe) {
+		ocs_io_t *io = (ocs_io_t *)seq->hio->ul_io;
+		ocs_node_t *node;
+
+		if (!io)
+			return rc;
+
+		/* When a valid SCSI IO is detected, then node must always be present */
+		node = io->node;
+		ocs_assert(node, -1);
+
+		/*
+		 * If TOW DATA sequence is detected, then a TOW CMD must already been waiting
+		 * for the data. Release the corresponding TOW IO.
+		 */
+		ocs_log_info(ocs, "Release first burst command! XRI 0x%x\n",
+			     seq->hio->indicator);
+		rc = ocs_node_recv_tow_data(node, seq);
+	} else if (seq->hio->tow_buf->cmd_cqe) {
+		ocs_log_info(ocs, "Abort TOW CMD port owned XRI 0x%x\n", seq->hio->indicator);
+		ocs_port_owned_abort(ocs, seq->hio);
+
+		ocs_hal_sequence_free(&ocs->hal, seq);
+		rc = 0;
+	}
+
+	return rc;
 }
 
 /**
@@ -175,7 +290,7 @@ ocs_unsolicited_cb(void *arg, ocs_hal_sequence_t *seq)
 		rc = ocs_unsol_process(ocs, seq);
 	} else {
 		/* use the ox_id to dispatch this IO to a thread */
-		fc_header_t *hdr = seq->header->dma.virt;
+		fc_header_t *hdr = seq->header.data;
 		uint32_t ox_id =  ocs_be16toh(hdr->ox_id);
 		uint32_t thr_index = ox_id % ocs->rq_threads;
 
@@ -222,7 +337,7 @@ ocs_unsol_process(ocs_t *ocs, ocs_hal_sequence_t *seq)
 
 	/* If the transport FCFI entry is NULL, then drop the frame */
 	if (xport_fcfi == NULL) {
-		ocs_log_test(ocs, "%s: FCFI %d is not valid, dropping frame\n", __func__, seq->fcfi);
+		ocs_log_test(ocs, "FCFI %d is not valid, dropping frame\n", seq->fcfi);
 		if (seq->hio != NULL) {
 			ocs_port_owned_abort(ocs, seq->hio);
 		}
@@ -240,8 +355,36 @@ ocs_unsol_process(ocs_t *ocs, ocs_hal_sequence_t *seq)
 	if (domain == NULL ||
 	    xport_fcfi->hold_frames ||
 	    !ocs_list_empty(&xport_fcfi->pend_frames)) {
+		ocs_hal_sequence_t *pend_seq;
+
+		if (ocs_hal_io_port_owned(seq->hio)) {
+			if (ocs_port_owned_abort_sequence(ocs, seq)) {
+				ocs_hal_sequence_free(&ocs->hal, seq);
+			}
+
+			return 0;
+		}
+
+		if (!seq->pend_frame_seq) {
+			pend_seq = ocs_pend_frame_seq_alloc(ocs, seq);
+			if (pend_seq == NULL)
+				return -1;
+			/* return original sequence buffer to HW to process upcomming frames */
+			ocs_hal_sequence_free(&ocs->hal, seq);
+		} else {
+			pend_seq = seq;
+		}
+
 		ocs_lock(&xport_fcfi->pend_frames_lock);
-			ocs_list_add_tail(&xport_fcfi->pend_frames, seq);
+			ocs_list_add_tail(&xport_fcfi->pend_frames, pend_seq);
+			if (ocs_atomic_read(&ocs->hal.pend_frames_count) >= OCS_PEND_FRAMES_WATERMARK) {
+				ocs_log_err(ocs, "Warning: domain pending frames(%d) reached threshould level\n",
+					    ocs_atomic_read(&ocs->hal.pend_frames_count));
+				if (domain)
+					ocs_log_err(ocs, "domain(%s) current_state:%s\n",
+						    domain->display_name, (char *)domain->sm.current_state);
+			}
+					
 		ocs_unlock(&xport_fcfi->pend_frames_lock);
 
 		if (domain != NULL) {
@@ -254,12 +397,16 @@ ocs_unsol_process(ocs_t *ocs, ocs_hal_sequence_t *seq)
 		 * A non-zero return means the frame was not handled - so cleanup
 		 */
 		if (ocs_domain_dispatch_frame(domain, seq)) {
-			if (seq->hio != NULL) {
-				ocs_port_owned_abort(ocs, seq->hio);
+			if (ocs_hal_io_port_owned(seq->hio)) {
+				if (ocs_port_owned_abort_sequence(ocs, seq)) {
+					ocs_hal_sequence_free(&ocs->hal, seq);
+				}
+			} else {
+				ocs_hal_sequence_free(&ocs->hal, seq);
 			}
-			ocs_hal_sequence_free(&ocs->hal, seq);
 		}
 	}
+
 	return 0;
 }
 
@@ -313,9 +460,8 @@ ocs_process_node_pending(ocs_node_t *node)
 		}
 	}
 
-	if (pend_frames_processed != 0) {
-		ocs_log_debug(ocs, "%s: %u node frames held and processed\n", __func__, pend_frames_processed);
-	}
+	if (pend_frames_processed)
+		ocs_log_debug(ocs, "%u node frames held and processed\n", pend_frames_processed);
 
 	return 0;
 }
@@ -374,9 +520,10 @@ ocs_domain_process_pending(ocs_domain_t *domain)
 			ocs_hal_sequence_free(&ocs->hal, seq);
 		}
 	}
-	if (pend_frames_processed != 0) {
-		ocs_log_debug(ocs, "%s: %u domain frames held and processed\n", __func__, pend_frames_processed);
-	}
+
+	if (pend_frames_processed)
+		ocs_log_debug(ocs, "%u domain frames held and processed\n", pend_frames_processed);
+
 	return 0;
 }
 
@@ -406,7 +553,7 @@ ocs_purge_pending(ocs_t *ocs, ocs_list_t *pend_list, ocs_lock_t *list_lock)
 			break;
 		}
 
-		frame_printf(ocs, (fc_header_t*) frame->header->dma.virt, "Discarding held frame\n");
+		frame_printf(ocs, (fc_header_t*) frame->header.data, "Discarding held frame\n");
 		if (frame->hio != NULL) {
 			ocs_port_owned_abort(ocs, frame->hio);
 		}
@@ -494,11 +641,16 @@ static uint8_t
 ocs_domain_frames_held(void *arg)
 {
 	ocs_domain_t *domain = (ocs_domain_t *)arg;
-	ocs_t *ocs = domain->ocs;
+	ocs_t *ocs;
 	ocs_xport_fcfi_t *xport_fcfi;
 
 	ocs_assert(domain != NULL, 1);
 	ocs_assert(domain->fcf_indicator < SLI4_MAX_FCFI, 1);
+
+	ocs = domain->ocs;
+	ocs_assert(ocs, 1);
+	ocs_assert(ocs->xport, 1);
+
 	xport_fcfi = &ocs->xport->fcfi[domain->fcf_indicator];
 	return xport_fcfi->hold_frames;
 }
@@ -525,8 +677,7 @@ ocs_domain_hold_frames(ocs_domain_t *domain)
 	ocs_assert(domain->fcf_indicator < SLI4_MAX_FCFI);
 	xport_fcfi = &ocs->xport->fcfi[domain->fcf_indicator];
 	if (!xport_fcfi->hold_frames) {
-		ocs_log_debug(domain->ocs, "%s: hold frames set for FCFI %d\n",
-			__func__, domain->fcf_indicator);
+		ocs_log_debug(domain->ocs, "hold frames set for FCFI %d\n", domain->fcf_indicator);
 		xport_fcfi->hold_frames = 1;
 	}
 }
@@ -552,10 +703,9 @@ ocs_domain_accept_frames(ocs_domain_t *domain)
 
 	ocs_assert(domain->fcf_indicator < SLI4_MAX_FCFI);
 	xport_fcfi = &ocs->xport->fcfi[domain->fcf_indicator];
-	if (xport_fcfi->hold_frames == 1) {
-		ocs_log_debug(domain->ocs, "%s: hold frames cleared for FCFI %d\n",
-			__func__, domain->fcf_indicator);
-	}
+	if (xport_fcfi->hold_frames == 1)
+		ocs_log_debug(domain->ocs, "hold frames cleared for FCFI %d\n", domain->fcf_indicator);
+
 	xport_fcfi->hold_frames = 0;
 	ocs_domain_process_pending(domain);
 }
@@ -587,11 +737,10 @@ ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 	ocs_node_t *node = NULL;
 	ocs_sport_t *sport = NULL;
 
-	ocs_assert(seq->header, -1);
-	ocs_assert(seq->header->dma.virt, -1);
-	ocs_assert(seq->payload->dma.virt, -1);
+	ocs_assert(seq->header.data, -1);
+	ocs_assert(seq->payload.data, -1);
+	hdr = seq->header.data;
 
-	hdr = seq->header->dma.virt;
 
 	/* extract the s_id and d_id */
 	s_id = fc_be24toh(hdr->s_id);
@@ -599,7 +748,7 @@ ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 
 	sport = domain->sport;
 	if (sport == NULL) {
-		frame_printf(ocs, hdr, "phy sport for FC ID 0x%06x is NULL, dropping frame\n", d_id);
+		frame_printf_ratelimited(ocs, hdr, "phy sport for FC ID 0x%06x is NULL, dropping frame\n", d_id);
 		return -1;
 	}
 
@@ -609,8 +758,7 @@ ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 		if (sport == NULL) {
 			if (hdr->type == FC_TYPE_FCP) {
 				/* Drop frame */
-				ocs_log_warn(ocs, "%s: unsolicited FCP frame with invalid d_id x%x, dropping\n",
-					     __func__, d_id);
+				ocs_log_warn_ratelimited(ocs, "unsolicited FCP frame with invalid d_id x%x, dropping\n", d_id);
 				return -1;
 			} else {
 				/* p2p will use this case */
@@ -629,12 +777,12 @@ ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 		 */
 		if ((hdr->r_ctl == FC_RCTL_FC4_DATA) && (
 		    (hdr->info == FC_RCTL_INFO_SOL_DATA) || (hdr->info == FC_RCTL_INFO_SOL_CTRL))) {
-			ocs_log_debug(ocs, "%s: solicited data/ctrl frame without node, dropping\n", __func__);
+			ocs_log_debug_ratelimited(ocs, "solicited data/ctrl frame without node, dropping\n");
 			return -1;
 		}
 		node = ocs_node_alloc(sport, s_id, FALSE, FALSE);
 		if (node == NULL) {
-			ocs_log_err(ocs, "%s(%d) ocs_node_alloc() failed\n", __func__, __LINE__);
+			ocs_log_err(ocs, "ocs_node_alloc() failed\n");
 			return -1;
 		}
 		/* don't send PLOGI on ocs_d_init entry */
@@ -642,12 +790,39 @@ ocs_domain_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 	}
 
 	if (node->hold_frames || !ocs_list_empty((&node->pend_frames))) {
-		/* TODO: info log level
-		frame_printf(ocs, hdr, "Holding frame\n");
-		*/
+		ocs_hal_sequence_t *pend_seq;
+
+		/*
+		 * Drop the FC command frame that is received when remote node being shutdown.
+		 * Determine the node shutdown state based on io_alloc_enabled flag.
+		 */
+		if ((hdr->r_ctl == FC_RCTL_FC4_DATA) && !ocs_scsi_io_alloc_enabled(node)) {
+			return -1;
+		}
+
+		if (!seq->pend_frame_seq) {
+			pend_seq = ocs_pend_frame_seq_alloc(ocs, seq);
+			if (pend_seq == NULL)
+				return -1;
+
+			/* return original sequence buffer to HW to process upcomming frames */
+			ocs_hal_sequence_free(&ocs->hal, seq);
+		} else {
+			pend_seq = seq;
+		}
+
+		/* TODO: info log level */
+		frame_printf_ratelimited(ocs, hdr, "Holding frame\n");
 		/* add frame to node's pending list */
 		ocs_lock(&node->pend_frames_lock);
-			ocs_list_add_tail(&node->pend_frames, seq);
+			ocs_atomic_add_return(&ocs->hal.pend_frames_count, 1);
+			ocs_list_add_tail(&node->pend_frames, pend_seq);
+			if (ocs_atomic_read(&ocs->hal.pend_frames_count) > OCS_PEND_FRAMES_WATERMARK) {
+				ocs_log_err_ratelimited(ocs, "WARNING: node pending frames(%d) reached threshould level\n",
+					    ocs_atomic_read(&ocs->hal.pend_frames_count));
+				ocs_log_info_ratelimited(ocs, "[%s] current state: %s previous state: %s\n",
+					     node->display_name, node->prev_state_name, node->current_state_name);
+			}
 		ocs_unlock(&node->pend_frames_lock);
 
 		return 0;
@@ -674,7 +849,7 @@ static int32_t
 ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 {
 
-	fc_header_t *hdr = seq->header->dma.virt;
+	fc_header_t *hdr = seq->header.data;
 	uint32_t port_id;
 	ocs_node_t *node = (ocs_node_t *)arg;
 	int32_t rc = -1;
@@ -696,11 +871,7 @@ ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 			break;
 
 		case FC_RCTL_BLS:
-			if (sit_set) {
-				rc = ocs_node_recv_abts_frame(node, seq);
-			}else {
-				rc = ocs_node_recv_bls_no_sit(node, seq);
-			}
+			rc = ocs_node_recv_bls_frame(node, seq);
 			break;
 
 		case FC_RCTL_FC4_DATA:
@@ -710,9 +881,8 @@ ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 					if (node->fcp_enabled) {
 						if (sit_set) {
 							rc = ocs_dispatch_fcp_cmd(node, seq);
-						}else {
-							/* send the auto xfer ready command */
-							rc = ocs_dispatch_fcp_cmd_auto_xfer_rdy(node, seq);
+						} else {
+							rc = ocs_dispatch_tow_fcp_cmd(node, seq);
 						}
 					} else {
 						rc = ocs_node_recv_fcp_cmd(node, seq);
@@ -734,7 +904,7 @@ ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
 			break;
 		}
 	} else {
-		node_printf(node, "Dropping frame hdr = %08x %08x %08x %08x %08x %08x\n",
+		node_printf_ratelimited(node, "Dropping frame hdr = %08x %08x %08x %08x %08x %08x\n",
 			    ocs_htobe32(((uint32_t *)hdr)[0]),
 			    ocs_htobe32(((uint32_t *)hdr)[1]),
 			    ocs_htobe32(((uint32_t *)hdr)[2]),
@@ -755,13 +925,13 @@ ocs_node_dispatch_frame(void *arg, ocs_hal_sequence_t *seq)
  * @param io Pointer to the IO context.
  * @param task_management_flags Task management flags from the FCP_CMND frame.
  * @param node Node that originated the frame.
- * @param lun 32-bit LUN from FCP_CMND frame.
+ * @param lun 64-bit LUN from FCP_CMND frame.
  *
  * @return Returns None.
  */
 
 static void
-ocs_dispatch_unsolicited_tmf(ocs_io_t *io, uint8_t task_management_flags, ocs_node_t *node, uint32_t lun)
+ocs_dispatch_unsolicited_tmf(ocs_io_t *io, uint8_t task_management_flags, ocs_node_t *node, uint64_t lun)
 {
 	uint32_t i;
 	struct {
@@ -780,11 +950,14 @@ ocs_dispatch_unsolicited_tmf(ocs_io_t *io, uint8_t task_management_flags, ocs_no
 
 	for (i = 0; i < ARRAY_SIZE(tmflist); i ++) {
 		if (tmflist[i].mask & task_management_flags) {
-			io->tmf_cmd = tmflist[i].cmd;
+			io->scsi_info->tmf_cmd = tmflist[i].cmd;
+			ocs_log_info(io->ocs, "Process Unsol TMF cmd %d lun %"PRIu64"\n",
+				     tmflist[i].cmd, lun);
 			ocs_scsi_recv_tmf(io, lun, tmflist[i].cmd, NULL, 0);
 			break;
 		}
 	}
+
 	if (i == ARRAY_SIZE(tmflist)) {
 		/* Not handled */
 		node_printf(node, "TMF x%x rejected\n", task_management_flags);
@@ -795,24 +968,29 @@ ocs_dispatch_unsolicited_tmf(ocs_io_t *io, uint8_t task_management_flags, ocs_no
 static int32_t
 ocs_validate_fcp_cmd(ocs_t *ocs, ocs_hal_sequence_t *seq)
 {
-	size_t		exp_payload_len = 0;
-	fcp_cmnd_iu_t *cmnd = seq->payload->dma.virt;
-	exp_payload_len = sizeof(fcp_cmnd_iu_t) - 16 + cmnd->additional_fcp_cdb_length;
+	fcp_cmnd_iu_t *cmnd = seq->payload.data;
+	size_t exp_payload_len = sizeof(fcp_cmnd_iu_t) - 16 + cmnd->additional_fcp_cdb_length;
+	fc_header_t	*fchdr = seq->header.data;
+
+	/*  fcp_cmnd_iu_t defines fcp_cdb_and_dl may contain upto 16 bytes of CDB */ 
+	if ((cmnd->additional_fcp_cdb_length * sizeof(uint32_t)) > 16) {
+		ocs_log_err(ocs, "dropping ox_id %04x with additional_cdb_len (%d) greater than expected\n",
+			      ocs_be16toh(fchdr->ox_id), cmnd->additional_fcp_cdb_length);
+		return -1;
+	}
 
 	/*
 	 * If we received less than FCP_CMND_IU bytes, assume that the frame is
 	 * corrupted in some way and drop it. This was seen when jamming the FCTL
 	 * fill bytes field.
 	 */
-	if (seq->payload->dma.len < exp_payload_len) {
-		fc_header_t	*fchdr = seq->header->dma.virt;
-		ocs_log_debug(ocs, "%s: dropping ox_id %04x with payload length (%zd) less than expected (%zd)\n",
-			__func__, ocs_be16toh(fchdr->ox_id), seq->payload->dma.len,
-			exp_payload_len);
+	if (seq->payload.data_len < exp_payload_len) {
+		ocs_log_debug(ocs, "dropping ox_id %04x with payload length (%u) less than expected (%zd)\n",
+			      ocs_be16toh(fchdr->ox_id), seq->payload.data_len, exp_payload_len);
 		return -1;
 	}
+	
 	return 0;
-
 }
 
 static void
@@ -887,24 +1065,23 @@ static int32_t
 ocs_dispatch_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq)
 {
 	ocs_t *ocs = node->ocs;
-	fc_header_t	*fchdr = seq->header->dma.virt;
+	fc_header_t	*fchdr = seq->header.data;
 	fcp_cmnd_iu_t	*cmnd = NULL;
 	ocs_io_t	*io = NULL;
-	uint32_t	lun = UINT32_MAX;
+	fc_vm_header_t	*vhdr;
+	uint8_t		df_ctl;
+	uint64_t	lun = ULONG_MAX;
 	int32_t		rc = 0;
 
-	ocs_assert(seq->payload, -1);
-	cmnd = seq->payload->dma.virt;
+	ocs_assert(seq->payload.data, -1);
+	cmnd = (fcp_cmnd_iu_t *)seq->payload.data;
 
-	/* perform FCP_CMND validation check(s) */
-	if (ocs_validate_fcp_cmd(ocs, seq)) {
+	/* Perform FCP_CMND validation check(s) */
+	if (ocs_validate_fcp_cmd(ocs, seq))
 		return -1;
-	}
 
-	lun = ocs_fc_decode_lun(cmnd->fcp_lun);
-	if (lun == UINT32_MAX) {
-		return -1;
-	}
+	/* If lun is invalid, let the backend handle it */
+	lun = ocs_fc_decode_lun(node, cmnd->fcp_lun);
 
 	io = ocs_scsi_io_alloc(node, OCS_SCSI_IO_ROLE_RESPONDER);
 	if (io == NULL) {
@@ -913,17 +1090,37 @@ ocs_dispatch_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq)
 		/* If we have SEND_FRAME capability, then use it to send task set full or busy */
 		rc = ocs_hal_get(&ocs->hal, OCS_HAL_SEND_FRAME_CAPABLE, &send_frame_capable);
 		if ((rc == 0) && send_frame_capable) {
-			rc = ocs_sframe_send_task_set_full_or_busy(node, seq);
-			if (rc) {
-				ocs_log_test(ocs, "%s: ocs_sframe_send_task_set_full_or_busy failed: %d\n", __func__, rc);
-			}
+			rc = ocs_sframe_send_task_set_full_or_busy(node, seq, false);
+			if (rc)
+				ocs_log_test(ocs, "ocs_sframe_send_task_set_full_or_busy failed: %d\n", rc);
+
 			return rc;
 		}
 
-		ocs_log_err(ocs, "%s: IO allocation failed ox_id %04x\n", __func__, ocs_be16toh(fchdr->ox_id));
+		ocs_log_err(ocs, "IO allocation failed ox_id %04x\n", ocs_be16toh(fchdr->ox_id));
 		return -1;
 	}
+
 	io->hal_priv = seq->hal_priv;
+
+	/* Check if the CMD has vmheader */
+	io->app_id = 0;
+	df_ctl = fchdr->df_ctl;
+	if (sli_feature_enabled(&ocs->hal.sli, SLI4_FEATURE_ASHDR) && (df_ctl & FC_DFCTL_DEVICE_HDR_16_MASK)) {
+		uint32_t vmhdr_offset = 0;
+
+		/* Presence of VMID. Get the vm header offset. */
+		if (df_ctl & FC_DFCTL_ESP_HDR_MASK) {
+			vmhdr_offset += FC_DFCTL_ESP_HDR_SIZE;
+			ocs_log_err(ocs, "ESP Header present. Fix ESP Size.\n");
+		}
+
+		if (df_ctl & FC_DFCTL_NETWORK_HDR_MASK)
+			vmhdr_offset += FC_DFCTL_NETWORK_HDR_SIZE;
+
+		vhdr = (fc_vm_header_t *) ((char *)fchdr + sizeof(fc_header_t) + vmhdr_offset);
+		io->app_id = ocs_be32toh(vhdr->src_vmid);
+	}
 
 	/* RQ pair, if we got here, SIT=1 */
 	ocs_populate_io_fcp_cmd(io, cmnd, fchdr, TRUE);
@@ -949,10 +1146,10 @@ ocs_dispatch_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 /**
  * @ingroup unsol
- * @brief Dispatch unsolicited FCP_CMND frame (auto xfer rdy).
+ * @brief Dispatch unsolicited FCP_CMND frame.
  *
  * <h3 class="desc">Description</h3>
- * Dispatch unsolicited FCP_CMND frame that is assisted with auto xfer ready.
+ * Dispatch unsolicited FCP_CMND frame that is assisted with TOW.
  *
  * @param node Node that originated the frame.
  * @param seq Header/payload sequence buffers.
@@ -962,33 +1159,31 @@ ocs_dispatch_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq)
  * to be returned.
  */
 static int32_t
-ocs_dispatch_fcp_cmd_auto_xfer_rdy(ocs_node_t *node, ocs_hal_sequence_t *seq)
+ocs_dispatch_tow_fcp_cmd(ocs_node_t *node, ocs_hal_sequence_t *seq)
 {
 	ocs_t *ocs = node->ocs;
-	fc_header_t	*fchdr = seq->header->dma.virt;
+	fc_header_t	*fchdr = seq->header.data;
 	fcp_cmnd_iu_t	*cmnd = NULL;
 	ocs_io_t	*io = NULL;
-	uint32_t	lun = UINT32_MAX;
+	uint64_t	lun = ULONG_MAX;
 	int32_t		rc = 0;
 
-	ocs_assert(seq->payload, -1);
-	cmnd = seq->payload->dma.virt;
+	cmnd = (fcp_cmnd_iu_t *)seq->payload.data;
+	ocs_assert(cmnd, -1);
 
-	/* perform FCP_CMND validation check(s) */
-	if (ocs_validate_fcp_cmd(ocs, seq)) {
+	/* Make sure this is a valid TOW frame */
+	if (!seq->tow) {
+		node_printf(node, "IO is not optimized write assisted, dropping FCP_CMND ox_id %04x\n", ocs_be16toh(fchdr->ox_id));
 		return -1;
 	}
 
-	/* make sure first burst or auto xfer_rdy is enabled */
-	if (!seq->auto_xrdy) {
-		node_printf(node, "IO is not Auto Xfr Rdy assisted, dropping FCP_CMND\n");
+	/* Perform FCP_CMND validation check(s) */
+	if (ocs_validate_fcp_cmd(ocs, seq))
 		return -1;
-	}
 
-	lun = ocs_fc_decode_lun(cmnd->fcp_lun);
+	/* If lun is invalid, let the backend handle it */
+	lun = ocs_fc_decode_lun(node, cmnd->fcp_lun);
 
-	// TODO should there be a check here for an error? Why do any of the
-	// below if the LUN decode failed?
 	io = ocs_scsi_io_alloc(node, OCS_SCSI_IO_ROLE_RESPONDER);
 	if (io == NULL) {
 		uint32_t send_frame_capable;
@@ -996,16 +1191,17 @@ ocs_dispatch_fcp_cmd_auto_xfer_rdy(ocs_node_t *node, ocs_hal_sequence_t *seq)
 		/* If we have SEND_FRAME capability, then use it to send task set full or busy */
 		rc = ocs_hal_get(&ocs->hal, OCS_HAL_SEND_FRAME_CAPABLE, &send_frame_capable);
 		if ((rc == 0) && send_frame_capable) {
-			rc = ocs_sframe_send_task_set_full_or_busy(node, seq);
-			if (rc) {
-				ocs_log_test(ocs, "%s: ocs_sframe_send_task_set_full_or_busy failed: %d\n", __func__, rc);
-			}
+			rc = ocs_sframe_send_task_set_full_or_busy(node, seq, false);
+			if (rc)
+				ocs_log_test(ocs, "ocs_sframe_send_task_set_full_or_busy failed: %d\n", rc);
+
 			return rc;
 		}
 
-		ocs_log_err(ocs, "%s: IO allocation failed ox_id %04x\n", __func__, ocs_be16toh(fchdr->ox_id));
+		ocs_log_err(ocs, "IO allocation failed ox_id %04x\n", ocs_be16toh(fchdr->ox_id));
 		return -1;
 	}
+
 	io->hal_priv = seq->hal_priv;
 
 	/* RQ pair, if we got here, SIT=0 */
@@ -1013,15 +1209,20 @@ ocs_dispatch_fcp_cmd_auto_xfer_rdy(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 	if (cmnd->task_management_flags) {
 		/* first burst command better not be a TMF */
-		ocs_log_err(ocs, "%s: TMF flags set 0x%x\n", __func__, cmnd->task_management_flags);
+		ocs_log_err(ocs, "TMF flags set 0x%x\n", cmnd->task_management_flags);
 		ocs_scsi_io_free(io);
 		return -1;
 	} else {
 		uint32_t flags = ocs_get_flags_fcp_cmd(cmnd);
 
 		/* activate HAL IO */
-		ocs_hal_io_activate_port_owned(&ocs->hal, seq->hio);
-		io->hio = seq->hio;
+		io->hio = ocs_hal_io_activate_port_owned(&ocs->hal, seq->hio);
+		if (!io->hio) {
+			ocs_log_err(ocs, "Port owned HIO activation failed ox_id %04x\n", ocs_be16toh(fchdr->ox_id));
+			ocs_scsi_io_free(io);
+			return -1;
+		}
+
 		seq->hio->ul_io = io;
 		io->tgt_task_tag = seq->hio->indicator;
 
@@ -1039,10 +1240,10 @@ ocs_dispatch_fcp_cmd_auto_xfer_rdy(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 /**
  * @ingroup unsol
- * @brief Dispatch FCP data frames for auto xfer ready.
+ * @brief Dispatch FCP data frames for TOW.
  *
  * <h3 class="desc">Description</h3>
- * Dispatch unsolicited FCP data frames (auto xfer ready)
+ * Dispatch unsolicited FCP data frames
  * containing sequence initiative transferred (SIT=1).
  *
  * @param node Node that originated the frame.
@@ -1056,35 +1257,55 @@ static int32_t
 ocs_dispatch_fcp_data(ocs_node_t *node, ocs_hal_sequence_t *seq)
 {
 	ocs_t *ocs = node->ocs;
-	ocs_hal_t *hal = &ocs->hal;
-	ocs_hal_io_t *hio = seq->hio;
+	ocs_hal_io_t *hio;
 	ocs_io_t	*io;
 	ocs_dma_t fburst[1];
+	int32_t rc = -1;
 
-	ocs_assert(seq->payload, -1);
+	if (!seq->tow) {
+		fc_header_t *hdr = seq->header.data;
+		uint32_t send_frame_capable = 0;
+
+		ocs_assert((fc_be24toh(hdr->f_ctl) & FC_FCTL_END_SEQUENCE), -1);
+		ocs_assert((fc_be24toh(hdr->f_ctl) & FC_FCTL_SEQUENCE_INITIATIVE), -1);
+
+		ocs_hal_get(&ocs->hal, OCS_HAL_SEND_FRAME_CAPABLE, &send_frame_capable);
+		if (!send_frame_capable) {
+			ocs_log_err(node->ocs, "Send frame is not capable to send SCSI busy\n");
+			return rc;
+		}
+
+		rc = ocs_sframe_send_task_set_full_or_busy(node, seq, true);
+		if (rc)
+			ocs_log_err(node->ocs, "Failed to send scsi busy/full ox_id %04x\n", ocs_be16toh(hdr->ox_id));
+
+		node_printf(node, "IO is not optimized write assisted, %s FCP data frame ox_id %04x\n",
+			    rc ? "dropping" : "sent SCSI busy resp for", ocs_be16toh(hdr->ox_id));
+
+		return rc;
+	}
+
+	ocs_assert(seq->payload.data, -1);
+	hio = seq->hio;
 	ocs_assert(hio, -1);
 
 	io = hio->ul_io;
 	if (io == NULL) {
-		ocs_log_err(ocs, "%s: data received for NULL io, xri=0x%x\n",
-			__func__, hio->indicator);
+		ocs_log_err(ocs, "data received for NULL io, xri=0x%x\n", hio->indicator);
 		return -1;
 	}
 
 	/*
-	 * We only support data completions for auto xfer ready. Make sure
-	 * this is a port owned XRI.
+	 * We only support data completions for TOW. Make sure this is a port owned XRI.
 	 */
-	if (!ocs_hal_is_io_port_owned(hal, seq->hio)) {
-		ocs_log_err(ocs, "%s: data received for host owned XRI, xri=0x%x\n",
-			__func__, hio->indicator);
+	if (!ocs_hal_io_port_owned(seq->hio)) {
+		ocs_log_err(ocs, "data received for host owned XRI, xri=0x%x\n", hio->indicator);
 		return -1;
 	}
 
 	/* For error statuses, pass the error to the target back end */
 	if (seq->status != OCS_HAL_UNSOL_SUCCESS) {
-		ocs_log_err(ocs, "%s: data with status 0x%x received, xri=0x%x\n",
-			    __func__, seq->status, hio->indicator);
+		ocs_log_err(ocs, "data with status 0x%x received, xri=0x%x\n", seq->status, hio->indicator);
 
 		/*
 		 * In this case, there is an existing, in-use HAL IO that
@@ -1105,16 +1326,16 @@ ocs_dispatch_fcp_data(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	io->seq_init = 1;
 
 	/* convert the array of pointers to the correct type, to send to backend */
-	fburst[0] = seq->payload->dma;
+	fburst[0].virt = seq->payload.data;
+	fburst[0].len = seq->payload.data_len;
+	fburst[0].size = seq->payload.data_len;
 
 	/* the amount of first burst data was saved as "acculated sequence length" */
-	io->transferred = seq->payload->dma.len;
+	io->transferred = seq->payload.data_len;
 
-	if (ocs_scsi_recv_cmd_first_burst(io, 0, NULL, 0, 0,
-					  fburst, io->transferred)) {
-		ocs_log_err(ocs, "%s: error passing first burst, xri=0x%x, oxid=0x%x\n",
-			    __func__, hio->indicator, io->init_task_tag);
-	}
+	if (ocs_scsi_recv_cmd_first_burst(io, 0, NULL, 0, 0, fburst, io->transferred))
+		ocs_log_err(ocs, "error passing first burst, xri=0x%x, ox_id=0x%x\n",
+			    hio->indicator, io->init_task_tag);
 
 	/* Free the header and all the accumulated payload buffers */
 	ocs_hal_sequence_free(&ocs->hal, seq);
@@ -1145,69 +1366,6 @@ ocs_fc_tmf_rejected_cb(ocs_io_t *io, ocs_scsi_io_status_e scsi_status, uint32_t 
 }
 
 /**
- * @ingroup unsol
- * @brief Decode a LU Number according to SAM.
- *
- * <h3 class="desc">Description</h3>
- * Decode a LU Number according to SAM.
- * \b Note: Only handles a single-level LU.
- *
- * @param lu Pointer to the LU data.
- *
- * @return Returns the LU Number; or the maximum integer on error.
- *
- * @todo move to generic FC file
- */
-
-static uint32_t
-ocs_fc_decode_lun(uint8_t *lu)
-{
-	uint32_t lun = UINT32_MAX;
-	uint8_t	 address_method = -1;
-
-	address_method = lu[0] >> FCP_LUN_ADDRESS_METHOD_SHIFT;
-
-	switch (address_method) {
-	case FCP_LUN_ADDR_METHOD_PERIPHERAL:
-	{
-		uint8_t	bus_identifier = lu[0] & ~FCP_LUN_ADDRESS_METHOD_MASK;
-
-		if (0 == bus_identifier) {
-			lun = lu[1];
-		} else {
-			ocs_log_test(NULL, "%s: unsupported bus identifier %#02x (LU %02x %02x %02x %02x ...\n",
-				__func__, bus_identifier, lu[0], lu[1], lu[2], lu[3]);
-		}
-		break;
-	}
-	case FCP_LUN_ADDR_METHOD_FLAT:
-	{
-		lun = (lu[0] & ~FCP_LUN_ADDRESS_METHOD_MASK) << 8 | lu[1];
-		break;
-	}
-	case FCP_LUN_ADDR_METHOD_EXTENDED:
-	{
-		uint8_t	length, extended_address_method;
-
-		length = (lu[0] & 0x30) >> 4;
-		extended_address_method = lu[0] & 0xf;
-
-		if ((1 == length) && (2 == extended_address_method)) {
-			lun = (lu[1] << 16) | (lu[2] << 8) | lu[3];
-		} else {
-			ocs_log_test(NULL, "%s: unsupported extended addressing method (length=%#x method=%#x)\n",
-					__func__, length, extended_address_method);
-		}
-		break;
-	}
-	default:
-		ocs_log_test(NULL, "%s: unsupported LU address method %#02x\n", __func__, address_method);
-	}
-
-	return lun;
-}
-
-/**
  * @brief Return next FC frame on node->pend_frames list
  *
  * The next FC frame on the node->pend_frames list is returned, or NULL
@@ -1219,7 +1377,7 @@ ocs_fc_decode_lun(uint8_t *lu)
  * @return Returns pointer to the next FC frame, or NULL if the pending frame list
  * is empty.
  */
-static ocs_hal_sequence_t *
+ocs_hal_sequence_t *
 ocs_frame_next(ocs_list_t *pend_list, ocs_lock_t *list_lock)
 {
 	ocs_hal_sequence_t *frame = NULL;
@@ -1252,7 +1410,9 @@ ocs_sframe_common_send_cb(void *arg, uint8_t *cqe, int32_t status)
 	ocs_hal_reqtag_free(hal, ctx->wqcb);
 
 	/* Free sequence */
-	ocs_hal_sequence_free(hal, ctx->seq);
+	ctx->wqe.wqebuf = NULL;
+	ocs_dma_free(hal->os, &ctx->payload);
+	ocs_free(hal->os, ctx, sizeof(*ctx));
 }
 
 /**
@@ -1281,7 +1441,7 @@ ocs_sframe_common_send(ocs_node_t *node, ocs_hal_sequence_t *seq, uint8_t r_ctl,
 	ocs_t *ocs = node->ocs;
 	ocs_hal_t *hal = &ocs->hal;
 	ocs_hal_rtn_e rc = 0;
-	fc_header_t *behdr = seq->header->dma.virt;
+	fc_header_t *behdr = seq->header.data;
 	fc_header_le_t hdr;
 	uint32_t s_id = fc_be24toh(behdr->s_id);
 	uint32_t d_id = fc_be24toh(behdr->d_id);
@@ -1289,14 +1449,31 @@ ocs_sframe_common_send(ocs_node_t *node, ocs_hal_sequence_t *seq, uint8_t r_ctl,
 	uint16_t rx_id = ocs_be16toh(behdr->rx_id);
 	ocs_hal_send_frame_context_t *ctx;
 
-	uint32_t heap_size = seq->payload->dma.size;
-	uintptr_t heap_phys_base = seq->payload->dma.phys;
-	uint8_t *heap_virt_base = seq->payload->dma.virt;
-	uint32_t heap_offset = 0;
+	ctx = ocs_malloc(ocs, sizeof(ocs_hal_send_frame_context_t),
+			OCS_M_NOWAIT | OCS_M_ZERO);
+	if (ctx == NULL) {
+		ocs_log_err(ocs, "failed to allocate send frame context\n");
+		return -1;
+	}
+	rc = ocs_dma_alloc(ocs, &ctx->payload, seq->payload.data_len, OCS_MIN_DMA_ALIGNMENT);
+	if (rc) {
+		ocs_log_err(ocs, "failed to alloc DMA memory for sframe\n");
+		ocs_free(ocs, ctx, sizeof(*ctx));
+		return -1;
+	}
+
+	ctx->wqe.wqebuf = ctx->wqebuf;
+	/* Save sequence */
+	ctx->seq = seq;
+
+	/* Copy the payload in */
+	ocs_memcpy(ctx->payload.virt, payload, payload_len);
 
 	/* Build the FC header reusing the RQ header DMA buffer */
 	ocs_memset(&hdr, 0, sizeof(hdr));
-	hdr.d_id = s_id;			/* send it back to whomever sent it to us */
+
+	/* Send it back to whomever sent it to us */
+	hdr.d_id = s_id;
 	hdr.r_ctl = r_ctl;
 	hdr.info = info;
 	hdr.s_id = d_id;
@@ -1307,40 +1484,24 @@ ocs_sframe_common_send(ocs_node_t *node, ocs_hal_sequence_t *seq, uint8_t r_ctl,
 	hdr.df_ctl = 0;
 
 	/*
-	 * send_frame_seq_id is an atomic, we just let it increment, while storing only
-	 * the low 8 bits to hdr->seq_id
+	 * send_frame_seq_id is an atomic, we just let it increment,
+	 * while storing only the low 8 bits to hdr->seq_id
 	 */
-	hdr.seq_id = (uint8_t) ocs_atomic_add_return(&hal->send_frame_seq_id, 1);
+	hdr.seq_id = (uint8_t)ocs_atomic_add_return(&hal->send_frame_seq_id, 1);
 
 	hdr.rx_id = rx_id;
 	hdr.ox_id = ox_id;
 	hdr.parameter = 0;
 
-	/* Allocate and fill in the send frame request context */
-	ctx = (void*)(heap_virt_base + heap_offset);
-	heap_offset += sizeof(*ctx);
-	ocs_assert(heap_offset < heap_size, -1);
-	ocs_memset(ctx, 0, sizeof(*ctx));
-
-	/* Save sequence */
-	ctx->seq = seq;
-
-	/* Allocate a response payload DMA buffer from the heap */
-	ctx->payload.phys = heap_phys_base + heap_offset;
-	ctx->payload.virt = heap_virt_base + heap_offset;
-	ctx->payload.size = payload_len;
-	ctx->payload.len = payload_len;
-	heap_offset += payload_len;
-	ocs_assert(heap_offset <= heap_size, -1);
-
-	/* Copy the payload in */
-	ocs_memcpy(ctx->payload.virt, payload, payload_len);
-
 	/* Send */
 	rc = ocs_hal_send_frame(&ocs->hal, (void*)&hdr, FC_SOFI3, FC_EOFT, &ctx->payload, ctx,
 				ocs_sframe_common_send_cb, ctx);
 	if (rc) {
-		ocs_log_test(ocs, "%s: ocs_hal_send_frame failed: %d\n", __func__, rc);
+		ocs_log_err(ocs, "ocs_hal_send_frame failed: %d\n", rc);
+		ocs_dma_free(ocs, &ctx->payload);
+		ocs_free(ocs, ctx, sizeof(*ctx));
+	} else {
+		ocs_hal_sequence_free(hal, ctx->seq);
 	}
 
 	return rc ? -1 : 0;
@@ -1379,14 +1540,15 @@ ocs_sframe_send_fcp_rsp(ocs_node_t *node, ocs_hal_sequence_t *seq, void *rsp, ui
  *
  * @param node Pointer to node object.
  * @param seq Pointer to originator frame sequence.
+ * @param force_busy if set send SCSI busy only
  *
  * @return Returns 0 on success, or a negative error code value on failure.
  */
 static int32_t
-ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq)
+ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq, int32_t force_busy)
 {
 	fcp_rsp_iu_t fcprsp;
-	fcp_cmnd_iu_t *fcpcmd = seq->payload->dma.virt;
+	fcp_cmnd_iu_t *fcpcmd = seq->payload.data;
 	uint32_t *fcp_dl_ptr;
 	uint32_t fcp_dl;
 	int32_t rc = 0;
@@ -1398,16 +1560,22 @@ ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 	/* construct task set full or busy response */
 	ocs_memset(&fcprsp, 0, sizeof(fcprsp));
-	ocs_lock(&node->active_ios_lock);
-		fcprsp.scsi_status = ocs_list_empty(&node->active_ios) ? SCSI_STATUS_BUSY : SCSI_STATUS_TASK_SET_FULL;
-	ocs_unlock(&node->active_ios_lock);
+
+	if (force_busy) {
+		fcprsp.scsi_status = SCSI_STATUS_BUSY;
+	} else {
+		ocs_lock(&node->active_ios_lock);
+		fcprsp.scsi_status = (ocs_list_empty(&node->active_ios) ? SCSI_STATUS_BUSY : SCSI_STATUS_TASK_SET_FULL);
+		ocs_unlock(&node->active_ios_lock);
+	}
+
 	*((uint32_t*)&fcprsp.fcp_resid) = fcp_dl;
 
 	/* send it using send_frame */
 	rc = ocs_sframe_send_fcp_rsp(node, seq, &fcprsp, sizeof(fcprsp) - sizeof(fcprsp.data));
-	if (rc) {
-		ocs_log_test(node->ocs, "%s: ocs_sframe_send_fcp_rsp failed: %d\n", __func__, rc);
-	}
+	if (rc)
+		ocs_log_test(node->ocs, "ocs_sframe_send_fcp_rsp failed: %d\n", rc);
+
 	return rc;
 }
 
@@ -1424,7 +1592,7 @@ ocs_sframe_send_task_set_full_or_busy(ocs_node_t *node, ocs_hal_sequence_t *seq)
 int32_t
 ocs_sframe_send_bls_acc(ocs_node_t *node,  ocs_hal_sequence_t *seq)
 {
-	fc_header_t *behdr = seq->header->dma.virt;
+	fc_header_t *behdr = seq->header.data;
 	uint16_t ox_id = ocs_be16toh(behdr->ox_id);
 	uint16_t rx_id = ocs_be16toh(behdr->rx_id);
 	fc_ba_acc_payload_t acc = {0};
@@ -1442,4 +1610,32 @@ ocs_sframe_send_bls_acc(ocs_node_t *node,  ocs_hal_sequence_t *seq)
 					      FC_FCTL_END_SEQUENCE,
 				      FC_TYPE_BASIC_LINK,
 				      &acc, sizeof(acc));
+}
+
+/**
+ * @brief Send BA_RJT using sent frame
+ *
+ * A BA_RJT is sent using SEND_FRAME
+ *
+ * @param node Pointer to node object.
+ * @param seq Pointer to originator frame sequence.
+ *
+ * @return Returns 0 on success, or a negative error code value on failure.
+ */
+int32_t
+ocs_sframe_send_bls_rjt(ocs_node_t *node,  ocs_hal_sequence_t *seq)
+{
+	fc_ba_rjt_payload_t rjt = {0};
+
+	rjt.reason_code		= FC_REASON_UNABLE_TO_PERFORM;
+	rjt.reason_explanation	= FC_EXPL_NO_ADDITIONAL;
+
+	return ocs_sframe_common_send(node, seq,
+				      FC_RCTL_BLS,
+				      FC_RCTL_INFO_DATA_DESC,
+				      FC_FCTL_EXCHANGE_RESPONDER |
+					      FC_FCTL_LAST_SEQUENCE |
+					      FC_FCTL_END_SEQUENCE,
+				      FC_TYPE_BASIC_LINK,
+				      &rjt, sizeof(rjt));
 }

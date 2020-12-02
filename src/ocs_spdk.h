@@ -68,7 +68,7 @@ struct spdk_ocs_get_pci_config_t {
 	uint16_t vendor;
 	uint16_t device;
 	uint32_t bar_count;
-	spdk_ocs_memref_t bars[PCI_MAX_BAR];
+	ocsu_memref_t bars[PCI_MAX_BAR];
 	uint8_t bus;
 	uint8_t dev;
 	uint8_t func;
