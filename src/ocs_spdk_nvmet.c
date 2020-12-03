@@ -67,7 +67,7 @@ ocs_nvme_api_call_sync(enum spdk_fc_event event_type, void *args, void **cb_args
 	ctx.rc = SPDK_ERR_INTERNAL;
 	*cb_args = &ctx;
 
-	if (nvmf_fc_master_enqueue_event(event_type, args, ocs_nvme_api_call_done)) {
+	if (nvmf_fc_main_enqueue_event(event_type, args, ocs_nvme_api_call_done)) {
                 goto done;
         }
 
@@ -552,7 +552,7 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 	/* set args io queue size */
 	args->io_queue_size = hwq->rq_payload.num_buffers;
 
-	rc = nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_INIT, args,
+	rc = nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_INIT, args,
 			ocs_cb_hw_port_create);
 	if (rc) {
 		goto error;
@@ -598,7 +598,7 @@ ocs_nvme_hw_port_quiesce(ocs_t *ocs)
 	args->dump_queues = false;
 	args->cb_ctx = args;
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_RESET, args,
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_RESET, args,
 				ocs_cb_hw_port_quiesce)) {
 		ocs_log_err(ocs, "NVME HW Port reset failed.\n");
 		goto error;
@@ -747,7 +747,7 @@ ocs_nvme_process_abts(ocs_node_t *node, uint16_t oxid, uint16_t rxid)
 	args->rpi = node->rnode.indicator;
 	args->cb_ctx = args;
 
-	rc = nvmf_fc_master_enqueue_event(SPDK_FC_ABTS_RECV, args,
+	rc = nvmf_fc_main_enqueue_event(SPDK_FC_ABTS_RECV, args,
 			ocs_cb_abts_cb);
 	if (rc) {
 		goto err;
@@ -894,7 +894,7 @@ ocs_nvme_node_lost(ocs_node_t *node)
 
 	node_printf(node, "NVME IT delete initiated.\n");
 
-	if (nvmf_fc_master_enqueue_event(SPDK_FC_IT_DELETE, args, ocs_nvme_node_lost_cb)) {
+	if (nvmf_fc_main_enqueue_event(SPDK_FC_IT_DELETE, args, ocs_nvme_node_lost_cb)) {
 		node_printf(node, "NVME IT delete failed.\n");
 		goto err;
 	}

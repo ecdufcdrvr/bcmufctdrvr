@@ -138,7 +138,7 @@ ocs_setup_timer_us(ocs_os_handle_t os, ocs_timer_t *timer,
 
         memset(&evt, 0, sizeof(evt));
         evt.sigev_notify = SIGEV_THREAD;
-        evt.sigev_notify_function = (void(*)(union sigval)) func;
+        evt.sigev_notify_function = (void *)func;
         evt.sigev_value.sival_ptr = data;
 
         if ((rc = timer_create(CLOCK_REALTIME, &evt, &timer->timer)) < 0) {
