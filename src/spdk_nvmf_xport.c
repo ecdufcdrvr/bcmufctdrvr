@@ -2243,7 +2243,14 @@ nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port)
 	return 0;
 }
 
-static int
+void
+nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
+{
+	/* Remove this after WIP work. */
+	return;
+}
+
+int
 nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	int rc = 0;

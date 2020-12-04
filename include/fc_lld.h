@@ -54,6 +54,10 @@ int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
 int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
 #endif
 
+int nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp); // Remove this after WIP
+
+void nvmf_fc_reinit_q(void *queues_prev, void *queues_curr); // Remove this after WIP
+
 int nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp);
 
 int nvmf_fc_set_q_online_state(struct spdk_nvmf_fc_hwqp *hwqp, bool online);
