@@ -52,17 +52,17 @@ struct spdk_fc_globals {
         struct rte_mempool *buff_pool; // Used for writes.
 };
 extern struct spdk_fc_globals g_spdk_fc;
-void ocs_spdk_exit(void);
+void ocsu_exit(void);
+void ocsu_shutdown(void);
 void ocs_spdk_start_pollers(void);
 int ocsu_init(void);
 extern uint64_t g_flush_timeout;
-void spdk_fc_shutdown(void);
+
 /*
 void process_task_completion(struct spdk_scsi_task *scsi_task);
 void process_task_mgmt_completion(struct spdk_scsi_task *scsi_task);
 */
 
-struct spdk_thread *ocs_get_rsvd_thread(void);
 int32_t ocs_scsi_alloc_task_pool(struct rte_mempool **task_pool);
 
 #define BIT_2 (1<<2)

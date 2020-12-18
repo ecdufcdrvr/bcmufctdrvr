@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018, Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -45,12 +44,11 @@
 #include "ocs_fabric.h"
 #include "ocs_device.h"
 #include "spv.h"
-#include "ocs_spdk_nvmet.h"
 
 #define domain_sm_trace(domain)  \
 	do { \
 		if (OCS_LOG_ENABLE_DOMAIN_SM_TRACE(domain->ocs)) \
-			ocs_log_info(domain->ocs, "[domain] %-20s %-20s\n", __func__, ocs_sm_event_name(evt)); \
+			ocs_log_info(domain->ocs, "[domain] %-20s\n", ocs_sm_event_name(evt)); \
 	} while (0)
 
 #define domain_trace(domain, fmt, ...) \
@@ -69,7 +67,7 @@ void ocs_mgmt_domain_get_all(ocs_textbuf_t *textbuf, void *domain);
 int ocs_mgmt_domain_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *domain);
 int ocs_mgmt_domain_set(char *parent, char *name, char *value, void *domain);
 int ocs_mgmt_domain_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
-		void *arg_out, uint32_t arg_out_length, void *domain);
+			 void *arg_out, uint32_t arg_out_length, void *object);
 
 static ocs_mgmt_functions_t domain_mgmt_functions = {
 	.get_list_handler = ocs_mgmt_domain_list,
@@ -78,8 +76,6 @@ static ocs_mgmt_functions_t domain_mgmt_functions = {
 	.set_handler = ocs_mgmt_domain_set,
 	.exec_handler = ocs_mgmt_domain_exec,
 };
-
-
 
 /**
  * @brief Accept domain callback events from the HAL.
@@ -121,7 +117,7 @@ ocs_domain_cb(void *arg, ocs_hal_domain_event_e event, void *data)
 		if (domain == NULL) {
 			domain = ocs_domain_alloc(ocs, fcf_wwn);
 			if (domain == NULL) {
-				ocs_log_err(ocs, "%s: ocs_domain_alloc() failed\n", __func__);
+				ocs_log_err(ocs, "ocs_domain_alloc() failed\n");
 				rc = -1;
 				break;
 			}
@@ -133,6 +129,9 @@ ocs_domain_cb(void *arg, ocs_hal_domain_event_e event, void *data)
 
 	case OCS_HAL_DOMAIN_LOST:
 		domain_trace(domain, "OCS_HAL_DOMAIN_LOST:\n");
+		domain->ocs->xport->fc_stats.linkup_stat_req = 0;
+		ocs_memset(&domain->ocs->xport->fc_stats.linkup_stats, 0,
+				sizeof(domain->ocs->xport->fc_stats.linkup_stats));
 		ocs_domain_hold_frames(domain);
 		ocs_domain_post_event(domain, OCS_EVT_DOMAIN_LOST, NULL);
 		break;
@@ -170,7 +169,7 @@ ocs_domain_cb(void *arg, ocs_hal_domain_event_e event, void *data)
 		break;
 
 	default:
-		ocs_log_warn(ocs, "%s: unsupported event %#x\n", __func__, event);
+		ocs_log_warn(ocs, "unsupported event %#x\n", event);
 	}
 
 	return rc;
@@ -225,7 +224,7 @@ ocs_domain_alloc(ocs_t *ocs, uint64_t fcf_wwn)
 
 	ocs_assert(ocs, NULL);
 
-	domain = ocs_malloc(ocs, sizeof(*domain), OCS_M_NOWAIT | OCS_M_ZERO);
+	domain = ocs_malloc(ocs, sizeof(*domain), OCS_M_ZERO);
 	if (domain) {
 
 		domain->ocs = ocs;
@@ -238,13 +237,14 @@ ocs_domain_alloc(ocs_t *ocs, uint64_t fcf_wwn)
 		/* Allocate a sparse vector for sport FC_ID's */
 		domain->lookup = spv_new(ocs);
 		if (domain->lookup == NULL) {
-			ocs_log_err(ocs, "%s: spv_new() failed\n", __func__);
+			ocs_log_err(ocs, "spv_new() failed\n");
 			ocs_free(ocs, domain, sizeof(*domain));
 			return NULL;
 		}
 
 		ocs_list_init(&domain->sport_list, ocs_sport_t, link);
 		domain->fcf_wwn = fcf_wwn;
+		domain->evtdepth = 0;
 		ocs_log_debug(ocs, "Domain allocated: wwn %016" PRIX64 "\n", domain->fcf_wwn);
 		domain->femul_enable = (ocs->ctrlmask & OCS_CTRLMASK_ENABLE_FABRIC_EMULATION) != 0;
 #if defined(ENABLE_FABRIC_EMULATION)
@@ -261,7 +261,7 @@ ocs_domain_alloc(ocs_t *ocs, uint64_t fcf_wwn)
 
 		domain->mgmt_functions = &domain_mgmt_functions;
 	} else {
-		ocs_log_err(ocs, "%s: domain allocation failed\n", __func__);
+		ocs_log_err(ocs, "domain allocation failed\n");
 	}
 
 
@@ -290,6 +290,9 @@ ocs_domain_free(ocs_domain_t *domain)
 	/* Hold frames to clear the domain pointer from the xport lookup */
 	ocs_domain_hold_frames(domain);
 
+	/* purge pending frames */
+	ocs_domain_purge_pending(domain);
+
 	ocs = domain->ocs;
 
 	ocs_log_debug(ocs, "Domain free: wwn %016" PRIX64 "\n", domain->fcf_wwn);
@@ -302,16 +305,17 @@ ocs_domain_free(ocs_domain_t *domain)
 		if (domain == ocs->domain) {
 			/* set global domain to the new head */
 			ocs->domain = ocs_list_get_head(&ocs->domain_list);
-			if (ocs->domain) {
-				ocs_log_debug(ocs, "%s: setting new domain, old=%p new=%p\n",
-					__func__, domain, ocs->domain);
-			}
-		}
-
-		if (ocs_list_empty(&ocs->domain_list) && ocs->domain_list_empty_cb ) {
-			(*ocs->domain_list_empty_cb)(ocs, ocs->domain_list_empty_cb_arg);
+			if (ocs->domain)
+				ocs_log_debug(ocs, "setting new domain, old=%p new=%p\n", domain, ocs->domain);
 		}
 	ocs_device_unlock(ocs);
+
+	ocs_lock(&ocs->domain_list_empty_cb_lock);
+	if (ocs->domain_list_empty_cb && ocs_list_empty(&ocs->domain_list)) {
+		ocs_log_info(ocs, "Domain list is empty, release domain shutdown\n");
+		(*ocs->domain_list_empty_cb)(ocs, ocs->domain_list_empty_cb_arg);
+	}
+	ocs_unlock(&ocs->domain_list_empty_cb_lock);
 
 	ocs_rlock_free(&domain->drvsm_lock);
 	ocs_lock_free(&domain->lookup_lock);
@@ -325,6 +329,25 @@ ocs_domain_free(ocs_domain_t *domain)
 #endif
 
 	ocs_free(ocs, domain, sizeof(*domain));
+}
+
+/**
+ * @brief Wait for all the sport sessions to clear
+ *
+ * @param domain Pointer to domain being wait.
+ *
+ * @return None.
+ */
+void
+ocs_scsi_wait_domain_force_free(ocs_domain_t *domain)
+{
+#if !defined(OCS_USPACE_SPDK)
+	ocs_sport_t *sport, *next;
+
+	ocs_list_foreach_safe(&domain->sport_list, sport, next) {
+		ocs_scsi_tgt_sess_del_wait(sport);
+	}
+#endif
 }
 
 /**
@@ -344,11 +367,6 @@ ocs_domain_force_free(ocs_domain_t *domain)
 	ocs_sport_t *sport;
 	ocs_sport_t *next;
 
-	/* Shutdown domain sm */
-	ocs_sm_disable(&domain->drvsm);
-
-	ocs_scsi_notify_domain_force_free(domain);
-
 	ocs_domain_lock(domain);
 		ocs_list_foreach_safe(&domain->sport_list, sport, next) {
 			ocs_sport_force_free(sport);
@@ -359,28 +377,45 @@ ocs_domain_force_free(ocs_domain_t *domain)
 }
 
 /**
+ * @brief Unregister a callback for the domain_list empty cb
+ *
+ * <h3 class="desc">Description</h3>
+ * A function callback may be unregistered when the domain_list goes empty.
+ *
+ * @param ocs Pointer to a device object.
+ *
+ * @return None.
+ */
+void
+ocs_unregister_domain_list_empty_cb(ocs_t *ocs)
+{
+	ocs_lock(&ocs->domain_list_empty_cb_lock);
+		ocs->domain_list_empty_cb_arg = NULL;
+		ocs->domain_list_empty_cb = NULL;
+	ocs_unlock(&ocs->domain_list_empty_cb_lock);
+}
+
+/**
  * @brief Register a callback when the domain_list goes empty.
  *
  * <h3 class="desc">Description</h3>
  * A function callback may be registered when the domain_list goes empty.
  *
  * @param ocs Pointer to a device object.
- * @param callback Callback function.
- * @param arg Callback argument.
  *
  * @return None.
  */
-
 void
-ocs_register_domain_list_empty_cb(ocs_t *ocs, void (*callback)(ocs_t *ocs, void *arg), void *arg)
+ocs_register_domain_list_empty_cb(ocs_t *ocs)
 {
-	ocs_device_lock(ocs);
-		ocs->domain_list_empty_cb = callback;
-		ocs->domain_list_empty_cb_arg = arg;
-		if (ocs_list_empty(&ocs->domain_list) && callback) {
-			(*callback)(ocs, arg);
+	ocs_lock(&ocs->domain_list_empty_cb_lock);
+		if (ocs->domain_list_empty_cb == NULL) {
+			ocs_sem_init(&ocs->domain_list_empty_cb_sem, 0,
+				     "domain_list_empty_cb_sem");
+			ocs->domain_list_empty_cb_arg = &ocs->domain_list_empty_cb_sem;
+			ocs->domain_list_empty_cb = ocs_xport_domain_list_empty_cb;
 		}
-	ocs_device_unlock(ocs);
+	ocs_unlock(&ocs->domain_list_empty_cb_lock);
 }
 
 /**
@@ -401,7 +436,7 @@ ocs_domain_get_instance(ocs_t *ocs, uint32_t index)
 	ocs_domain_t *domain = NULL;
 
 	if (index >= OCS_MAX_DOMAINS) {
-		ocs_log_err(ocs, "%s: invalid index: %d\n", __func__, index);
+		ocs_log_err(ocs, "invalid index: %d\n", index);
 		return NULL;
 	}
 	ocs_device_lock(ocs);
@@ -546,7 +581,7 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		 * TODO: do we want to allow setting only port name or only node name?
 		 */
 		if ((my_wwpn == 0) || (my_wwnn == 0)) {
-			ocs_log_debug(ocs, "%s: using default hardware WWN configuration \n", __func__);
+			ocs_log_debug(ocs, "using default hardware WWN configuration\n");
 			my_wwpn = ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_PORT);
 			my_wwnn = ocs_get_wwn(&ocs->hal, OCS_HAL_WWN_NODE);
 		}
@@ -555,10 +590,10 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			my_wwpn, my_wwnn);
 
 		/* Allocate a sport and transition to __ocs_sport_allocated */
-		sport = ocs_sport_alloc(domain, my_wwpn, my_wwnn, UINT32_MAX, ocs->enable_ini, ocs->enable_tgt);
-
+		sport = ocs_sport_alloc(domain, my_wwpn, my_wwnn, UINT32_MAX, ocs->enable_ini, ocs->ini_fc_types,
+					ocs->enable_tgt, ocs->tgt_fc_types);
 		if (sport == NULL) {
-			ocs_log_err(ocs, "%s: ocs_sport_alloc() failed\n", __func__);
+			ocs_log_err(ocs, "ocs_sport_alloc() failed\n");
 			break;
 		}
 		ocs_sm_transition(&sport->sm, __ocs_sport_allocated, NULL);
@@ -567,8 +602,7 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (drec->is_ethernet) {
 			vlan = ocs_bitmap_search((void *)drec->map.vlan, TRUE, 512 * 8);
 			if (vlan < 0) {
-				ocs_log_err(ocs, "%s: no VLAN id available (FCF=%d)\n", __func__,
-						drec->index);
+				ocs_log_err(ocs, "no VLAN id available (FCF=%d)\n", drec->index);
 				break;
 			}
 		}
@@ -596,7 +630,7 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		domain->is_nlport = drec->map.loop[1] == 0x00;
 
 		if (domain->is_loop) {
-			ocs_log_debug(ocs, "%s: %s fc_id=%#x speed=%d\n", __func__,
+			ocs_log_debug(ocs, "%s fc_id=%#x speed=%d\n",
 					drec->is_loop ? (domain->is_nlport ? "public-loop" : "loop") : "other",
 					drec->fc_id, drec->speed);
 
@@ -606,16 +640,15 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 			if (ocs->enable_ini) {
 				uint32_t count = drec->map.loop[0];
-				ocs_log_debug(ocs, "%s: %d position map entries\n", __func__, count);
+				ocs_log_debug(ocs, "%d position map entries\n", count);
 				for (i = 1; i <= count; i++) {
 					if (drec->map.loop[i] != drec->fc_id) {
 						ocs_node_t *node;
 
-						ocs_log_debug(ocs, "%s: %#x -> %#x\n", __func__,
-								drec->fc_id, drec->map.loop[i]);
+						ocs_log_debug(ocs, "%#x -> %#x\n", drec->fc_id, drec->map.loop[i]);
 						node = ocs_node_alloc(sport, drec->map.loop[i], FALSE, TRUE);
 						if (node == NULL) {
-							ocs_log_err(ocs, "%s: ocs_node_alloc() failed\n", __func__);
+							ocs_log_err(ocs, "ocs_node_alloc() failed\n");
 							break;
 						}
 						ocs_node_transition(node, __ocs_d_wait_loop, NULL);
@@ -813,19 +846,20 @@ __ocs_domain_allocated(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(arg, NULL);
 
 		fc_id = *((uint32_t*)arg);
-		ocs_log_debug(ocs, "%s: Requesting hal domain attach fc_id x%x\n", __func__, fc_id);
+		ocs_log_debug(ocs, "Requesting hal domain attach fc_id x%x\n", fc_id);
 		/* Update sport lookup */
 		ocs_lock(&domain->lookup_lock);
 			spv_set(domain->lookup, fc_id, domain->sport);
 		ocs_unlock(&domain->lookup_lock);
 
+		ocs_xport_get_linkup_stats(ocs);
 		/* Update display name for the sport */
 		ocs_node_fcid_display(fc_id, domain->sport->display_name, sizeof(domain->sport->display_name));
 
 		/* Issue domain attach call */
 		rc = ocs_hal_domain_attach(&ocs->hal, domain, fc_id);
 		if (rc) {
-			ocs_log_err(ocs, "%s: ocs_hal_domain_attach failed: %d\n", __func__, rc);
+			ocs_log_err(ocs, "ocs_hal_domain_attach failed: %d\n", rc);
 			return NULL;
 		}
 		//sm: / domain_attach
@@ -859,7 +893,7 @@ __ocs_domain_allocated(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
 			rc = ocs_hal_domain_free(&ocs->hal, domain);
 			if (rc) {
-				ocs_log_err(ocs, "%s: ocs_hal_domain_free() failed: %d\n", __func__, rc);
+				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
 				//TODO: hal/device reset needed
 			}
 		}
@@ -904,12 +938,17 @@ __ocs_domain_wait_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_sport_t *sport;
 		ocs_sport_t *next_sport;
 
+		/* Set domain notify pending state to avoid duplicate domain event post */
+		domain->domain_notify_pend = TRUE;
+
 		/* Mark as attached */
 		domain->attached = 1;
 
 		/* Register with SCSI API */
-		if (ocs->enable_tgt)
+		if (ocs->enable_tgt) {
 			ocs_scsi_tgt_new_domain(domain);
+			ocs_nvme_tgt_new_domain(domain);
+		}
 		if (ocs->enable_ini)
 			ocs_scsi_ini_new_domain(domain);
 
@@ -933,6 +972,7 @@ __ocs_domain_wait_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 				ocs_sport_unlock(sport);
 			}
 		ocs_domain_unlock(domain);
+		domain->domain_notify_pend = FALSE;
 		break;
 	}
 
@@ -990,9 +1030,9 @@ __ocs_domain_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_ENTER: {
 
 		/* start any pending vports */
-		if (ocs_vport_start(domain)) {
-			ocs_log_debug(domain->ocs, "%s: ocs_vport_start() did not start all vports\n", __func__);
-		}
+		if (ocs_vport_start(domain))
+			ocs_log_debug(domain->ocs, "ocs_vport_start() did not start all vports\n");
+
 		break;
 	}
 	case OCS_EVT_DOMAIN_LOST: {
@@ -1014,7 +1054,7 @@ __ocs_domain_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
 			rc = ocs_hal_domain_free(&ocs->hal, domain);
 			if (rc) {
-				ocs_log_err(ocs, "%s: ocs_hal_domain_free() failed: %d\n", __func__, rc);
+				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
 				//TODO: hal/device reset needed
 			}
 		}
@@ -1079,9 +1119,9 @@ __ocs_domain_wait_sports_free(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 		/* Request ocs_hal_domain_free and wait for completion */
 		rc = ocs_hal_domain_free(&ocs->hal, domain);
-		if (rc) {
-			ocs_log_err(ocs, "%s: ocs_hal_domain_free() failed: %d\n", __func__, rc);
-		}
+		if (rc)
+			ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
+
 		break;
 	}
 	default:
@@ -1115,6 +1155,8 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_DOMAIN_FREE_OK: {
+		int rc = OCS_CALL_COMPLETE;
+
 		if (ocs->enable_ini)
 			ocs_scsi_ini_del_domain(domain);
 		if (ocs->enable_tgt) {
@@ -1122,6 +1164,13 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_nvme_tgt_del_domain(domain);
 		}
 
+		if (rc == OCS_CALL_COMPLETE) {
+			ocs_sm_post_event(&domain->drvsm, OCS_EVT_DOMAIN_TGT_FREE_OK, NULL);
+		}
+
+		break;
+
+	case OCS_EVT_DOMAIN_TGT_FREE_OK:
 		//sm: / domain_free
 		if (domain->domain_found_pending) {
 			/* save fcf_wwn and drec from this domain, free current domain and allocate
@@ -1136,7 +1185,7 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			domain = ocs_domain_alloc(ocs, fcf_wwn);
 
 			if (domain == NULL) {
-				ocs_log_err(ocs, "%s: ocs_domain_alloc() failed\n", __func__);
+				ocs_log_err(ocs, "ocs_domain_alloc() failed\n");
 				//TODO: hal/device reset needed
 				return NULL;
 			}
@@ -1205,7 +1254,7 @@ __ocs_domain_wait_domain_lost(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
 			rc = ocs_hal_domain_free(&ocs->hal, domain);
 			if (rc) {
-				ocs_log_err(ocs, "%s: ocs_hal_domain_free() failed: %d\n", __func__, rc);
+				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
 				//TODO: hal/device reset needed
 			}
 		}
@@ -1213,7 +1262,7 @@ __ocs_domain_wait_domain_lost(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	}
 	case OCS_EVT_DOMAIN_ALLOC_FAIL:
 	case OCS_EVT_DOMAIN_ATTACH_FAIL:
-		ocs_log_err(ocs, "[domain] %-20s %-20s: failed\n", __func__, ocs_sm_event_name(evt));
+		ocs_log_err(ocs, "[domain] %-20s: failed\n", ocs_sm_event_name(evt));
 		//TODO: hal/device reset needed
 		break;
 
@@ -1290,26 +1339,30 @@ int
 ocs_domain_post_event(ocs_domain_t *domain, ocs_sm_event_t event, void *arg)
 {
 	int rc;
-	int accept_frames;
-	int req_domain_free;
+	int accept_frames = 0;
+	int req_domain_free = 0;
 
 	ocs_rlock_acquire(&domain->drvsm_lock);
+		domain->evtdepth++;
+
 		rc = ocs_sm_post_event(&domain->drvsm, event, arg);
 
-		req_domain_free = domain->req_domain_free;
-		domain->req_domain_free = 0;
+		domain->evtdepth--;
 
 		accept_frames = domain->req_accept_frames;
 		domain->req_accept_frames = 0;
+
+		if ((domain->evtdepth == 0) && domain->req_domain_free) {
+			req_domain_free = 1;
+		}
+
 	ocs_rlock_release(&domain->drvsm_lock);
 
-	if (accept_frames) {
-		ocs_domain_accept_frames(domain);
-	}
-
-	if (req_domain_free) {
-		ocs_domain_free(domain);
-	}
+        if (req_domain_free) {
+                ocs_domain_free(domain);
+        } else if (accept_frames) {
+                ocs_domain_accept_frames(domain);
+        }
 
 	return rc;
 }
@@ -1583,42 +1636,61 @@ ocs_mgmt_domain_set(char *parent, char *name, char *value, void *object)
 	return retval;
 }
 
-int
-ocs_mgmt_domain_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
-		     void *arg_out, uint32_t arg_out_length, void *object)
+void ocs_mgmt_domain_exec_cb(ocs_domain_t *domain, void *arg_in)
 {
+	ocs_domain_exec_arg_t *domain_exec_args = arg_in;
+
+	if (domain_exec_args) {
+		ocs_sem_v(&domain_exec_args->sem);
+		if (ocs_atomic_sub_and_test(&domain_exec_args->ref_cnt, 1)) {
+			if (domain_exec_args->arg_in)
+				ocs_free(domain->ocs, domain_exec_args->arg_in,
+					 domain_exec_args->arg_in_length);
+
+			if (domain_exec_args->arg_out)
+				ocs_free(domain->ocs, domain_exec_args->arg_out,
+					 domain_exec_args->arg_out_length);
+
+			ocs_free(domain->ocs, domain_exec_args, sizeof(*domain_exec_args));
+		}
+	}
+}
+
+int ocs_mgmt_domain_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
+			 void *arg_out, uint32_t arg_out_length, void *object)
+{
+	ocs_domain_exec_arg_t *domain_exec_args = arg_in;
 	ocs_sport_t *sport;
 	ocs_domain_t *domain = (ocs_domain_t *)object;
 	char qualifier[80];
-	int retval = -1;
+	int retval = -EOPNOTSUPP;
 
-	snprintf(qualifier, sizeof(qualifier), "%s.domain%d", parent, domain->instance_index);
+	snprintf(qualifier, sizeof(qualifier), "%s/domain[%d]", parent, domain->instance_index);
 
 	/* If it doesn't start with my qualifier I don't know what to do with it */
 	if (ocs_strncmp(action, qualifier, strlen(qualifier)) == 0) {
+		/* If I didn't know how to do this action pass the request to each of my children */
+		ocs_domain_lock(domain);
+		ocs_list_foreach(&domain->sport_list, sport) {
+			if ((sport->mgmt_functions) && (sport->mgmt_functions->exec_handler)) {
+				ocs_sport_exec_arg_t *sport_exec_args = &domain_exec_args->sport_exec_args;
 
-		{
-			/* If I didn't know how to do this action pass the request to each of my children */
-			ocs_domain_lock(domain);
-			ocs_list_foreach(&domain->sport_list, sport) {
-				if ((sport->mgmt_functions) && (sport->mgmt_functions->exec_handler)) {
-					retval = sport->mgmt_functions->exec_handler(qualifier, action, arg_in, arg_in_length, arg_out, arg_out_length, sport);
-				}
+				sport_exec_args->arg_in_length = domain_exec_args->arg_in_length;
+				sport_exec_args->arg_in = domain_exec_args->arg_in;
+				sport_exec_args->arg_out_length = domain_exec_args->arg_out_length;
+				sport_exec_args->arg_out = domain_exec_args->arg_out;
+				sport_exec_args->exec_cb = ocs_mgmt_sport_exec_cb;
+				sport_exec_args->domain_exec_args = domain_exec_args;
 
-				if (retval == 0) {
+				retval = sport->mgmt_functions->exec_handler(qualifier, action,
+						sport_exec_args, sizeof(ocs_sport_exec_arg_t),
+						NULL, 0, sport);
+				if (retval == 0)
 					break;
-				}
-
 			}
-			ocs_domain_unlock(domain);
 		}
+		ocs_domain_unlock(domain);
 	}
 
 	return retval;
 }
-
-
-
-
-
-

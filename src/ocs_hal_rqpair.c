@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -46,7 +45,28 @@
 static int32_t ocs_hal_rqpair_find(ocs_hal_t *hal, uint16_t rq_id);
 static ocs_hal_sequence_t * ocs_hal_rqpair_get(ocs_hal_t *hal, uint16_t rqindex, uint16_t bufindex);
 static int32_t ocs_hal_rqpair_put(ocs_hal_t *hal, ocs_hal_sequence_t *seq);
-static ocs_hal_rtn_e ocs_hal_rqpair_auto_xfer_rdy_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_sequence_t *seq);
+static ocs_hal_rtn_e ocs_hal_rqpair_tow_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_sequence_t *seq);
+
+static void
+ocs_pause_rq(ocs_hal_t *hal, uint16_t rqindex)
+{
+	hal_rq_t *rq;
+
+	rq = hal->hal_rq[hal->hal_rq_lookup[rqindex]];
+	if (hal->rq_buf_drop.ms_to_sleep) {
+		rq->t_rq_thread_pause_start = hal->rq_buf_drop.rq_thread_pause_start;
+		if (rq->t_rq_thread_pause_start && rq->t_rq_thread_pause_start > ocs_get_os_ticks())
+			return;
+
+		ocs_log_info(hal->os, "pausing rq(%d) thread at %lu for %lu ms\n",
+			     rqindex, ocs_get_os_ticks(), hal->rq_buf_drop.ms_to_sleep);
+		ocs_msleep(hal->rq_buf_drop.ms_to_sleep);
+		rq->t_rq_thread_pause_start = 0;
+		ocs_log_info(hal->os, "resuming rq(%d) thread at %lu\n", rqindex, ocs_get_os_ticks());
+		hal->rq_buf_drop.rq_pause_running = false;
+		hal->rq_buf_drop.ms_to_sleep = 0;
+	}
+}
 
 /**
  * @brief Process receive queue completions for RQ Pair mode.
@@ -73,48 +93,56 @@ ocs_hal_rqpair_process_rq(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
 	uint32_t h_len;
 	uint32_t p_len;
 	ocs_hal_sequence_t *seq;
+	uint8_t code = cqe[SLI4_CQE_CODE_OFFSET];
 
+	/* TODO: Merge this function with TOW handler */
 	rq_status = sli_fc_rqe_rqid_and_index(&hal->sli, cqe, &rq_id, &index);
-	if (0 != rq_status) {
+
+	/* If possible, get the rqindex before checking for rq_status */
+	rqindex = ocs_hal_rqpair_find(hal, rq_id);
+	if (rqindex < 0) {
+		ocs_log_err(hal->os, "rq_status=%#x: rq_id lookup failed for id=%#x\n", rq_status, rq_id);
+		return -1;
+	}
+
+	if (rq_status) {
+		ocs_log_err(hal->os, "RCQE status=%#x\n", rq_status);
+
 		switch (rq_status) {
 		case SLI4_FC_ASYNC_RQ_BUF_LEN_EXCEEDED:
 		case SLI4_FC_ASYNC_RQ_DMA_FAILURE:
-			/* just get RQ buffer then return to chip */
-			rqindex = ocs_hal_rqpair_find(hal, rq_id);
-			if (rqindex < 0) {
-				ocs_log_test(hal->os, "%s: status=%#x: rq_id lookup failed for id=%#x\n",
-					__func__, rq_status, rq_id);
-				break;
-			}
-
-			/* get RQ buffer */
+			/* Get the RQ buffer */
 			seq = ocs_hal_rqpair_get(hal, rqindex, index);
 
-			/* return to chip */
-			if (ocs_hal_rqpair_sequence_free(hal, seq)) {
-				ocs_log_test(hal->os, "%s: status=%#x, failed to return buffers to RQ\n",
-					__func__, rq_status);
-				break;
-			}
+			/* Return RQ buffer to the chip */
+			if (ocs_hal_rqpair_sequence_free(hal, seq))
+				ocs_log_err(hal->os, "failed to return buffers to RQ\n");
+
 			break;
-		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_NEEDED:
-		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_FRM_DISC:
-			/* since RQ buffers were not consumed, cannot return them to chip */
-			/* fall through */
-			ocs_log_debug(hal->os, "%s: Warning: RCQE status=%#x, \n",
-				__func__, rq_status);
+		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_NEEDED: {
+			/* Since RQ buffers were not consumed, cannot return them to the chip */
+			hal_rq_t *rq = hal->hal_rq[hal->hal_rq_lookup[rqindex]];
+
+			rq->rq_empty_warn_count++;
+			break;
+		}
+		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_FRM_DISC: {
+			/* Since RQ buffers were not consumed, cannot return them to the chip */
+			hal_rq_t *rq = hal->hal_rq[hal->hal_rq_lookup[rqindex]];
+
+			rq->rq_empty_err_count++;
+			break;
+		}
 		default:
 			break;
 		}
+
 		return -1;
 	}
 
-	rqindex = ocs_hal_rqpair_find(hal, rq_id);
-	if (rqindex < 0) {
-		ocs_log_test(hal->os, "%s: Error: rq_id lookup failed for id=%#x\n",
-			__func__, rq_id);
-		return -1;
-	}
+	/* Pause RQ feature can be only enabled in non-interrupt context */
+	if (!ocs_in_interrupt_context() && hal->rq_buf_drop.enable)
+		ocs_pause_rq(hal, rqindex);
 
 	OCS_STAT({ hal_rq_t *rq = hal->hal_rq[hal->hal_rq_lookup[rqindex]]; rq->use_count++; rq->hdr_use_count++;
 		 rq->payload_use_count++;})
@@ -122,21 +150,29 @@ ocs_hal_rqpair_process_rq(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
 	seq = ocs_hal_rqpair_get(hal, rqindex, index);
 	ocs_hal_assert(seq != NULL);
 
+	if (code == SLI4_CQE_CODE_MARKER) {
+		/* This can come because of NVME marker, just return the buffer to chip */
+		if (ocs_hal_rqpair_sequence_free(hal, seq))
+			ocs_log_err(hal->os, "status=%#x, failed to return marker buffers to RQ\n", rq_status);
+
+		return 0;
+	}
+
 	seq->hal = hal;
-	seq->auto_xrdy = 0;
-	seq->out_of_xris = 0;
+	seq->tow = 0;
+	seq->tow_oox = 0;
 	seq->xri = 0;
 	seq->hio = NULL;
 
 	sli_fc_rqe_length(&hal->sli, cqe, &h_len, &p_len);
-	seq->header->dma.len = h_len;
-	seq->payload->dma.len = p_len;
+	seq->header.data_len = h_len;
+	seq->payload.data_len = p_len;
 	seq->fcfi = sli_fc_rqe_fcfi(&hal->sli, cqe);
 	seq->hal_priv = cq->eq;
 
 	/* bounce enabled, single RQ, we snoop the ox_id to choose the cpuidx */
 	if (hal->config.bounce) {
-		fc_header_t *hdr = seq->header->dma.virt;
+		fc_header_t *hdr = seq->header.data;
 		uint32_t s_id = fc_be24toh(hdr->s_id);
 		uint32_t d_id = fc_be24toh(hdr->d_id);
 		uint32_t ox_id =  ocs_be16toh(hdr->ox_id);
@@ -164,9 +200,8 @@ ocs_hal_rqpair_process_rq(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
  *
  * @return Returns 0 for success, or a negative error code value for failure.
  */
-
 int32_t
-ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
+ocs_hal_rqpair_tow_cmd_process(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
 {
 	/* Seems silly to call a SLI function to decode - use the structure directly for performance */
 	sli4_fc_optimized_write_cmd_cqe_t *opt_wr = (sli4_fc_optimized_write_cmd_cqe_t*)cqe;
@@ -177,11 +212,7 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 	uint32_t h_len;
 	uint32_t p_len;
 	ocs_hal_sequence_t *seq;
-	uint8_t axr_lock_taken = 0;
-#if defined(OCS_DISC_SPIN_DELAY)
-	uint32_t 	delay = 0;
-	char 		prop_buf[32];
-#endif
+	uint8_t tow_lock_taken = 0;
 
 	rq_status = sli_fc_rqe_rqid_and_index(&hal->sli, cqe, &rq_id, &index);
 	if (0 != rq_status) {
@@ -191,8 +222,8 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 			/* just get RQ buffer then return to chip */
 			rqindex = ocs_hal_rqpair_find(hal, rq_id);
 			if (rqindex < 0) {
-				ocs_log_err(hal->os, "%s: status=%#x: rq_id lookup failed for id=%#x\n",
-					__func__, rq_status, rq_id);
+				ocs_log_err(hal->os, "status=%#x: rq_id lookup failed for id=%#x\n",
+					    rq_status, rq_id);
 				break;
 			}
 
@@ -201,16 +232,14 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 
 			/* return to chip */
 			if (ocs_hal_rqpair_sequence_free(hal, seq)) {
-				ocs_log_err(hal->os, "%s: status=%#x, failed to return buffers to RQ\n",
-					__func__, rq_status);
+				ocs_log_err(hal->os, "status=%#x, failed to return buffers to RQ\n", rq_status);
 				break;
 			}
 			break;
 		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_NEEDED:
 		case SLI4_FC_ASYNC_RQ_INSUFF_BUF_FRM_DISC:
 			/* since RQ buffers were not consumed, cannot return them to chip */
-			ocs_log_debug(hal->os, "%s: Warning: RCQE status=%#x, \n",
-				__func__, rq_status);
+			ocs_log_debug(hal->os, "Warning: RCQE status=%#x\n", rq_status);
 			/* fall through */
 		default:
 			break;
@@ -220,8 +249,7 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 
 	rqindex = ocs_hal_rqpair_find(hal, rq_id);
 	if (rqindex < 0) {
-		ocs_log_err(hal->os, "%s: Error: rq_id lookup failed for id=%#x\n",
-			__func__, rq_id);
+		ocs_log_err(hal->os, "Error: rq_id lookup failed for id=%#x\n", rq_id);
 		return -1;
 	}
 
@@ -232,49 +260,56 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 	ocs_hal_assert(seq != NULL);
 
 	seq->hal = hal;
-	seq->auto_xrdy = opt_wr->agxr;
-	seq->out_of_xris = opt_wr->oox;
+	seq->tow = opt_wr->tow;
+	seq->tow_oox = opt_wr->oox;
 	seq->xri = opt_wr->xri;
 	seq->hio = NULL;
 
 	sli_fc_rqe_length(&hal->sli, cqe, &h_len, &p_len);
-	seq->header->dma.len = h_len;
-	seq->payload->dma.len = p_len;
+	seq->header.data_len = h_len;
+	seq->payload.data_len = p_len;
 	seq->fcfi = sli_fc_rqe_fcfi(&hal->sli, cqe);
 	seq->hal_priv = cq->eq;
 
-	if (seq->auto_xrdy) {
-		fc_header_t *fc_hdr = seq->header->dma.virt;
+	if (seq->tow) {
+		fc_header_t *fc_hdr = seq->header.data;
 
 		seq->hio = ocs_hal_io_lookup(hal, seq->xri);
-		ocs_lock(&seq->hio->axr_lock);
-		axr_lock_taken = 1;
-
-		/* save the FCFI, src_id, dest_id and ox_id because we need it for the sequence object when the data comes. */
-		seq->hio->axr_buf->fcfi = seq->fcfi;
-		seq->hio->axr_buf->hdr.ox_id = fc_hdr->ox_id;
-		seq->hio->axr_buf->hdr.s_id = fc_hdr->s_id;
-		seq->hio->axr_buf->hdr.d_id = fc_hdr->d_id;
-		seq->hio->axr_buf->cmd_cqe = 1;
+		ocs_lock(&seq->hio->tow_lock);
+		tow_lock_taken = 1;
 
 		/*
-		 * Since auto xfer rdy is used for this IO, then clear the sequence
-		 * initiative bit in the header so that the upper layers wait for the
-		 * data. This should flow exactly like the first burst case.
+		 * Save the FCFI, src_id, dest_id and ox_id because we
+		 * need it for the sequence object when the data comes.
+		 */
+		seq->hio->tow_buf->fcfi = seq->fcfi;
+		seq->hio->tow_buf->seq.fcfi = seq->fcfi;
+		seq->hio->tow_buf->hdr.ox_id = fc_hdr->ox_id;
+		seq->hio->tow_buf->hdr.s_id = fc_hdr->s_id;
+		seq->hio->tow_buf->hdr.d_id = fc_hdr->d_id;
+		seq->hio->tow_buf->cmd_cqe = 1;
+
+		/*
+		 * For First burst command, the sequence initiative is always unset.
+		 * For Auto Xfer_Rdy command, the sequence initiative is always set.
+		 *
+		 * Since Auto Xfer_Rdy optimized write has been done for this IO,
+		 * and to fall into the same first burst path, clear the SIT bit
+		 * here so that the upper layer will wait for the data completions.
 		 */
 		fc_hdr->f_ctl &= fc_htobe24(~FC_FCTL_SEQUENCE_INITIATIVE);
 
-		/* If AXR CMD CQE came before previous TRSP CQE of same XRI */
+		/* If TOW CMD CQE came before previous TRSP CQE of same XRI */
 		if (seq->hio->type == OCS_HAL_IO_TARGET_RSP) {
-			seq->hio->axr_buf->call_axr_cmd = 1;
-			seq->hio->axr_buf->cmd_seq = seq;
-			goto exit_ocs_hal_rqpair_process_auto_xfr_rdy_cmd;
+			seq->hio->tow_buf->call_tow_cmd = TRUE;
+			seq->hio->tow_buf->cmd_seq = seq;
+			goto exit;
 		}
 	}
 
 	/* bounce enabled, single RQ, we snoop the ox_id to choose the cpuidx */
 	if (hal->config.bounce) {
-		fc_header_t *hdr = seq->header->dma.virt;
+		fc_header_t *hdr = seq->header.data;
 		uint32_t s_id = fc_be24toh(hdr->s_id);
 		uint32_t d_id = fc_be24toh(hdr->d_id);
 		uint32_t ox_id =  ocs_be16toh(hdr->ox_id);
@@ -285,35 +320,28 @@ ocs_hal_rqpair_process_auto_xfr_rdy_cmd(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *c
 		hal->callback.unsolicited(hal->args.unsolicited, seq);
 	}
 
-	if (seq->auto_xrdy) {
-		/* If data cqe came before cmd cqe in out of order in case of AXR */
-		if(seq->hio->axr_buf->data_cqe == 1) {
-
-#if defined(OCS_DISC_SPIN_DELAY)
-			if (ocs_get_property("disk_spin_delay", prop_buf, sizeof(prop_buf)) == 0) {
-				delay = ocs_strtoul(prop_buf, 0, 0);
-				ocs_udelay(delay);
-			}
-#endif
+	if (seq->tow) {
+		/* If data cqe came before cmd cqe in out of order in case of TOW */
+		if (seq->hio->tow_buf->data_cqe == 1) {
 			/* bounce enabled, single RQ, we snoop the ox_id to choose the cpuidx */
 			if (hal->config.bounce) {
-				fc_header_t *hdr = seq->header->dma.virt;
+				fc_header_t *hdr = seq->header.data;
 				uint32_t s_id = fc_be24toh(hdr->s_id);
 				uint32_t d_id = fc_be24toh(hdr->d_id);
 				uint32_t ox_id =  ocs_be16toh(hdr->ox_id);
 				if (hal->callback.bounce != NULL) {
-					(*hal->callback.bounce)(ocs_hal_unsol_process_bounce, &seq->hio->axr_buf->seq, s_id, d_id, ox_id);
+					(*hal->callback.bounce)(ocs_hal_unsol_process_bounce, &seq->hio->tow_buf->seq, s_id, d_id, ox_id);
 				}
 			} else {
-				hal->callback.unsolicited(hal->args.unsolicited, &seq->hio->axr_buf->seq);
+				hal->callback.unsolicited(hal->args.unsolicited, &seq->hio->tow_buf->seq);
 			}
 		}
 	}
 
-exit_ocs_hal_rqpair_process_auto_xfr_rdy_cmd:
-	if(axr_lock_taken) {
-		ocs_unlock(&seq->hio->axr_lock);
-	}
+exit:
+	if (tow_lock_taken)
+		ocs_unlock(&seq->hio->tow_lock);
+
 	return 0;
 }
 
@@ -331,38 +359,37 @@ exit_ocs_hal_rqpair_process_auto_xfr_rdy_cmd:
  *
  * @return Returns 0 for success, or a negative error code value for failure.
  */
-
 int32_t
-ocs_hal_rqpair_process_auto_xfr_rdy_data(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
+ocs_hal_rqpair_tow_data_process(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe)
 {
 	/* Seems silly to call a SLI function to decode - use the structure directly for performance */
 	sli4_fc_optimized_write_data_cqe_t *opt_wr = (sli4_fc_optimized_write_data_cqe_t*)cqe;
 	ocs_hal_sequence_t *seq;
 	ocs_hal_io_t *io;
-	ocs_hal_auto_xfer_rdy_buffer_t *buf;
-#if defined(OCS_DISC_SPIN_DELAY)
-	uint32_t 	delay = 0;
-	char 		prop_buf[32];
-#endif
+	ocs_hal_tow_buffer_t *buf;
+
 	/* Look up the IO */
 	io = ocs_hal_io_lookup(hal, opt_wr->xri);
-	ocs_lock(&io->axr_lock);
-	buf = io->axr_buf;
+	ocs_lock(&io->tow_lock);
+	buf = io->tow_buf;
 	buf->data_cqe = 1;
 	seq = &buf->seq;
 	seq->hal = hal;
-	seq->auto_xrdy = 1;
-	seq->out_of_xris = 0;
+	seq->tow = TRUE;
+	seq->tow_oox = 0;
 	seq->xri = opt_wr->xri;
 	seq->hio = io;
-	seq->header = &buf->header;
-	seq->payload = &buf->payload;
+	seq->header.data = buf->header.dma.virt;
+	seq->payload.data = buf->payload.dma.virt;
+	seq->header.rqindex = buf->header.rqindex;
+	seq->header.tow_buf = buf->header.dma.alloc;
+	seq->payload.rqindex = buf->payload.rqindex;
 
-	seq->header->dma.len = sizeof(fc_header_t);
-	seq->payload->dma.len = opt_wr->total_data_placed;
+	seq->header.data_len = sizeof(fc_header_t);
+	seq->payload.data_len = opt_wr->total_data_placed;
+
 	seq->fcfi = buf->fcfi;
 	seq->hal_priv = cq->eq;
-
 
 	if (opt_wr->status == SLI4_FC_WCQE_STATUS_SUCCESS) {
 		seq->status = OCS_HAL_UNSOL_SUCCESS;
@@ -372,26 +399,20 @@ ocs_hal_rqpair_process_auto_xfr_rdy_data(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *
 		seq->status = OCS_HAL_UNSOL_ERROR;
 	}
 
- 	/* If AXR CMD CQE came before previous TRSP CQE of same XRI */
-	if(io->type == OCS_HAL_IO_TARGET_RSP) {
-		io->axr_buf->call_axr_data = 1;
-		goto exit_ocs_hal_rqpair_process_auto_xfr_rdy_data;
+	/* If TOW CMD CQE came before previous TRSP CQE of same XRI */
+	if (io->type == OCS_HAL_IO_TARGET_RSP) {
+		io->tow_buf->call_tow_data = TRUE;
+		goto exit;
 	}
 
-	if(!buf->cmd_cqe) {
+	if (!buf->cmd_cqe) {
 		/* if data cqe came before cmd cqe, return here, cmd cqe will handle */
-		goto exit_ocs_hal_rqpair_process_auto_xfr_rdy_data;
+		goto exit;
 	}
-#if defined(OCS_DISC_SPIN_DELAY)
-	if (ocs_get_property("disk_spin_delay", prop_buf, sizeof(prop_buf)) == 0) {
-		delay = ocs_strtoul(prop_buf, 0, 0);
-		ocs_udelay(delay);
-	}
-#endif
 
 	/* bounce enabled, single RQ, we snoop the ox_id to choose the cpuidx */
 	if (hal->config.bounce) {
-		fc_header_t *hdr = seq->header->dma.virt;
+		fc_header_t *hdr = seq->header.data;
 		uint32_t s_id = fc_be24toh(hdr->s_id);
 		uint32_t d_id = fc_be24toh(hdr->d_id);
 		uint32_t ox_id =  ocs_be16toh(hdr->ox_id);
@@ -402,8 +423,8 @@ ocs_hal_rqpair_process_auto_xfr_rdy_data(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *
 		hal->callback.unsolicited(hal->args.unsolicited, seq);
 	}
 
-exit_ocs_hal_rqpair_process_auto_xfr_rdy_data:
-	ocs_unlock(&io->axr_lock);
+exit:
+	ocs_unlock(&io->tow_lock);
 	return 0;
 }
 
@@ -422,23 +443,23 @@ exit_ocs_hal_rqpair_process_auto_xfr_rdy_data:
 static ocs_hal_sequence_t *
 ocs_hal_rqpair_get(ocs_hal_t *hal, uint16_t rqindex, uint16_t bufindex)
 {
-	sli4_queue_t *rq_hdr = &hal->rq[rqindex];
-	sli4_queue_t *rq_payload = &hal->rq[rqindex+1];
+	sli4_queue_t *rq_hdr = hal->rq[rqindex];
 	ocs_hal_sequence_t *seq = NULL;
 	hal_rq_t *rq = hal->hal_rq[hal->hal_rq_lookup[rqindex]];
 
 #if defined(ENABLE_DEBUG_RQBUF)
+	sli4_queue_t *rq_payload = hal->rq[rqindex+1];
 	uint64_t rqbuf_debug_value = 0xdead0000 | ((rq->id & 0xf) << 12) | (bufindex & 0xfff);
 #endif
 
 	if (bufindex >= rq_hdr->length) {
-		ocs_log_err(hal->os, "%s: RQ index %d bufindex %d exceed ring length %d for id %d\n",
-			    __func__, rqindex, bufindex, rq_hdr->length, rq_hdr->id);
+		ocs_log_err(hal->os, "RQ index %d bufindex %d exceed ring length %d for id %d\n",
+			    rqindex, bufindex, rq_hdr->length, rq_hdr->id);
 		return NULL;
 	}
 
+	/* rq_hdr lock also covers rqindex+1 queue */
 	sli_queue_lock(rq_hdr);
-	sli_queue_lock(rq_payload);
 
 #if defined(ENABLE_DEBUG_RQBUF)
 	/* Put a debug value into the rq, to track which entries are still valid */
@@ -450,11 +471,10 @@ ocs_hal_rqpair_get(ocs_hal_t *hal, uint16_t rqindex, uint16_t bufindex)
 	rq->rq_tracker[bufindex] = NULL;
 
 	if (seq == NULL ) {
-		ocs_log_err(hal->os, "%s: RQ buffer NULL, rqindex %d, bufindex %d, current q index = %d\n",
-			    __func__, rqindex, bufindex, rq_hdr->index);
+		ocs_log_err(hal->os, "RQ buffer NULL, rqindex %d, bufindex %d, current q index = %d\n",
+			    rqindex, bufindex, rq_hdr->index);
 	}
 
-	sli_queue_unlock(rq_payload);
 	sli_queue_unlock(rq_hdr);
 	return seq;
 }
@@ -470,23 +490,33 @@ ocs_hal_rqpair_get(ocs_hal_t *hal, uint16_t rqindex, uint16_t bufindex)
 static int32_t
 ocs_hal_rqpair_put(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 {
-	sli4_queue_t *rq_hdr = &hal->rq[seq->header->rqindex];
-	sli4_queue_t *rq_payload = &hal->rq[seq->payload->rqindex];
-	uint32_t hal_rq_index = hal->hal_rq_lookup[seq->header->rqindex];
+	sli4_queue_t *rq_hdr = hal->rq[seq->header.rqindex];
+	sli4_queue_t *rq_payload = hal->rq[seq->payload.rqindex];
+	uint32_t hal_rq_index = hal->hal_rq_lookup[seq->header.rqindex];
 	hal_rq_t *rq = hal->hal_rq[hal_rq_index];
 	uint32_t     phys_hdr[2];
 	uint32_t     phys_payload[2];
 	int32_t      qindex_hdr;
 	int32_t      qindex_payload;
 
-	/* Update the RQ verification lookup tables */
-	phys_hdr[0] = ocs_addr32_hi(seq->header->dma.phys);
-	phys_hdr[1] = ocs_addr32_lo(seq->header->dma.phys);
-	phys_payload[0] = ocs_addr32_hi(seq->payload->dma.phys);
-	phys_payload[1] = ocs_addr32_lo(seq->payload->dma.phys);
+	rq->rq_buffer_post_counter++;
+	if (hal->rq_buf_drop.enable &&
+	    (rq->rq_buffer_post_counter >= hal->rq_buf_drop.rq_buffer_drop_trigger) &&
+	    (rq->rq_buffer_drop_counter < hal->rq_buf_drop.max_rq_buffer_drop_count)) {
+		rq->rq_buffer_drop_counter++;
+		rq->rq_buffer_post_counter = 0;
+		ocs_log_err(hal->os, "Dropping RQ sequence [%d] :: %p.\n", rq->rq_buffer_drop_counter, seq);
+		return 0;
+	}
 
+	/* Update the RQ verification lookup tables */
+	phys_hdr[0] = ocs_addr32_hi(seq->header.phys_buf);
+	phys_hdr[1] = ocs_addr32_lo(seq->header.phys_buf);
+	phys_payload[0] = ocs_addr32_hi(seq->payload.phys_buf);
+	phys_payload[1] = ocs_addr32_lo(seq->payload.phys_buf);
+
+	/* rq_hdr lock also covers payload / header->rqindex+1 queue */
 	sli_queue_lock(rq_hdr);
-	sli_queue_lock(rq_payload);
 
 	/*
 	 * Note: The header must be posted last for buffer pair mode because
@@ -495,10 +525,9 @@ ocs_hal_rqpair_put(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 	 */
 	qindex_payload = _sli_queue_write(&hal->sli, rq_payload, (void *)phys_payload);
 	qindex_hdr = _sli_queue_write(&hal->sli, rq_hdr, (void *)phys_hdr);
-	if (qindex_hdr < 0 ||
-	    qindex_payload < 0) {
+
+	if (qindex_hdr < 0 || qindex_payload < 0) {
 		ocs_log_err(hal->os, "RQ_ID=%#x write failed\n", rq_hdr->id);
-		sli_queue_unlock(rq_payload);
 		sli_queue_unlock(rq_hdr);
 		return OCS_HAL_RTN_ERROR;
 	}
@@ -510,11 +539,9 @@ ocs_hal_rqpair_put(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 	if (rq->rq_tracker[qindex_hdr] == NULL) {
 		rq->rq_tracker[qindex_hdr] = seq;
 	} else {
-		ocs_log_test(hal->os, "%s: expected rq_tracker[%d][%d] buffer to be NULL\n", __func__,
-			     hal_rq_index, qindex_hdr);
+		ocs_log_warn(hal->os, "expected rq_tracker[%d][%d] buffer to be NULL\n", hal_rq_index, qindex_hdr);
 	}
 
-	sli_queue_unlock(rq_payload);
 	sli_queue_unlock(rq_hdr);
 	return OCS_HAL_RTN_SUCCESS;
 }
@@ -536,9 +563,20 @@ ocs_hal_rqpair_sequence_free(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 {
 	ocs_hal_rtn_e   rc = OCS_HAL_RTN_SUCCESS;
 
-	/* Check for auto xfer rdy dummy buffers and call the proper release function. */
-	if (seq->header->rqindex == OCS_HAL_RQ_INDEX_DUMMY_HDR) {
-		return ocs_hal_rqpair_auto_xfer_rdy_buffer_sequence_reset(hal, seq);
+	/* Free dynamically allocated sequence buffers which hold pending frames */
+	if (seq->pend_frame_seq) {
+		if (seq->header.data)
+			ocs_free(hal->os, seq->header.data, seq->header.data_len);
+		if (seq->payload.data)
+			ocs_free(hal->os, seq->payload.data, seq->payload.data_len);
+		ocs_free(hal->os, seq, sizeof(ocs_hal_sequence_t));
+		ocs_atomic_sub_return(&hal->pend_frames_count, 1);
+
+		return rc;
+	}
+	/* TOW sequences has a dummy index */
+	if (seq->header.rqindex == OCS_HAL_RQ_INDEX_DUMMY_HDR) {
+		return ocs_hal_rqpair_tow_buffer_sequence_reset(hal, seq);
 	}
 
 	/*
@@ -546,7 +584,7 @@ ocs_hal_rqpair_sequence_free(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 	 * doorbell of the header ring will post the data buffer as well.
 	 */
 	if (ocs_hal_rqpair_put(hal, seq)) {
-		ocs_log_err(hal->os, "%s: error writing buffers\n", __func__);
+		ocs_log_err(hal->os, "error writing buffers\n");
 		return OCS_HAL_RTN_ERROR;
 	}
 
@@ -569,10 +607,10 @@ ocs_hal_rqpair_find(ocs_hal_t *hal, uint16_t rq_id)
 
 /**
  * @ingroup devInitShutdown
- * @brief Allocate auto xfer rdy buffers.
+ * @brief Allocate tow buffers.
  *
  * @par Description
- * Allocates the auto xfer rdy buffers and places them on the free list.
+ * Allocates the tow buffers and places them on the free list.
  *
  * @param hal Hardware context allocated by the caller.
  * @param num_buffers Number of buffers to allocate.
@@ -580,26 +618,25 @@ ocs_hal_rqpair_find(ocs_hal_t *hal, uint16_t rq_id)
  * @return Returns 0 on success, or a non-zero value on failure.
  */
 ocs_hal_rtn_e
-ocs_hal_rqpair_auto_xfer_rdy_buffer_alloc(ocs_hal_t *hal, uint32_t num_buffers)
+ocs_hal_rqpair_tow_buffer_alloc(ocs_hal_t *hal, uint32_t num_buffers)
 {
-	ocs_hal_auto_xfer_rdy_buffer_t *buf;
+	ocs_hal_tow_buffer_t *buf;
 	uint32_t i;
 
-	hal->auto_xfer_rdy_buf_pool = ocs_pool_alloc(hal->os, sizeof(ocs_hal_auto_xfer_rdy_buffer_t), num_buffers, FALSE);
-	if (hal->auto_xfer_rdy_buf_pool == NULL) {
-		ocs_log_err(hal->os, "%s: Failure to allocate auto xfer ready buffer pool\n", __func__);
+	hal->tow_buffer_pool = ocs_pool_alloc(hal->os, sizeof(ocs_hal_tow_buffer_t), num_buffers, FALSE);
+	if (!hal->tow_buffer_pool) {
+		ocs_log_err(hal->os, "Failed to allocate tow buffer pool\n");
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
 
 	for (i = 0; i < num_buffers; i++) {
-		/* allocate the wrapper object */
-		buf = ocs_pool_get_instance(hal->auto_xfer_rdy_buf_pool, i);
-		ocs_hal_assert(buf != NULL);
+		/* Allocate the wrapper object */
+		buf = ocs_pool_get_instance(hal->tow_buffer_pool, i);
+		ocs_hal_assert(buf);
 
-		/* allocate the auto xfer ready buffer */
-		if (ocs_dma_alloc(hal->os, &buf->payload.dma, hal->config.auto_xfer_rdy_size, OCS_MIN_DMA_ALIGNMENT)) {
-			ocs_log_err(hal->os, "%s: DMA allocation failed\n", __func__);
-			ocs_free(hal->os, buf, sizeof(*buf));
+		/* Allocate the tow dma buffer */
+		if (ocs_dma_alloc(hal->os, &buf->payload.dma, hal->config.tow_io_size, OCS_MIN_DMA_ALIGNMENT)) {
+			ocs_log_err(hal->os, "Failed to allocate dma buffer\n");
 			return OCS_HAL_RTN_NO_MEMORY;
 		}
 
@@ -622,6 +659,8 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_alloc(ocs_hal_t *hal, uint32_t num_buffers)
 
 		buf->payload.rqindex = OCS_HAL_RQ_INDEX_DUMMY_DATA;
 	}
+
+	ocs_log_info(hal->os, "Allocated tow buffer pool\n");
 	return OCS_HAL_RTN_SUCCESS;
 }
 
@@ -635,7 +674,7 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_alloc(ocs_hal_t *hal, uint32_t num_buffers)
  * @param hal Hardware context allocated by the caller.
  */
 static void
-ocs_hal_rqpair_auto_xfer_rdy_dnrx_check(ocs_hal_t *hal)
+ocs_hal_rqpair_tow_dnrx_check(ocs_hal_t *hal)
 {
 	ocs_hal_io_t *io;
 	int32_t rc;
@@ -669,10 +708,6 @@ ocs_hal_rqpair_auto_xfer_rdy_dnrx_check(ocs_hal_t *hal)
 static int32_t
 ocs_hal_rqpair_auto_xfer_rdy_move_to_port_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void  *arg)
 {
-	if (status != 0) {
-		ocs_log_debug(hal->os, "%s Status 0x%x\n", __func__, status);
-	}
-
 	ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
 	return 0;
 }
@@ -691,8 +726,11 @@ ocs_hal_rqpair_auto_xfer_rdy_move_to_port_cb(ocs_hal_t *hal, int32_t status, uin
  * @return Returns OCS_HAL_RTN_SUCCESS for success, or an error code value for failure.
  */
 ocs_hal_rtn_e
-ocs_hal_rqpair_auto_xfer_rdy_move_to_port(ocs_hal_t *hal, ocs_hal_io_t *io)
+ocs_hal_rqpair_tow_move_to_port(ocs_hal_t *hal, ocs_hal_io_t *io)
 {
+	uint16_t sgl_buf_length = sizeof(sli4_req_fcoe_post_sgl_pages_t) +
+				  sizeof(sli4_fcoe_post_sgl_page_desc_t);
+
 	/* We only need to preregister the SGL if it has not yet been done. */
 	if (!sli_get_sgl_preregister(&hal->sli)) {
 		uint8_t	*post_sgl;
@@ -700,28 +738,28 @@ ocs_hal_rqpair_auto_xfer_rdy_move_to_port(ocs_hal_t *hal, ocs_hal_io_t *io)
 		ocs_dma_t **sgls = &psgls;
 
 		/* non-local buffer required for mailbox queue */
-		post_sgl = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_NOWAIT);
+		post_sgl = ocs_malloc(hal->os, sgl_buf_length, OCS_M_NOWAIT);
 		if (post_sgl == NULL) {
-			ocs_log_err(hal->os, "%s no buffer for command\n", __func__);
+			ocs_log_err(hal->os, "no buffer for command\n");
 			return OCS_HAL_RTN_NO_MEMORY;
 		}
-		if (sli_cmd_fcoe_post_sgl_pages(&hal->sli, post_sgl, SLI4_BMBX_SIZE,
-						io->indicator, 1, sgls, NULL, NULL)) {
-			if (ocs_hal_command(hal, post_sgl, OCS_CMD_NOWAIT,
-					    ocs_hal_rqpair_auto_xfer_rdy_move_to_port_cb, NULL)) {
-				ocs_free(hal->os, post_sgl, SLI4_BMBX_SIZE);
-				ocs_log_err(hal->os, "%s: SGL post failed\n", __func__);
-				return OCS_HAL_RTN_ERROR;
-			}
+
+		sli_cmd_fcoe_post_sgl_pages(&hal->sli, post_sgl, sgl_buf_length,
+					    io->indicator, 1, sgls, NULL, NULL);
+		if (ocs_hal_command(hal, post_sgl, OCS_CMD_NOWAIT,
+				    ocs_hal_rqpair_auto_xfer_rdy_move_to_port_cb, NULL)) {
+			ocs_free(hal->os, post_sgl, SLI4_BMBX_SIZE);
+			return OCS_HAL_RTN_ERROR;
 		}
 	}
 
 	ocs_lock(&hal->io_lock);
-	if (ocs_hal_rqpair_auto_xfer_rdy_buffer_post(hal, io, 0) != 0) { /* DNRX set - no buffer */
+	if (ocs_hal_rqpair_tow_xri_buffer_attach(hal, io, FALSE) != 0) { /* DNRX set - no buffer */
 		ocs_unlock(&hal->io_lock);
 		return OCS_HAL_RTN_ERROR;
 	}
 	ocs_unlock(&hal->io_lock);
+
 	return OCS_HAL_RTN_SUCCESS;
 }
 
@@ -735,31 +773,29 @@ ocs_hal_rqpair_auto_xfer_rdy_move_to_port(ocs_hal_t *hal, ocs_hal_io_t *io)
  * @param io Pointer to the IO object.
  */
 void
-ocs_hal_rqpair_auto_xfer_rdy_move_to_host(ocs_hal_t *hal, ocs_hal_io_t *io)
+ocs_hal_rqpair_tow_move_to_host(ocs_hal_t *hal, ocs_hal_io_t *io)
 {
-	if (io->axr_buf != NULL) {
+	if (io->tow_buf != NULL) {
 		ocs_lock(&hal->io_lock);
-			/* check  list and remove if there */
+			/* check list and remove if there */
 			if (ocs_list_on_list(&io->dnrx_link)) {
 				ocs_list_remove(&hal->io_port_dnrx, io);
-				io->auto_xfer_rdy_dnrx = 0;
-
+				io->tow_dnrx = 0;
 				/* release the count for waiting for a buffer */
 				ocs_hal_io_free(hal, io);
 			}
 
-			ocs_pool_put(hal->auto_xfer_rdy_buf_pool, io->axr_buf);
-			io->axr_buf = NULL;
+			ocs_pool_put(hal->tow_buffer_pool, io->tow_buf);
+			io->tow_buf = NULL;
 		ocs_unlock(&hal->io_lock);
 
-		ocs_hal_rqpair_auto_xfer_rdy_dnrx_check(hal);
+		ocs_hal_rqpair_tow_dnrx_check(hal);
 	}
 	return;
 }
 
-
 /**
- * @brief Posts an auto xfer rdy buffer to an IO.
+ * @brief Attach an TOW XRI buffer to an IO
  *
  * @par Description
  * Puts the data SGL into the SGL list for the IO object
@@ -772,14 +808,14 @@ ocs_hal_rqpair_auto_xfer_rdy_move_to_host(ocs_hal_t *hal, ocs_hal_io_t *io)
  * @return Returns the value of DNRX bit in the TRSP and ABORT WQEs.
  */
 uint8_t
-ocs_hal_rqpair_auto_xfer_rdy_buffer_post(ocs_hal_t *hal, ocs_hal_io_t *io, int reuse_buf)
+ocs_hal_rqpair_tow_xri_buffer_attach(ocs_hal_t *hal, ocs_hal_io_t *io, int32_t reuse_buf)
 {
-	ocs_hal_auto_xfer_rdy_buffer_t *buf;
+	ocs_hal_tow_buffer_t *buf;
 	sli4_sge_t	*data;
 
-	if(!reuse_buf) {
-		buf = ocs_pool_get(hal->auto_xfer_rdy_buf_pool);
-		io->axr_buf = buf;
+	if (!reuse_buf) {
+		buf = ocs_pool_get(hal->tow_buffer_pool);
+		io->tow_buf = buf;
 	}
 
 	data = io->def_sgl.virt;
@@ -806,24 +842,24 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_post(ocs_hal_t *hal, ocs_hal_io_t *io, int r
 	 *
 	 * The first two SGLs are cleared by ocs_hal_io_init_sges(), so assume eveything is cleared.
 	 */
-	if (hal->config.auto_xfer_rdy_p_type) {
+	if (hal->config.tow_p_type) {
 		sli4_diseed_sge_t *diseed = (sli4_diseed_sge_t*)&data[1];
 
 		diseed->sge_type = SLI4_SGE_TYPE_DISEED;
-		diseed->repl_app_tag = hal->config.auto_xfer_rdy_app_tag_value;
-		diseed->app_tag_cmp = hal->config.auto_xfer_rdy_app_tag_value;
-		diseed->check_app_tag = hal->config.auto_xfer_rdy_app_tag_valid;
+		diseed->repl_app_tag = hal->config.tow_app_tag_value;
+		diseed->app_tag_cmp = hal->config.tow_app_tag_value;
+		diseed->check_app_tag = hal->config.tow_app_tag_valid;
 		diseed->auto_incr_ref_tag = TRUE; /* Always the LBA */
-		diseed->dif_blk_size = hal->config.auto_xfer_rdy_blk_size_chip;
+		diseed->dif_blk_size = hal->config.tow_blksize_chip;
 	} else {
 		data[1].sge_type = SLI4_SGE_TYPE_SKIP;
 		data[1].last = 0;
 	}
 
 	data[2].sge_type = SLI4_SGE_TYPE_DATA;
-	data[2].buffer_address_high = ocs_addr32_hi(io->axr_buf->payload.dma.phys);
-	data[2].buffer_address_low  = ocs_addr32_lo(io->axr_buf->payload.dma.phys);
-	data[2].buffer_length = io->axr_buf->payload.dma.size;
+	data[2].buffer_address_high = ocs_addr32_hi(io->tow_buf->payload.dma.phys);
+	data[2].buffer_address_low  = ocs_addr32_lo(io->tow_buf->payload.dma.phys);
+	data[2].buffer_length = io->tow_buf->payload.dma.size;
 	data[2].last = TRUE;
 	data[3].sge_type = SLI4_SGE_TYPE_SKIP;
 
@@ -831,27 +867,26 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_post(ocs_hal_t *hal, ocs_hal_io_t *io, int r
 }
 
 /**
- * @brief Return auto xfer ready buffers (while in RQ pair mode).
+ * @brief Return tow buffers (while in RQ pair mode).
  *
  * @par Description
- * The header and payload buffers are returned to the auto xfer rdy pool.
+ * The header and payload buffers are returned to the tow pool.
  *
  * @param hal Hardware context.
  * @param seq Header/payload sequence buffers.
  *
  * @return Returns OCS_HAL_RTN_SUCCESS for success, an error code value for failure.
  */
-
 static ocs_hal_rtn_e
-ocs_hal_rqpair_auto_xfer_rdy_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
+ocs_hal_rqpair_tow_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 {
-	ocs_hal_auto_xfer_rdy_buffer_t *buf = seq->header->dma.alloc;
+	ocs_hal_tow_buffer_t *buf = seq->header.tow_buf;
 
 	buf->data_cqe = 0;
 	buf->cmd_cqe = 0;
 	buf->fcfi = 0;
-	buf->call_axr_cmd = 0;
-	buf->call_axr_data = 0;
+	buf->call_tow_cmd = FALSE;
+	buf->call_tow_data = FALSE;
 
 	/* build a fake data header in big endian */
 	buf->hdr.info = FC_RCTL_INFO_SOL_DATA;
@@ -862,6 +897,9 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_seque
 					FC_FCTL_LAST_SEQUENCE |
 					FC_FCTL_END_SEQUENCE |
 					FC_FCTL_SEQUENCE_INITIATIVE);
+	buf->hdr.ox_id = 0;
+	buf->hdr.s_id = 0;
+	buf->hdr.d_id = 0;
 
 	/* build the fake header DMA object */
 	buf->header.rqindex = OCS_HAL_RQ_INDEX_DUMMY_HDR;
@@ -871,49 +909,49 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_sequence_reset(ocs_hal_t *hal, ocs_hal_seque
 	buf->header.dma.len = sizeof(buf->hdr);
 	buf->payload.rqindex = OCS_HAL_RQ_INDEX_DUMMY_DATA;
 
-	ocs_hal_rqpair_auto_xfer_rdy_dnrx_check(hal);
-
+	ocs_hal_rqpair_tow_dnrx_check(hal);
 	return OCS_HAL_RTN_SUCCESS;
 }
 
 /**
  * @ingroup devInitShutdown
- * @brief Free auto xfer rdy buffers.
+ * @brief Free tow buffers.
  *
  * @par Description
- * Frees the auto xfer rdy buffers.
+ * Frees the tow buffers.
  *
  * @param hal Hardware context allocated by the caller.
  *
  * @return Returns 0 on success, or a non-zero value on failure.
  */
 static void
-ocs_hal_rqpair_auto_xfer_rdy_buffer_free(ocs_hal_t *hal)
+ocs_hal_rqpair_tow_buffer_free(ocs_hal_t *hal)
 {
-	ocs_hal_auto_xfer_rdy_buffer_t *buf;
+	ocs_hal_tow_buffer_t *buf;
 	uint32_t i;
 
-	if (hal->auto_xfer_rdy_buf_pool != NULL) {
+	if (hal->tow_buffer_pool != NULL) {
 		ocs_lock(&hal->io_lock);
-			for (i = 0; i < ocs_pool_get_count(hal->auto_xfer_rdy_buf_pool); i++) {
-				buf = ocs_pool_get_instance(hal->auto_xfer_rdy_buf_pool, i);
+			for (i = 0; i < ocs_pool_get_count(hal->tow_buffer_pool); i++) {
+				buf = ocs_pool_get_instance(hal->tow_buffer_pool, i);
 				if (buf != NULL) {
 					ocs_dma_free(hal->os, &buf->payload.dma);
 				}
 			}
 		ocs_unlock(&hal->io_lock);
 
-		ocs_pool_free(hal->auto_xfer_rdy_buf_pool);
-		hal->auto_xfer_rdy_buf_pool = NULL;
+		ocs_pool_free(hal->tow_buffer_pool);
+		hal->tow_buffer_pool = NULL;
 	}
 }
 
 /**
  * @ingroup devInitShutdown
  * @brief Configure the rq_pair function from ocs_hal_init().
+ *        Must be after the IOs are setup and the state is active
  *
  * @par Description
- * Allocates the buffers to auto xfer rdy and posts initial XRIs for this feature.
+ * Allocates the TOW buffers and posts initial XRIs for this feature.
  *
  * @param hal Hardware context allocated by the caller.
  *
@@ -922,41 +960,42 @@ ocs_hal_rqpair_auto_xfer_rdy_buffer_free(ocs_hal_t *hal)
 ocs_hal_rtn_e
 ocs_hal_rqpair_init(ocs_hal_t *hal)
 {
-	ocs_hal_rtn_e	rc;
+	ocs_hal_rtn_e rc = 0;
 	uint32_t xris_posted;
 
-	ocs_log_debug(hal->os, "%s: RQ Pair mode\n", __func__);
-
 	/*
-	 * If we get this far, the auto XFR_RDY feature was enabled successfully, otherwise ocs_hal_init() would
-	 * return with an error. So allocate the buffers based on the initial XRI pool required to support this
-	 * feature.
+	 * If we get this far, the auto TOW feature was enabled successfully,
+	 * otherwise ocs_hal_init() would return with an error.
+	 * So allocate the buffers based on the initial XRI pool required to support this feature.
 	 */
-	if (sli_get_auto_xfer_rdy_capable(&hal->sli) &&
-	    hal->config.auto_xfer_rdy_size > 0) {
-		if (hal->auto_xfer_rdy_buf_pool == NULL) {
+	if (hal->tow_enabled) {
+		if (hal->tow_buffer_pool == NULL) {
 			/*
 			 * Allocate one more buffer than XRIs so that when all the XRIs are in use, we still have
 			 * one to post back for the case where the response phase is started in the context of
 			 * the data completion.
 			 */
-			rc = ocs_hal_rqpair_auto_xfer_rdy_buffer_alloc(hal, hal->config.auto_xfer_rdy_xri_cnt + 1);
+			rc = ocs_hal_rqpair_tow_buffer_alloc(hal, hal->config.tow_xri_cnt + 1);
 			if (rc != OCS_HAL_RTN_SUCCESS) {
-				return rc;
+				goto exit_err;
 			}
 		} else {
-			ocs_pool_reset(hal->auto_xfer_rdy_buf_pool);
+			ocs_pool_reset(hal->tow_buffer_pool);
 		}
 
-		/* Post the auto XFR_RDY XRIs */
-		xris_posted = ocs_hal_xri_move_to_port_owned(hal, hal->config.auto_xfer_rdy_xri_cnt);
-		if (xris_posted != hal->config.auto_xfer_rdy_xri_cnt) {
-			ocs_log_err(hal->os, "%s: post_xri failed, only posted %d XRIs\n", __func__, xris_posted);
-			return OCS_HAL_RTN_ERROR;
+		/* Post the XRIs */
+		xris_posted = ocs_hal_xri_move_to_port_owned(hal, hal->config.tow_xri_cnt);
+		if (xris_posted != hal->config.tow_xri_cnt) {
+			ocs_log_err(hal->os, "Post xri failed, only posted %d XRIs\n", xris_posted);
+			rc = OCS_HAL_RTN_ERROR;
+			goto exit_err;
 		}
 	}
 
-	return 0;
+	ocs_log_debug(hal->os, "RQ pair init completed\n");
+
+exit_err:
+	return rc;
 }
 
 /**
@@ -964,13 +1003,13 @@ ocs_hal_rqpair_init(ocs_hal_t *hal)
  * @brief Tear down the rq_pair function from ocs_hal_teardown().
  *
  * @par Description
- * Frees the buffers to auto xfer rdy.
+ * Frees the buffers to TOW buffers.
  *
  * @param hal Hardware context allocated by the caller.
  */
 void
 ocs_hal_rqpair_teardown(ocs_hal_t *hal)
 {
-	/* We need to free any auto xfer ready buffers */
-	ocs_hal_rqpair_auto_xfer_rdy_buffer_free(hal);
+	/* We need to free any tow buffers */
+	ocs_hal_rqpair_tow_buffer_free(hal);
 }

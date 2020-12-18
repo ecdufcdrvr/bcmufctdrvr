@@ -38,6 +38,9 @@
 #include "ocs_params.h"
 #include "ocs_gendump.h"
 #include "ocs_ocsu.h"
+#include "ocs_recovery.h"
+#include "ocs_mgmt.h"
+#include "ocs_impl_spdk.h"
 
 #include "fc.h"
 
@@ -47,10 +50,29 @@ static ocs_t *ocs_devices[MAX_OCS_DEVICES];
 static uint32_t num_ocs_devices;
 static void ocs_driver_print_module_params(void);
 
+int ocs_mgmt_driver_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
+		void *arg_out, uint32_t arg_out_length, void *driver);
+
+static ocs_mgmt_functions_t driver_mgmt_functions = {
+	.exec_handler = ocs_mgmt_driver_exec
+};
+
 /* PARAM_LIST: generate parameter declarations with initializers */
 #define P(type, name, value, desc)	type name = value;
 PARAM_LIST
 #undef P
+
+uint16_t
+ocs_sriov_get_nr_vfs(ocs_t *ocs)
+{
+	return 0;
+}
+
+bool
+ocs_sriov_config_required(ocs_t *ocs)
+{
+	return false;
+}
 
 /* ocs_ini_get_initiators - Get the initiator port pointers (ocs_t's) from the FC driver */
 /* Returns number nodes available. If number is larger than value passed in for node_size */
@@ -73,23 +95,7 @@ uint32_t ocsu_ini_get_initiators(ocs_t *ini_ocs_port[],  /* array of pointers to
 int32_t
 ocs_device_init(void)
 {
-	int32_t rc;
-
-	/* driver-wide init for target-server */
-	if (target) {
-		rc = ocs_scsi_tgt_driver_init();
-		if (rc) {
-			return rc;
-		}
-	}
-
-	/* driver-wide init for initiator-client */
-	if (initiator) {
-		rc = ocs_scsi_ini_driver_init(initiator);
-		if (rc) {
-			return rc;
-		}
-	}
+	ocs_thread_init();
 
 	/* Print module Parameters */
 	ocs_driver_print_module_params();
@@ -112,7 +118,7 @@ ocs_device_alloc(uint32_t nid)
 
 	ocs = ocs_malloc(NULL, sizeof(*ocs), OCS_M_NOWAIT | OCS_M_ZERO);
 	if (ocs == NULL) {
-		ocs_log_err(ocs, "%s: memory allocation failed for ocs_t\n", __func__);
+		ocs_log_err(ocs, "memory allocation failed for ocs_t\n");
 		return NULL;
 	}
 
@@ -125,7 +131,7 @@ ocs_device_alloc(uint32_t nid)
 	}
 
 	if (i == ARRAY_SIZE(ocs_devices)) {
-		ocs_log_err(NULL, "%s failed\n", __func__);
+		ocs_log_err(NULL, "ocs devices are exceeded\n");
 		ocs_free(ocs, ocs, sizeof(*ocs));
 		ocs = NULL;
 		return ocs;
@@ -145,7 +151,7 @@ ocs_device_alloc(uint32_t nid)
 	/* initialize a saved ddump */
 	if (ddump_saved_size) {
 		if (ocs_textbuf_alloc(ocs, &ocs->ddump_saved, ddump_saved_size)) {
-			ocs_log_err(ocs, "%s: failed to allocate memory for saved ddump\n", __func__);
+			ocs_log_err(ocs, "failed to allocate memory for saved ddump\n");
 		}
 	}
 	ocs_list_init(&ocs->domain_list, ocs_domain_t, link);
@@ -158,6 +164,7 @@ ocs_device_alloc(uint32_t nid)
 
 	ocs_device_lock_init(ocs);
 	ocs->drv_ocs.attached = FALSE;
+	ocs->mgmt_functions = &driver_mgmt_functions;
 
 	/* Save userspace mask value */
 	ocs->drv_ocs.uspace_thread_per_port = (uspacemask & (1U << 0)) == 0;
@@ -190,14 +197,16 @@ ocs_device_free(ocs_t *ocs)
 			ocs_lock_t *l;
 			uint32_t count = 0;
 			ocs_list_foreach(&os->locklist, l) {
-				ocs_log_test(os, "%s: %s not freed\n", __func__, l->name);
+				ocs_log_test(os, "%s not freed\n", l->name);
 				count++;
 			}
 			if (count == 0) {
-				ocs_log_debug(ocs, "%s: all lock objects freed\n", __func__);
+				ocs_log_debug(ocs, "all lock objects freed\n");
 			}
 		}
 #endif
+		/* Delete worker thread */
+		ocs_device_delete_worker_thread(ocs);
 
 		ocs_free(ocs, ocs, sizeof(*ocs));
 	}
@@ -214,6 +223,11 @@ int32_t
 ocs_device_interrupts_required(ocs_t *ocs)
 {
 	int32_t rc;
+
+	ocs->enable_ini = initiator;
+	ocs->enable_tgt = target;
+	ocs->ini_fc_types = initiator_flags;
+	ocs->tgt_fc_types = target_flags;
 
 	rc = ocs_hal_setup(&ocs->hal, ocs, SLI4_PORT_TYPE_FC);
 	if (rc) {
@@ -236,7 +250,7 @@ ocs_device_attach(ocs_t *ocs)
 	uint32_t rc = 0;
 
 	if (ocs->drv_ocs.attached) {
-		ocs_log_warn(ocs, "%s: Device is already attached\n", __func__);
+		ocs_log_warn(ocs, "Device is already attached\n");
 		rc = -1;
 	} else {
 		ocs_snprintf(ocs->display_name, sizeof(ocs->display_name), "[%s%d] ", "fc", ocs->instance_index);
@@ -249,7 +263,6 @@ ocs_device_attach(ocs_t *ocs)
 		ocs->hlm_group_size = hlm_group_size;
 		ocs->hal_war_version = hal_war_version;
 		ocs->explicit_buffer_list = explicit_buffer_list;
-		ocs->auto_xfer_rdy_size = auto_xfer_rdy_size;
 		ocs->esoc = esoc;
 		ocs->logmask = logmask;
 		ocs->num_vports = num_vports;
@@ -258,26 +271,46 @@ ocs_device_attach(ocs_t *ocs)
 		ocs->driver_version = DRV_VERSION;
 		ocs->hal_bounce = hal_bounce;
 		ocs->rq_threads = rq_threads;
+		ocs->rr_quanta = rr_quanta;
 		ocs->filter_def = filter_def;
 		ocs->max_isr_time_msec = OCS_OS_MAX_ISR_TIME_MSEC;
 		ocs->model = ocs_pci_model(ocs->pci_vendor, ocs->pci_device);
 		ocs->fw_version = (const char *)ocs_hal_get_ptr(&ocs->hal, OCS_HAL_FW_REV);
-		ocs->hal.watchdog_timeout = watchdog_timeout;
-		ocs->hal.sliport_healthcheck = sliport_healthcheck;
+		ocs->sliport_pause_errors = sliport_pause_errors;
+		ocs->enable_bbcr = enable_bbcr;
+		ocs->enable_dpp = 0;
+		ocs->enable_poll_mode = 1;
+		ocs->enable_dual_dump = enable_dual_dump;
+
+		ocs->enable_ini = initiator;
+		ocs->enable_tgt = target;
+		ocs->ini_fc_types = initiator_flags;
+		ocs->tgt_fc_types = target_flags;
 
 		ocs->tgt_rscn_delay_msec = 0;
 		ocs->tgt_rscn_period_msec = 0;
 
+		if (fw_dump_type != OCS_FW_DUMP_TYPE_DUMPTOHOST &&
+				fw_dump_type != OCS_FW_DUMP_TYPE_FLASH) {
+			char *dump_selection = "dump to flash";
+
+			ocs_log_info(ocs, "Module param FW dump type is invalid. "
+					"Using default setting: %s\n", dump_selection);
+			fw_dump_type = OCS_FW_DUMP_TYPE_FLASH;
+		}
+
+		ocs_fw_dump_init(ocs, fw_dump_type);
+
 		/* Allocate transport object and bring online */
 		ocs->xport = ocs_xport_alloc(ocs);
 		if (ocs->xport == NULL) {
-			ocs_log_err(ocs, "%s: failed to allocate transport object\n", __func__);
+			ocs_log_err(ocs, "failed to allocate transport object\n");
 			rc = -1;
 		} else if (ocs_xport_attach(ocs->xport) != 0) {
-			ocs_log_err(ocs, "%s: failed to attach transport object\n", __func__);
+			ocs_log_err(ocs, "failed to attach transport object\n");
 			rc = -1;
 		} else if (ocs_xport_initialize(ocs->xport) != 0) {
-			ocs_log_err(ocs, "%s: failed to initialize transport object\n", __func__);
+			ocs_log_err(ocs, "failed to initialize transport object\n");
 			rc = -1;
 		} else {
 			if ((holdoff_link_online == 2) && ((!ocs->enable_tgt) && (ocs->enable_ini))) {
@@ -290,11 +323,13 @@ ocs_device_attach(ocs_t *ocs)
 					 * Only log a message.  Don't return the error,
 					 * so that the driver will still attach to this port.
 					*/
-					ocs_log_err(ocs, "%s: failed to bring port online\n", __func__);
+					ocs_log_err(ocs, "failed to bring port online\n");
 				}
 			}
 
 		}
+		ocs->desc = ocs->hal.sli.config.modeldesc;
+		ocs_log_info(ocs, "adapter model description: %s\n", ocs->hal.sli.config.modeldesc);
 
 		if (rc == 0) {
 			ocs->drv_ocs.attached = TRUE;
@@ -322,21 +357,25 @@ ocs_device_detach(ocs_t *ocs)
 	int32_t rc = 0;
 
 	if (ocs != NULL) {
+		kill(ocs->drv_ocs.ioctl_thr.tid, SIGRTMIN);
+		ocs_thread_join(&ocs->drv_ocs.ioctl_thr);
 
 		if (!ocs->drv_ocs.attached) {
-			ocs_log_warn(ocs, "%s: Device is not attached\n", __func__);
+			ocs_log_warn(ocs, "Device is not attached\n");
 			return -1;
 		}
 
-		ocs_spdk_poller_stop(ocs);
+		ocs->drv_ocs.shutting_down = TRUE;
 
 		rc = ocs_xport_control(ocs->xport, OCS_XPORT_SHUTDOWN);
 		if (rc) {
-			ocs_log_err(ocs, "%s: Transport Shutdown timed out\n", __func__);
+			ocs_log_err(ocs, "Transport Shutdown timed out\n");
 		}
 
+		ocs_stop_event_processing(&ocs->ocs_os);
+
 		if (ocs_xport_detach(ocs->xport) != 0) {
-			ocs_log_err(ocs, "%s: Transport detach failed\n", __func__);
+			ocs_log_err(ocs, "Transport detach failed\n");
 		}
 
 		ocs_xport_free(ocs->xport);
@@ -363,32 +402,18 @@ ocs_device_detach(ocs_t *ocs)
 int32_t
 ocs_get_property(const char *prop_name, char *buffer, uint32_t buffer_len)
 {
-#if 0
-} else if (ocs_strcmp(prop_name, "initiator") == 0) {
-	snprintf(buffer, buffer_len, "%d", initiator);
-} else if (ocs_strcmp(prop_name, "target") == 0) {
-	snprintf(buffer, buffer_len, "%d", target);
-} else if (ocs_strcmp(prop_name, "wwn_bump") == 0) {
-	snprintf(buffer, buffer_len, "%s", wwn_bump);
-} else if (ocs_strcmp(prop_name, "dif_separate") == 0) {
-	snprintf(buffer, buffer_len, "%d", dif_separate);
-} else if (ocs_strcmp(prop_name, "ncpu") == 0) {
-	ocs_snprintf(buffer, buffer_len, "%ld", sysconf(_SC_NPROCESSORS_ONLN));
-} else if (ocs_strcmp(prop_name, "thread_cmds") == 0) {
-	ocs_snprintf(buffer, buffer_len, "%d", thread_cmds);
-} else if (ocs_strcmp(prop_name, "external_dif") == 0) {
-	ocs_strncpy(buffer, external_dif, buffer_len);
-} else if (strcmp(prop_name, "esoc") == 0) {
-	ocs_snprintf(buffer, buffer_len, "%d", esoc);
-} else if (strcmp(prop_name, "auto_xfer_rdy_xri_cnt") == 0) {
-	ocs_snprintf(buffer, buffer_len, "%d", auto_xfer_rdy_xri_cnt);
-} else {
-	ocs_log_test(NULL, "Error: %s: unknown property %s\n", __func__, prop_name);
+	int32_t rc = -1;
+
 	snprintf(buffer, buffer_len, "%s", "");
-	return -1;
-}
-#endif
-	return 0;
+
+	if (ocs_strcmp(prop_name, "enable_nsler") == 0) {
+		snprintf(buffer, buffer_len, "%d", enable_nsler);
+		rc = 0;
+		goto exit;
+	}
+
+exit:
+	return rc;
 }
 
 /**
@@ -454,12 +479,6 @@ ocs_instance(void *os)
 void
 ocs_device_shutdown_complete(void)
 {
-	if (initiator) {
-		ocs_scsi_ini_driver_exit(initiator);
-	}
-	if (target) {
-		ocs_scsi_tgt_driver_exit();
-	}
 }
 
 /**
@@ -476,6 +495,7 @@ ocs_driver_print_module_params(void)
 
 	ocs_log_info(NULL, "  Module parameters:\n");
 	ocs_log_info(NULL, "  Initiator = %d\n",		initiator);
+	ocs_log_info(NULL, "  Initiator_flags = %x\n",		initiator_flags);
 	ocs_log_info(NULL, "  Target = %d\n",			target);
 	ocs_log_info(NULL, "  ctrlmask = 0x%04x\n",		ctrlmask);
 	ocs_log_info(NULL, "  loglevel = %d\n",			loglevel);
@@ -491,9 +511,11 @@ ocs_driver_print_module_params(void)
 	ocs_log_info(NULL, "  ethernet_license = %d\n",		ethernet_license);
 	ocs_log_info(NULL, "  num_scsi_ios = %d\n",		num_scsi_ios);
 	ocs_log_info(NULL, "  dif_separate = %d\n",		dif_separate);
-	ocs_log_info(NULL, "  auto_xfer_rdy_size = %d\n",	auto_xfer_rdy_size);
+	ocs_log_info(NULL, "  tow_feature = %d\n",              tow_feature);
+	ocs_log_info(NULL, "  tow_xri_cnt = %d\n",              tow_xri_cnt);
+	ocs_log_info(NULL, "  tow_io_size = %d\n",              tow_io_size);
 	ocs_log_info(NULL, "  esoc = %d\n",			esoc);
-	ocs_log_info(NULL, "  auto_xfer_rdy_xri_cnt = %d\n",	auto_xfer_rdy_xri_cnt);
+	ocs_log_info(NULL, "  rr_quanta = %d\n",		rr_quanta);
 	ocs_log_info(NULL, "  filter_ref = %s\n",		filter_def);
 	ocs_log_info(NULL, "  explicit_buffer_list = %d\n",	explicit_buffer_list);
 	ocs_log_info(NULL, "  num_vports = %d\n",		num_vports);
@@ -501,6 +523,8 @@ ocs_driver_print_module_params(void)
 	ocs_log_info(NULL, "  target_io_timer = %d\n",		target_io_timer);
 	ocs_log_info(NULL, "  ddump_saved_size = %d\n",		ddump_saved_size);
 	ocs_log_info(NULL, "  hal_war_version = %s\n",		hal_war_version);
+	ocs_log_info(NULL, "  enable_nsler = %d\n",		enable_nsler);
+	ocs_log_info(NULL, "  fw_dump_type = %d\n",             fw_dump_type);
 
 #if defined(OCS_INCLUDE_RAMD)
 	ocs_log_info(NULL, "  p_type = %d\n",			p_type);
@@ -515,3 +539,40 @@ ocs_driver_print_module_params(void)
 #endif
 }
 
+
+int ocs_mgmt_driver_exec(char *parent, char *action_name, void *arg_in,
+		uint32_t arg_in_length, void *arg_out, uint32_t arg_out_length, void *object)
+{
+	char qualifier[80];
+	int retval = -1;
+	ocs_t *ocs = (ocs_t *)object;
+
+
+	ocs_snprintf(qualifier, sizeof(qualifier), "%s/driver", parent);
+
+	if (ocs_strncmp(action_name, qualifier, strlen(qualifier)) == 0) {
+		char *unqualified_name = action_name + strlen(qualifier) +1;
+
+		/* See if it's a value I can supply */
+		if (ocs_strcmp(unqualified_name, "gendump") == 0) {
+			bool force;
+			retval = ocs_copy_from_user(&force, arg_in, sizeof(force));
+			if (retval) {
+				ocs_log_err(ocs, "Gendump read user failed\n");
+				return -EFAULT;
+			}
+			retval = ocs_gendump(ocs, OCS_FW_CHIP_LEVEL_DUMP, force);
+		}
+
+                if (ocs_strcmp(unqualified_name, "dump_to_host") == 0) {
+                        retval = ocs_dump_to_host(ocs, arg_out, arg_out_length, OCS_FW_CHIP_LEVEL_DUMP);
+                }
+
+                if (ocs_strcmp(unqualified_name, "fdb_dump_to_host") == 0) {
+                        retval = ocs_dump_to_host(ocs, arg_out, arg_out_length, OCS_FW_FUNC_DESC_DUMP);
+                }
+
+	}
+
+	return retval;
+}

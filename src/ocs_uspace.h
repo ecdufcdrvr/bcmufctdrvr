@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (c) 2011-2015, Emulex
+ * All rights reserved.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -113,6 +112,7 @@
 #define PCI_PRODUCT_EMULEX_OCE50102_VF		0xe268
 #define PCI_PRODUCT_EMULEX_LPE31004		0xe300	/* LightPulse 16Gb x 4 FC (Lancer-G6) */
 #define PCI_PRODUCT_EMULEX_LPE32002		0xe300  /* LightPulse 32Gb x 2 FC (lancer-g6) */
+#define PCI_PRODUCT_EMULEX_LANCER_G7_FC         0xf400  /* LightPulse 32Gb x 4 FC (lancer-g7) */
 #define PCI_PRODUCT_BE3_INI			0x0712  /* OneCore 10Gb iSCSI (be3) */
 #define PCI_PRODUCT_BE3_TGT			0x0713  /* OneCore 10Gb iSCSI (be3) */
 #define PCI_PRODUCT_ATTO_LPE31004               0x0094  /* LightPulse 32Gb x 2 FC (lancer-g6) */
@@ -132,10 +132,13 @@
 #define PCI_SUBDEVICE_LPE31004			0xe312  /* 4x16G FC (lancer g6) */
 #define PCI_SUBDEVICE_LPE31004_P		0xe380  /* 4x16G FC (lancer g6 Penelope) */
 #define PCI_SUBDEVICE_LPE32002			0xe300  /* 2x32G FC (lancer g6 Grenoble) */
+#define PCI_SUBDEVICE_LPE16002			0xe310  /* 2x16G FC (lancer g6 Grenoble) */
 #define PCI_SUBDEVICE_LPE32000			0xe3f1  /* 2x32G FC (lancer g6 test) */
 
 #define MAX_PCI_INTERRUPTS			16
 #define DEFAULT_MSIX_INTERRUPTS			3
+
+#define SLI4_IF6_DPP_DOORBELL_REG_SET		2
 
 typedef struct {
 	void *vaddr;
@@ -171,7 +174,7 @@ typedef struct {
 	uint8_t dev;
 	uint8_t func;
 	uint8_t num_msix;
-	uint8_t numa_node;
+	int32_t numa_node;
 } ocsu_ioctl_get_pci_config_t;
 
 typedef struct {
@@ -308,8 +311,6 @@ struct ocs_uspace {
 #define OCSU_IOCTL_CMD_WAIT_EVENT_VEC		_IO(OCSU_IOCTL_CMD_BASE, 9)
 
 #define SLI4_BMBX_SIZE				256
-
-#include "ocs_common_shared.h"
 
 /* vim: set noexpandtab textwidth=120: */
 #endif // __OCS_USPACE_H__

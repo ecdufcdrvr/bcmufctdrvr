@@ -36,12 +36,30 @@
 
 #include "nvmf_fc.h"
 
+#define SPDK_SUCCESS		0
+#define SPDK_ERR_INVALID_ARGS	-1
+#define SPDK_ERR_INTERNAL	-2
+#define SPDK_ERR_NOMEM		-3
+
 /* maximum number of IO queues for NVME over FC */
 #define OCS_NVME_FC_MAX_IO_QUEUES  16
 
+#define BCM_MAX_IOVECS (SPDK_NVMF_MAX_SGL_ENTRIES + 2) /* 2 for skips */
 
 /* HWQP to assign NMVE admin queue to */
 #define OCS_NVME_FC_AQ_IND 0
+
+/* SGE structure */
+typedef struct bcm_sge {
+	uint32_t	buffer_address_high;
+	uint32_t	buffer_address_low;
+	uint32_t	data_offset: 27,
+			sge_type: 4,
+			last: 1;
+	uint32_t	buffer_length;
+} bcm_sge_t;
+
+#define BCM_SGE_SIZE sizeof(struct bcm_sge)
 
 /* Common queue definition structure */
 typedef struct bcm_sli_queue {
@@ -55,9 +73,18 @@ typedef struct bcm_sli_queue {
 	uint16_t  qid;           /* f/w Q_ID */
 	uint16_t  size;          /* size of each entry */
 	uint16_t  max_entries;   /* number of entries */
+	uint32_t  if_type;	 /* Differentiates the eq/cq version */
+	uint16_t  phase;	 /* For if_type = 6, this value toggle for each iteration
+                                    of the queue, a queue entry is valid when a cqe valid
+                                    bit matches this value */
 	void 	  *address;      /* queue address */
 	void 	  *doorbell_reg; /* queue doorbell register address */
-	char	  name[64];      /* unique name */ 
+
+	/* dpp queue info */
+	uint8_t	  dpp_enabled;
+	uint8_t   dpp_id;
+	void	  *dpp_doorbell_reg;	/* doorbell register for dpp queues */
+	char	  name[64];      	/* unique name */ 
 } bcm_sli_queue_t;
 
 /* EQ/CQ structure */
@@ -100,12 +127,20 @@ typedef struct fc_rcvq {
 	uint32_t rq_map[MAX_RQ_ENTRIES];
 } fc_rcvq_t;
 
-struct fc_xri_list {
+struct fc_sgl_list {
+	void *virt;
+	uint64_t phys;
+};
+
+struct bcm_nvmf_fc_port {
 	uint32_t xri_base;
 	uint32_t xri_count;
-	struct spdk_nvmf_fc_xchg *xri_list;
-	struct spdk_ring   *xri_ring;
-	TAILQ_ENTRY(fc_xri_list) link;
+	struct fc_sgl_list *sgl_list;
+	bool sgl_preregistered;
+
+	/* Internal */
+	struct spdk_mempool *xri_pool;
+	uint32_t num_cores;
 };
 
 /*
@@ -115,19 +150,33 @@ struct fc_xri_list {
 struct bcm_nvmf_hw_queues {
 	struct fc_eventq eq;
 	struct fc_eventq cq_wq;
+	struct fc_eventq cq_sfwq;
 	struct fc_eventq cq_rq;
 	struct fc_wrkq wq;
+	struct fc_wrkq sfwq;
 	struct fc_rcvq rq_hdr;
 	struct fc_rcvq rq_payload;
-	struct fc_xri_list *xri_list;
-	uint32_t free_rq_slots;
+	bool sfwq_configured;
+
 	uint16_t cid_cnt;   /* used to generate unique connection id for MRQ */
 	TAILQ_HEAD(, spdk_nvmf_fc_xchg) pending_xri_list;
 	uint32_t send_frame_xri;
-	uint8_t send_frame_seqid;
+	uint8_t frame_seqid;
 };
 
 /* functions to manage XRI's (for each port) */
-struct fc_xri_list* spdk_nvmf_fc_create_xri_list(uint32_t xri_base, uint32_t xri_count);
+struct spdk_mempool*
+spdk_nvmf_fc_create_xri_pool(uint32_t port_handle, uint32_t xri_base, uint32_t xri_count,
+			     uint32_t num_cpus, struct fc_sgl_list *sgl_list);
+void spdk_nvmf_fc_delete_xri_pool(struct spdk_mempool *xri_pool);
+void nvmf_fc_wrkq_reqtag_copy(struct fc_wrkq *wq_prev, struct fc_wrkq *wq_curr);
+void nvmf_fc_tgt_free_xri_pending(struct spdk_nvmf_fc_port *fc_port);
+void spdk_nvmf_hwqp_free_wq_reqtags(struct spdk_nvmf_fc_port *fc_port);
+
+#ifndef _FIXME_
+int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
+
+int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
+#endif
 
 #endif

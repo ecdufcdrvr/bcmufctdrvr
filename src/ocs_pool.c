@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -91,13 +90,16 @@ ocs_pool_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count, uint32_t use_l
 	ocs_pool_t *pool;
 	uint32_t i;
 
-	pool = ocs_malloc(os, sizeof(*pool), OCS_M_ZERO | OCS_M_NOWAIT);
+	pool = ocs_malloc(os, sizeof(*pool), OCS_M_ZERO);
 	if (pool == NULL) {
 		return NULL;
 	}
 
 	pool->os = os;
 	pool->use_lock = use_lock;
+	if (pool->use_lock) {
+		ocs_lock_init(os, &pool->lock, "ocs_pool:%p", pool);
+	}
 
 	/* Allocate an array where each array item is the size of a pool_hdr_t plus
 	 * the requested memory item size (size)
@@ -111,10 +113,6 @@ ocs_pool_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count, uint32_t use_l
 	ocs_list_init(&pool->freelist, pool_hdr_t, link);
 	for (i = 0; i < count; i++) {
 		ocs_list_add_tail(&pool->freelist, ocs_array_get(pool->a, i));
-	}
-
-	if (pool->use_lock) {
-		ocs_lock_init(os, &pool->lock, "ocs_pool:%p", pool);
 	}
 
 	return pool;
@@ -153,13 +151,20 @@ ocs_pool_reset(ocs_pool_t *pool)
 
 	/* Return all elements to the free list and zero the elements */
 	for (i = 0; i < count; i++) {
-		ocs_memset(ocs_pool_get_instance(pool, i), 0, size - sizeof(pool_hdr_t));
+		void *buf = ocs_pool_get_instance(pool, i);
+
+		if (!buf) {
+			ocs_log_err(NULL, "ocs_pool_get_instance failed\n");
+			ocs_list_assert(0);
+		}
+
+		ocs_memset(buf, 0, size - sizeof(pool_hdr_t));
 		ocs_list_add_tail(&pool->freelist, ocs_array_get(pool->a, i));
 	}
+
 	if (pool->use_lock) {
 		ocs_unlock(&pool->lock);
 	}
-
 }
 
 /**
@@ -247,7 +252,37 @@ ocs_pool_put(ocs_pool_t *pool, void *item)
 	if (pool->use_lock) {
 		ocs_unlock(&pool->lock);
 	}
+}
 
+/**
+ * @brief free memory pool item
+ *
+ * A memory pool item is freed to head of list.
+ *
+ * @param pool Pointer to memory pool.
+ * @param item Pointer to item to free.
+ *
+ * @return None.
+ */
+void
+ocs_pool_put_head(ocs_pool_t *pool, void *item)
+{
+	pool_hdr_t *h;
+
+	if (pool->use_lock) {
+		ocs_lock(&pool->lock);
+	}
+
+	/* Fetch the address of the array item, which is the item address negatively offset
+	 * by size of pool_hdr_t (note the index of [-1]
+	 */
+	h = &((pool_hdr_t*)item)[-1];
+
+	ocs_list_add_head(&pool->freelist, h);
+
+	if (pool->use_lock) {
+		ocs_unlock(&pool->lock);
+	}
 }
 
 /**

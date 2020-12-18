@@ -50,10 +50,10 @@ extern int32_t ocs_device_detach(ocs_t *ocs);
 extern void ocs_device_free(ocs_t *ocs);
 extern int ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg);
 extern int32_t ocs_device_init(void);
-extern void ocs_device_init_complete(void);
 extern void ocs_device_shutdown(void);
 extern void ocs_device_shutdown_complete(void);
 extern uint32_t ocsu_ini_get_initiators(ocs_t *ini_ocs_port[],
 					uint32_t max_ports);
+extern int32_t ocs_sriov_enable_vfs(ocs_t *ocs);
 
 #endif // __OCS_DRIVER_H__

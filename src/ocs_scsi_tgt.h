@@ -79,9 +79,6 @@ typedef struct {
 	ocs_atomic_t watermark_hit;		/**< used to track how often IO pool almost empty */
 	int32_t	watermark_min;			/**< lower limit for watermark */
 	int32_t	watermark_max;			/**< upper limit for watermark */
-
-	struct spdk_nvmf_fc_hw_port_init_args *args;
-	
 } ocs_scsi_tgt_t;
 
 /**
@@ -108,11 +105,6 @@ typedef struct {
  */
 
 typedef struct {
-	struct spdk_scsi_port *initiator_port;
-	struct spdk_scsi_dev *scsi_dev;
-	int core_id;
-	bool dirty;
-	uint32_t pending_task_cnt;
 } ocs_scsi_tgt_node_t;
 /**
  * @brief target private IO structure
@@ -120,17 +112,13 @@ typedef struct {
 
 #define MAX_SPDK_SGE 1024
 typedef struct {
-	// target server
-	struct spdk_fc_task *primary;
-	struct spdk_fc_task *current;
 	uint32_t flags;
-	uint8_t	 cdb[32];
+	uint8_t	 cdb[OCS_SCSI_MAX_CDB_LEN];
 	uint32_t cdb_len;
 	uint64_t lun;
 	// For TMF
 	ocs_scsi_tmf_cmd_e cmd;
 	uint32_t abort_tag;
-	
 } ocs_scsi_tgt_io_t;
 
 #endif /* __OCS_SCSI_TGT_H__ */

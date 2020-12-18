@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2011-2018, Emulex
- * All rights reserved.
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -47,6 +47,7 @@ extern void ocs_pool_reset(ocs_pool_t *pool);
 extern void ocs_pool_free(ocs_pool_t *pool);
 extern void *ocs_pool_get(ocs_pool_t *pool);
 extern void ocs_pool_put(ocs_pool_t *pool, void *item);
+extern void ocs_pool_put_head(ocs_pool_t *pool, void *item);
 extern uint32_t ocs_pool_get_count(ocs_pool_t *pool);
 extern void *ocs_pool_get_instance(ocs_pool_t *pool, uint32_t idx);
 extern uint32_t ocs_pool_get_freelist_count(ocs_pool_t *pool);

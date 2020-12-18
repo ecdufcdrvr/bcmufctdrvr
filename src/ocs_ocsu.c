@@ -41,7 +41,8 @@
 #include "ocs_ocsu.h"
 #include "ocs_driver.h"
 #include "ocs_params.h"
-#include "ocs_impl.h"
+#include "ocs_impl_spdk.h"
+#include "ocs_recovery.h"
 
 #include "ocs_spdk.h"
 #include "spdk/env.h"
@@ -56,6 +57,7 @@
 #define PCI_DEVICE(vendor, device) (((uint32_t) vendor << 16) | (device))
 #endif
 
+#define MRQ_TOPOLOGY	"eq cq mq cq rq:filter=2 cq wq eq:nvmeq=1 cq rq:filter=0 cq wq %d(eq:nvmeq=1 cq rq:filter=1:rqpolicy=3 cq wq)"
 
 #ifndef PCI_PRI_FMT /* This is defined by rte_pci.h when SPDK_CONFIG_PCIACCESS is not set */
 #define PCI_PRI_FMT		"%04x:%02x:%02x.%1u"
@@ -63,32 +65,154 @@
 
 #define SYSFS_PCI_DEVICES	"/sys/bus/pci/devices"
 #define SPDK_PCI_PATH_MAX	256
-#define MRQ_TOPOLOGY    "eq cq mq cq rq:filter=2 cq wq eq cq rq:filter=0 cq wq %d(eq cq rq:filter=1:rqpolicy=3 cq wq)"
 
-struct ocs_spdk_device
-{
+struct ocs_spdk_device {
 	struct spdk_pci_device  *spdk_pci_dev;
 	struct spdk_ocs_t	*ocs;
 	TAILQ_ENTRY(ocs_spdk_device) tailq;
 };
 
-struct ocs_spdk_fc_poller
-{
-	struct spdk_poller *spdk_poller;
-	uint32_t lcore;
-};
-
 static TAILQ_HEAD(, ocs_spdk_device)g_devices;
 
-static struct ocs_spdk_fc_poller g_fc_port_poller[MAX_OCS_DEVICES][OCS_HAL_MAX_NUM_EQ];
-static struct ocs_spdk_fc_poller g_fc_port_delayed_start_poller;
+/* This will be set by ocsu_init() */
+uint32_t ocs_spdk_master_core = 0;
+struct spdk_thread *g_spdk_master_thread;
+ocs_thread_t ocsu_shutdown_thr;
 
-static uint32_t g_fc_lcore[RTE_MAX_LCORE];
+uint16_t
+ocs_sriov_get_max_nr_vfs(ocs_t *ocs)
+{
+	return 0;
+}
 
-ocs_t* ocsu_device_init(struct spdk_pci_device *pci_dev);
+int32_t
+ocs_sriov_enable_vfs(ocs_t *ocs)
+{
+	return -1;
+}
+
+int32_t
+ocsu_spdk_shutdown_thread(ocs_thread_t *mythread)
+{
+	ocsu_exit();
+
+	return 0;
+}
+
+#define OCS_SPDK_WORKER_EVENT_POLL_TIME_USEC 100
+int32_t
+ocsu_spdk_worker_thread(ocs_thread_t *mythread)
+{
+	ocs_t *ocs = ocs_thread_get_arg(mythread);
+	ocs_mqueue_t *msg_q = &ocs->tgt_ocs.worker_msg_q;
+	ocs_spdk_worker_q_msg_t *msg;
+	int32_t done = false;
+	static int32_t poll_events = false;
+
+	ocs_log_debug(ocs, "%s started\n", mythread->name);
+	while (!done) {
+		msg = ocs_mqueue_get(msg_q, OCS_SPDK_WORKER_EVENT_POLL_TIME_USEC);
+		if (ocs_thread_terminate_requested(mythread)) {
+			break;
+		}
+
+		if (!msg && poll_events)
+			ocsu_process_events(ocs);
+
+		if (!msg)
+			continue;
+
+		switch (msg->msg) {
+		case OCS_SPDK_WORKER_START_EVENT_PROCESS:
+			poll_events = true;
+			break;
+		case OCS_SPDK_WORKER_STOP_EVENT_PROCESS:
+			poll_events = false;
+			break;
+
+		case OCS_SPDK_WORKER_THREAD_EXIT:
+			done = true;
+			break;
+		case OCS_SPDK_WORKER_NODE_POST_EVENT: 
+			msg->func(msg->func_arg);
+			break;
+		}
+
+		if (msg->sync)
+			ocs_sem_v(&msg->sync_sem);
+		else
+			ocs_free(ocs, msg, sizeof(*msg));
+	}
+
+	ocs_log_debug(ocs, "%s terminated\n", mythread->name);
+
+	return 0;
+}
+
+int
+ocs_send_msg_to_worker(ocs_t *ocs, ocs_spdk_worker_msg_t m, bool sync,
+		       ocs_spdk_worker_func func, void *func_arg)
+{
+	ocs_mqueue_t *msg_q = &ocs->tgt_ocs.worker_msg_q;
+	ocs_spdk_worker_q_msg_t *msg;
+	int rc = 0;
+	
+	if (!sync && !func) {
+		return -1;
+	}
+
+	msg = ocs_malloc(ocs, sizeof(*msg), OCS_M_ZERO);
+	if (!msg) {
+		ocs_log_err(ocs, "NOMEM failure\n");
+		return -1;
+	}
+
+	msg->msg = m;
+	if (sync) {
+		msg->sync = sync;
+		ocs_sem_init(&msg->sync_sem, 0, "sync_sem_%d", m);
+	} else {
+        	msg->func = func;
+        	msg->func_arg = func_arg;
+	}
+
+	ocs_mqueue_put(msg_q, msg);
+
+	if (sync) {
+		rc = ocs_sem_p(&msg->sync_sem, 10000000);
+		if (rc) {
+			ocs_log_err(ocs, "sema wait timed out\n");
+		}
+
+		ocs_free(ocs, msg, sizeof(*msg));
+	}
+
+	return rc;
+}
+
+inline static int
+ocs_device_create_worker_thread(ocs_t *ocs)
+{
+	ocs_mqueue_init(ocs, &ocs->tgt_ocs.worker_msg_q);
+	return ocs_thread_create(ocs, &ocs->tgt_ocs.worker_thr, ocsu_spdk_worker_thread,
+			"ocsu_spdk_worker", ocs, OCS_THREAD_RUN);
+
+}
+
+void
+ocs_device_delete_worker_thread(ocs_t *ocs)
+{
+	if (ocs_send_msg_to_worker(ocs, OCS_SPDK_WORKER_THREAD_EXIT,
+			true, NULL, NULL)) {
+		ocs_log_err(ocs, "Failed to terminate worker thread\n");
+	}
+	
+	ocs_mqueue_free(&ocs->tgt_ocs.worker_msg_q);
+
+}
 
 static int
-ocs_is_uio_driver_loaded(struct spdk_pci_device *dev)
+ocs_is_vfio_driver_loaded(struct spdk_pci_device *dev)
 {
 	char linkname[SPDK_PCI_PATH_MAX];
 	char driver[SPDK_PCI_PATH_MAX];
@@ -117,8 +241,7 @@ ocs_is_uio_driver_loaded(struct spdk_pci_device *dev)
 		driver_begin = driver;
 	}
 
-	return (strncmp(driver_begin, "uio_", 4) != 0 &&
-		strcmp(driver_begin, "vfio-pci") != 0);
+	return (strcmp(driver_begin, "vfio-pci") != 0);
 }
 
 /**
@@ -134,13 +257,13 @@ ocs_is_uio_driver_loaded(struct spdk_pci_device *dev)
 static bool
 probe_cb(void *cb_ctx, struct spdk_pci_device *pci_dev)
 {
-	ocs_log_debug(NULL, " Found matching device at %d:%d:%d "
+	ocs_log_debug(NULL, "Found matching device at %d:%d:%d "
 		"vendor:0x%04x device:0x%04x\n",
 		spdk_pci_device_get_bus(pci_dev), spdk_pci_device_get_dev(pci_dev),
 		spdk_pci_device_get_func(pci_dev),
 		spdk_pci_device_get_vendor_id(pci_dev), spdk_pci_device_get_device_id(pci_dev));
 
-	if (ocs_is_uio_driver_loaded(pci_dev)) {
+	if (ocs_is_vfio_driver_loaded(pci_dev)) {
 		ocs_log_err(NULL, "Device has no UIO driver loaded, skipping...\n");
 		return false;
 	}
@@ -164,147 +287,52 @@ attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ocs_t *spdk
 	TAILQ_INSERT_TAIL(&g_devices, dev, tailq);
 }
 
-
-/* Dont assign master lcore and nvmf lcores. */
-static uint32_t
-ocs_alloc_lcore(void)
+int
+ocs_spdk_poller_stop(ocs_t *ocs)
 {
-	return spdk_env_get_last_core();
+	int rc;
+	rc = ocs_send_msg_to_worker(ocs, OCS_SPDK_WORKER_STOP_EVENT_PROCESS, 
+				true, NULL, NULL);
 
-#if 0 // TODO: NEW SPDK - FIX the lcore mask skip (if needed still)
-	uint32_t least_assgined_lcore = 0;
-	uint32_t least_assigned = 0, i = 0;
+	ocs_log_debug(ocs, "SPDK Event processing %s on Port: %d\n",
+		      rc ? "failed to disable" : "disabled", ocs_instance(ocs)); 
 
-	RTE_LCORE_FOREACH_SLAVE(i) {
-		/* If this is nvmf lcore skip */
-		if ((g_nvmf_tgt.opts.lcore_mask >> i) & 0x1) {
-			continue;
-		}
-
-		if (!least_assigned || (g_fc_lcore[i] < least_assigned)) {
-			least_assigned = g_fc_lcore[i];
-			least_assgined_lcore = i;
-		}
-	}
-
-	if (!least_assgined_lcore) {
-		/* This means no lcore availble. */
-		return UINT32_MAX;
-	}
-
-	g_fc_lcore[least_assgined_lcore]++;
-
-	return least_assgined_lcore;
-#endif
-}
-
-static void
-ocs_release_lcore(uint32_t lcore)
-{
-	g_fc_lcore[lcore]--;
+	return rc;
 }
 
 int
-ocs_spdk_fc_poller(void *arg)
+ocs_spdk_poller_start(ocs_t *ocs)
 {
-	hal_eq_t *hal_eq = arg;
-	ocs_hal_t *hal	= hal_eq->hal;
+	int rc;
+	rc = ocs_send_msg_to_worker(ocs, OCS_SPDK_WORKER_START_EVENT_PROCESS, 
+				true, NULL, NULL);
 
-	ocs_hal_process(hal, hal_eq->instance, OCS_OS_MAX_ISR_TIME_MSEC);
+	ocs_log_debug(ocs, "SPDK Event processing %s on Port: %d\n",
+		      rc ? "failed to enable" : "enabled", ocs_instance(ocs)); 
 
-	return 0;
-}
-
-static void
-_ocs_poller_stop(void *arg1, void *arg2)
-{
-	struct ocs_spdk_fc_poller *fc_poller = arg1;
-
-	spdk_poller_unregister(&fc_poller->spdk_poller);
-	ocs_release_lcore(fc_poller->lcore);
-	sem_post((sem_t *) arg2);
-}
-
-static void
-ocs_poller_stop(struct ocs_spdk_fc_poller *fc_poller)
-{
-	struct spdk_event *event = NULL;
-	sem_t sem;
-
-	sem_init(&sem, 1, 0);
-	event = spdk_event_allocate(fc_poller->lcore, _ocs_poller_stop,
-				    (void *)fc_poller, (void *)&sem);
-	if (event) {
-		spdk_event_call(event);
-		sem_wait(&sem);
-	}
-	sem_destroy(&sem);
+	return rc;
 }
 
 void
-ocs_spdk_poller_stop(ocs_t *ocs)
+ocs_spdk_start_pollers(void)
 {
-	if (ocs != NULL) {
-		uint32_t i, index = ocs_instance(ocs);
-		uint32_t pollers_required = ocs->hal.config.n_eq - (ocs->num_cores + 1);
+	uint32_t i;
+	int rc = 0;
+	ocs_t *ocs;
 
-		ocs_log_debug(ocs, "Destroying poller threads on port : %d\n", index);
-		for (i = 0; i < pollers_required; i++) {
-			ocs_poller_stop(&g_fc_port_poller[index][i]);
+	for_each_ocs(i, ocs) {
+		if (!ocs)
+			continue;
+
+		rc = ocs_spdk_poller_start(ocs);
+		if (rc) {
+			ocs_log_err(ocs, "Unable to start worker poller on port %d\n",
+				    ocs->instance_index);
 		}
 	}
 }
 
-static struct spdk_thread *ocs_rsvd_thread = NULL;
-
-struct spdk_thread *
-ocs_get_rsvd_thread(void)
-{
-	return ocs_rsvd_thread;
-}
-
-static void
-ocs_delay_poller_start(void *arg1, void *arg2)
-{
-	struct ocs_spdk_fc_poller *poller = arg1;
-	poller->spdk_poller = spdk_poller_register(ocs_spdk_fc_poller, arg2, 0);
-	if (ocs_rsvd_thread == NULL &&
-	    spdk_env_get_current_core() == spdk_env_get_last_core()) {
-		/* save last thread (reserved for SCSI) */
-		ocs_rsvd_thread = spdk_get_thread();
-	}
-}
-
-static int
-ocs_create_pollers(ocs_t *ocs)
-{
-	uint32_t index = 0, i, lcore_id;
-	uint32_t pollers_required = ocs->hal.config.n_eq - (ocs->num_cores + 1);
-	struct spdk_event *event = NULL;
-
-	for (i = 0; i < pollers_required; i++) {
-		lcore_id = ocs_alloc_lcore();
-		if (lcore_id == UINT32_MAX) {
-			return -1;
-		}
-
-		ocs_log_debug(ocs, "Starting polling thread on Port: %d core: %d\n",
-			ocs_instance(ocs), lcore_id);
-
-		g_fc_port_poller[ocs_instance(ocs)][index].lcore = lcore_id;
-		event = spdk_event_allocate(lcore_id, ocs_delay_poller_start,
-	 				    (void *)&g_fc_port_poller[ocs_instance(ocs)][index],
-					    ocs->hal.hal_eq[index]);
-		spdk_event_call(event);
-
-		index++;
-
-		ocs->lcore_mask |= (1 << lcore_id);
-	}
-	return 0;
-}
-
-ocs_t*
+static ocs_t*
 ocsu_device_init(struct spdk_pci_device *pci_dev)
 {
 	ocs_t *ocs;
@@ -312,12 +340,11 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	uint32_t num_cores = 0;
 	const char *desc = "Unknown adapter";
 	struct spdk_ocs_get_pci_config_t pciconfig;
-	struct spdk_fc_hba_port *hba_port = NULL;
 
 	num_cores = spdk_env_get_core_count();
 	if (num_cores > OCS_NVME_FC_MAX_IO_QUEUES) {
-		ocs_log_err(NULL, "%s: Cant configure more cores than %d for FC\n",
-			 __func__, OCS_NVME_FC_MAX_IO_QUEUES);
+		ocs_log_err(NULL, "Cant configure more cores than %d for FC\n",
+				OCS_NVME_FC_MAX_IO_QUEUES);
 		return NULL;
 	}
 
@@ -326,7 +353,8 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		ocs_log_err(NULL, "ocsu_device_init failed\n");
 		return NULL;
 	}
-	ocs->num_cores = num_cores;
+
+	ocs->ocs_os.num_cores = num_cores;
 
 	spdk_ocs_get_pci_config(pci_dev, &pciconfig);
 
@@ -334,27 +362,31 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	ocs->pci_device = pciconfig.device;
 
 	switch (PCI_DEVICE(ocs->pci_vendor, ocs->pci_device)) {
-	    case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_OCE16001):
-		    desc = "Emulex LightPulse G5 16Gb FC Adapter";
-		    break;
-	    case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LPE31004):
-		    desc = "Emulex LightPulse G6 16Gb FC Adapter";
-		    break;
-	    default:
-	    {
-		    ocs_log_err(NULL, "Unsupported device found.");
-		    ocs_free(ocs, ocs, sizeof(*ocs));
-		    return NULL;
-	    }
+		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_OCE16001):
+			desc = "Emulex LightPulse G5 16Gb FC Adapter";
+			break;
+		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LPE31004):
+			desc = "Emulex LightPulse G6 16Gb FC Adapter";
+			break;
+		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LANCER_G7_FC):
+			desc = "Emulex LightPulse G7 32Gb FC Adapter";
+			break;
+		default:
+		{
+			ocs_log_err(NULL, "Unsupported device found.");
+			ocs_free(ocs, ocs, sizeof(*ocs));
+			return NULL;
+		}
 	}
 
 	ocs->desc	= desc;
-	ocs->ocsu_spdk	= pci_dev;
+	ocs->ocs_os.spdk_pdev	= pci_dev;
 	ocs->ocs_os.pagesize 	= sysconf(_SC_PAGE_SIZE);
 	ocs->ocs_os.bus		= pciconfig.bus;
 	ocs->ocs_os.dev		= pciconfig.dev;
 	ocs->ocs_os.func	= pciconfig.func;
 	ocs->ocs_os.bar_count	= pciconfig.bar_count;
+
 	memcpy(&ocs->ocs_os.bars, pciconfig.bars, sizeof(ocs->ocs_os.bars));
 	sprintf(ocs->businfo, "%02x:%02x.%x", ocs->ocs_os.bus, ocs->ocs_os.dev,
 		ocs->ocs_os.func);
@@ -366,40 +398,23 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	ocs_dma_init(ocs);
 
 	/* Initialize per ocs queue topology */
-	hba_port = ocs_spdk_tgt_find_hba_port(ocs->instance_index);
-	if (hba_port) {
-		ocs->enable_ini = hba_port->initiator;
-		ocs->enable_tgt = hba_port->target;
-		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, num_cores);
-	} else {
-		// use default
-		ocs->enable_ini = initiator;
-		ocs->enable_tgt = target;
-		ocs_snprintf(ocs->queue_topology, sizeof(ocs->queue_topology),
-			MRQ_TOPOLOGY, num_cores);
-	}
-
-	// For now always enable.
-	ocs->enable_nvme_tgt = TRUE;
+	ocs->enable_ini = initiator;
+	ocs->enable_tgt = target;
+	ocs_snprintf(ocs->ocs_os.queue_topology, sizeof(ocs->ocs_os.queue_topology),
+		     MRQ_TOPOLOGY, num_cores);
+	hal_global.queue_topology_string = ocs->ocs_os.queue_topology;
 
 	num_interrupts = ocs_device_interrupts_required(ocs);
 	if (num_interrupts < 0) {
-		ocs_log_err(ocs, "%s: ocs_device_interrupts_required() failed\n", __func__);
+		ocs_log_err(ocs, "ocs_device_interrupts_required() failed\n");
 		goto error1;
 	}
 
 	ocs_log_info(ocs, "Found Adapter Port: %d\n",
 		ocs->hal.sli.physical_port);
 	ocs_log_info(ocs, "Description  : %.64s \n",
-		strlen(ocs->hal.sli.config.description) ?
-		ocs->hal.sli.config.description : "N/A");
-	ocs_log_info(ocs, "Model        : %.32s \n",
-		strlen(ocs->hal.sli.config.model) ?
-		ocs->hal.sli.config.model : "N/A");
-	ocs_log_info(ocs, "SN           : %.32s \n",
-		strlen(ocs->hal.sli.config.serial_number) ?
-		ocs->hal.sli.config.serial_number : "N/A");
+		strlen(ocs->hal.sli.config.modeldesc) ?
+		ocs->hal.sli.config.modeldesc : "N/A");
 
 	ocs_log_info(ocs, "WWPN         : %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
 		ocs->hal.sli.config.wwpn[0],
@@ -423,11 +438,29 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 
 	rc = ocs_device_attach(ocs);
 	if (rc) {
-		ocs_log_err(ocs, "%s: ocs_device_attach failed: %d\n", __func__, rc);
+		ocs_log_err(ocs, "ocs_device_attach failed: %d\n", rc);
 		goto error2;
 	}
+
+	rc = ocs_thread_create(ocs, &ocs->drv_ocs.ioctl_thr, ocs_ioctl_server,
+			"ocs_ioctl_thr", ocs, OCS_THREAD_RUN);
+	if (rc) {
+		ocs_log_err(ocs, "ocs ioctl thread create failed! rc=%d\n", rc);
+		goto error3;
+	}
+
+	rc = ocs_device_create_worker_thread(ocs);
+	if (rc) {
+		ocs_log_err(ocs, "ocsu worker thread create failed\n");
+		goto error4;
+	}
+
 	return ocs;
 
+error4:
+	ocs_thread_terminate(&ocs->drv_ocs.ioctl_thr);
+error3:
+	ocs_device_detach(ocs);
 error2:
 	ocs_dma_teardown(ocs);
 error1:
@@ -439,14 +472,18 @@ int
 ocsu_init(void)
 {
 	ocs_t *ocs;
-	int32_t rc = -1;
+	int32_t rc;
 	struct ocs_spdk_device *ocs_spdk_device;
+
+	/* Save master core value */
+	ocs_spdk_master_core = spdk_env_get_current_core();
+	g_spdk_master_thread = spdk_get_thread();
 
 	TAILQ_INIT(&g_devices);
 
 	if (spdk_ocs_probe(NULL, probe_cb, attach_cb) != 0) {
 		fprintf(stderr, "ocs_probe() failed\n");
-		return rc;
+		return -1;
 	}
 
 	rc = ocs_device_init();
@@ -462,94 +499,14 @@ ocsu_init(void)
 
 		ocs = ocsu_device_init(ocs_spdk_device->spdk_pci_dev);
 		if (ocs == NULL) {
-			ocs_log_err(ocs, "%s: ocsu_device_init failed\n", __func__);
+			ocs_log_err(ocs, "ocsu_device_init failed\n");
 			return -1;
 		}
 	}
+
+	rc  = ocs_fw_err_recovery_setup();
+
 	return rc;
-}
-
-bool
-ocsu_device_add(struct spdk_pci_addr *pci_addr)
-{
-	uint32_t i;
-	ocs_t *ocs;
-	struct ocs_spdk_device 	*dev;
-	struct spdk_ocs_t 	*spdk_ocs;
-	struct spdk_pci_device 	*pci_dev = NULL;
-	uint16_t 		vendor_id, device_id;
-
-	if (!pci_addr) {
-		ocs_log_err(NULL, "%s: Invalid pci_addr\n", __func__)
-		goto error1;
-	}
-
-	// Make sure the device doesnt exist
-	for_each_ocs(i, ocs) {
-		if (!ocs)
-			continue;
-
-		if ((ocs->ocs_os.bus == pci_addr->bus) &&
-		    (ocs->ocs_os.dev == pci_addr->dev) &&
-		    (ocs->ocs_os.func == pci_addr->func))
-		{
-			break;
-		}
-	}
-
-	if (ocs) {
-		ocs_log_err(ocs, "%s: Already exists.\n", __func__)
-		goto error1;
-	}
-
-	/* TODO: No equivalent call in 18.04. For now disable this. */
-	// pci_dev = spdk_pci_get_device(pci_addr);
-	if (!pci_dev) {
-		ocs_log_err(ocs, "%s: PCI device not found.\n", __func__)
-		goto error1;
-	}
-
-	vendor_id = spdk_pci_device_get_vendor_id(pci_dev);
-	device_id = spdk_pci_device_get_device_id(pci_dev);
-
-	if (!ocs_pci_device_match_id(vendor_id, device_id)) {
-		ocs_log_err(ocs, "%s: Unknown PCI device.\n", __func__)
-		goto error1;
-	}
-
-	spdk_ocs = spdk_ocs_attach(pci_dev);
-	if (spdk_ocs == NULL) {
-		ocs_log_err(ocs, "%s: spdk_ocs failed to attach.\n", __func__)
-		goto error1;
-	}
-
-	if (!probe_cb(NULL, pci_dev)) {
-		ocs_log_err(ocs, "%s: probe failed.\n", __func__)
-		goto error2;
-	}
-
-	attach_cb(NULL, pci_dev, spdk_ocs);
-
-	ocs = ocsu_device_init(pci_dev);
-	if (!ocs) {
-		ocs_log_err(ocs, "%s: ocsu_device_init failed. \n", __func__)
-		goto error3;
-	}
-
-	return true;
-
-error3:
-	TAILQ_FOREACH(dev, &g_devices, tailq) {
-		if (dev->spdk_pci_dev == pci_dev) {
-			TAILQ_REMOVE(&g_devices, dev, tailq);
-			free(dev);
-			break;
-		}
-	}
-error2:
-	spdk_ocs_detach(spdk_ocs);
-error1:
-	return false;
 }
 
 bool
@@ -558,7 +515,6 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 	uint32_t i;
 	ocs_t *ocs;
 	struct ocs_spdk_device *dev;
-
 
 	if (!pci_addr) {
 		return false;
@@ -578,14 +534,14 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 	}
 
 	if (!ocs) {
-		ocs_log_err(ocs, "%s: PCI device not found.\n", __func__)
+		ocs_log_err(ocs, "PCI device not found.\n");
 		return false;
 	}
 
 	ocs_device_detach(ocs);
 
 	TAILQ_FOREACH(dev, &g_devices, tailq) {
-		if (dev->spdk_pci_dev == ocs->ocsu_spdk) {
+		if (dev->spdk_pci_dev == ocs->ocs_os.spdk_pdev) {
 			TAILQ_REMOVE(&g_devices, dev, tailq);
 			if (dev->ocs) {
 				spdk_ocs_detach(dev->ocs);
@@ -599,38 +555,22 @@ ocsu_device_remove(struct spdk_pci_addr *pci_addr)
 	return true;
 }
 
-static int
-ocs_spdk_fc_wait_poller_init(void *arg)
+void
+ocsu_shutdown(void)
 {
-	uint32_t i;
-	int rc = 0;
-	ocs_t *ocs;
+	int rc;
 
-        /* Unregister self */
-        spdk_poller_unregister(&g_fc_port_delayed_start_poller.spdk_poller);
-
-	for_each_ocs(i, ocs) {
-		if (!ocs)
-			continue;
-		rc = ocs_create_pollers(ocs);
-		if (rc) {
-			ocs_log_err(ocs, "%d: unable to start pollers\n", ocs->instance_index);
-		}
+	ocs_log_info(NULL, "OCSU initiate shutdown process\n");
+	rc = ocs_thread_create(NULL, &ocsu_shutdown_thr,
+			ocsu_spdk_shutdown_thread,
+			"ocsu_spdk_shdutdown", NULL, OCS_THREAD_RUN);
+	if (rc) {
+		ocs_log_err(NULL, "Failed to initiate shutdown process\n");
 	}
-
-	return 0;
 }
 
 void
-ocs_spdk_start_pollers(void)
-{
-	g_fc_port_delayed_start_poller.spdk_poller =
-		spdk_poller_register(ocs_spdk_fc_wait_poller_init,
-				     NULL, 2*1024*1024);
-}
-
-void
-ocs_spdk_exit(void)
+ocsu_exit(void)
 {
 	uint32_t i;
 	struct ocs_spdk_device *dev;
@@ -641,7 +581,10 @@ ocs_spdk_exit(void)
 			continue;
 
 		ocs_device_detach(ocs);
+		ocs_nvme_hw_port_free(ocs);
 	}
+
+	ocs_fw_err_recovery_stop();	
 
 	while (!TAILQ_EMPTY(&g_devices)) {
 		dev = TAILQ_FIRST(&g_devices);
@@ -651,6 +594,7 @@ ocs_spdk_exit(void)
 		}
 		free(dev);
 	}
+
 	/* Perform cleanup of user space DMA and device free in this second
 	 * loop, as some back ends tie references to DMA objects to one of the
 	 * device objects, and the previous loop might result in a use after
@@ -681,26 +625,70 @@ ocsu_process_events(ocs_t *ocs)
 	uint32_t eq_count = ocs_hal_get_num_eq(&ocs->hal);
 
 	for (i = 0; i < eq_count; i++) {
-		ocs_hal_process(&ocs->hal, i, OCS_OS_MAX_ISR_TIME_MSEC);
+		if (!ocs->hal.hal_eq[i]->nvmeq) {
+			ocs_hal_process(&ocs->hal, i, OCS_OS_MAX_ISR_TIME_MSEC);
+		}
 	}
 
 	return 0;
 }
 
+int32_t
+ocs_start_event_processing(ocs_os_t *ocs_os)
+{
+	int rc;
+	ocs_t *ocs = (ocs_t *) ocs_os;
+
+	rc = ocs_spdk_poller_start(ocs);
+	if (rc) {
+		ocs_log_err(ocs, "Unable to start worker poller on port %d\n",
+			    ocs->instance_index);
+		return rc;
+	}
+
+	rc = ocs_nvme_tgt_new_device(ocs);
+	if (rc) {
+		ocs_log_err(ocs, "Restart after recovery failed. nvme_hw_port_create failed \n");
+	}
+
+	return rc;
+}
+
+void
+ocs_stop_event_processing(ocs_os_t *ocs_os)
+{
+	int rc;
+
+	ocs_t *ocs = (ocs_t *)ocs_os;
+	rc = ocs_spdk_poller_stop(ocs);
+	if (rc) {
+		ocs_log_err(ocs, "Unable to STOP event processing\n");
+	}
+
+	return;
+}
+
 static struct spdk_pci_id ocs_pci_driver_id[] = {
 	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
-	  .vendor_id = SPDK_PCI_VID_OCS,
-	  .device_id = PCI_DEVICE_ID_OCS_LANCERG5,
-	  .subvendor_id = SPDK_PCI_ANY_ID,
-	  .subdevice_id = SPDK_PCI_ANY_ID,
+	 .vendor_id = SPDK_PCI_VID_OCS,
+	 .device_id = PCI_DEVICE_ID_OCS_LANCERG5,
+	 .subvendor_id = SPDK_PCI_ANY_ID,
+	 .subdevice_id = SPDK_PCI_ANY_ID,
 	},
 	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
-	  .vendor_id = SPDK_PCI_VID_OCS,
-	  .device_id = PCI_DEVICE_ID_OCS_LANCERG6,
-	  .subvendor_id = SPDK_PCI_ANY_ID,
-	  .subdevice_id = SPDK_PCI_ANY_ID,
+	 .vendor_id = SPDK_PCI_VID_OCS,
+	 .device_id = PCI_DEVICE_ID_OCS_LANCERG6,
+	 .subvendor_id = SPDK_PCI_ANY_ID,
+	 .subdevice_id = SPDK_PCI_ANY_ID,
+	},
+	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
+	 .vendor_id = SPDK_PCI_VID_OCS,
+	 .device_id = PCI_DEVICE_ID_OCS_LANCERG7,
+	 .subvendor_id = SPDK_PCI_ANY_ID,
+	 .subdevice_id = SPDK_PCI_ANY_ID,
 	},
 };
 
-SPDK_PCI_DRIVER_REGISTER(uio_pci_generic, ocs_pci_driver_id,
-			 SPDK_PCI_DRIVER_NEED_MAPPING | SPDK_PCI_DRIVER_WC_ACTIVATE);
+SPDK_PCI_DRIVER_REGISTER(vfio_pci, ocs_pci_driver_id,
+			SPDK_PCI_DRIVER_NEED_MAPPING | SPDK_PCI_DRIVER_WC_ACTIVATE);
+

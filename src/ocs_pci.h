@@ -40,6 +40,7 @@
 
 #define PCI_DEVICE_ID_OCS_LANCERG5	0xe200
 #define PCI_DEVICE_ID_OCS_LANCERG6	0xe300
+#define PCI_DEVICE_ID_OCS_LANCERG7      0xf400
 
 #endif /* __OCS_PCI_H__ */
 

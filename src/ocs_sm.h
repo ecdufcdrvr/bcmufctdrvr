@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -79,6 +78,7 @@ typedef enum {
 	OCS_EVT_DOMAIN_ATTACH_OK,
 	OCS_EVT_DOMAIN_ATTACH_FAIL,
 	OCS_EVT_DOMAIN_LOST,
+	OCS_EVT_DOMAIN_TGT_FREE_OK,
 	OCS_EVT_DOMAIN_FREE_OK,
 	OCS_EVT_DOMAIN_FREE_FAIL,
 	OCS_EVT_HAL_DOMAIN_REQ_ATTACH,
@@ -107,8 +107,13 @@ typedef enum {
 	OCS_EVT_SRRS_ELS_REQ_RJT,
 	OCS_EVT_NODE_ATTACH_OK,
 	OCS_EVT_NODE_ATTACH_FAIL,
+	OCS_EVT_NODE_AUTH_OK,
+	OCS_EVT_NODE_AUTH_FAIL,
+	OCS_EVT_NODE_AUTH_RETRY,
 	OCS_EVT_NODE_FREE_OK,
 	OCS_EVT_NODE_FREE_FAIL,
+	OCS_EVT_NODE_RPI_UPDATE_OK,
+	OCS_EVT_NODE_RPI_UPDATE_FAIL,
 	OCS_EVT_ELS_FRAME,
 	OCS_EVT_ELS_REQ_TIMEOUT,
 	OCS_EVT_ELS_REQ_ABORTED,
@@ -116,15 +121,18 @@ typedef enum {
 	OCS_EVT_ELS_ABORT_CMPL,	        /**< ELS abort process complete */
 
 	OCS_EVT_ABTS_RCVD,
+	OCS_EVT_FLUSH_BLS_RCVD,
 
-	OCS_EVT_NODE_MISSING,		/**< node is not in the GID_FT payload */
-	OCS_EVT_NODE_REFOUND,		/**< node is allocated and in the GID_FT payload */
+	OCS_EVT_NODE_MISSING,		/**< node is not in the GID_PT payload */
+	OCS_EVT_NODE_REFOUND,		/**< node is allocated and in the GID_PT payload */
 	OCS_EVT_SHUTDOWN_IMPLICIT_LOGO,	/**< node shutting down due to PLOGI recvd (implicit logo) */
 	OCS_EVT_SHUTDOWN_EXPLICIT_LOGO,	/**< node shutting down due to LOGO recvd/sent (explicit logo) */
 
 	OCS_EVT_PLOGI_RCVD,
 	OCS_EVT_FLOGI_RCVD,
 	OCS_EVT_LOGO_RCVD,
+	OCS_EVT_RRQ_RCVD,
+	OCS_EVT_RDP_RCVD,
 	OCS_EVT_PRLI_RCVD,
 	OCS_EVT_PRLO_RCVD,
 	OCS_EVT_PDISC_RCVD,
@@ -132,9 +140,12 @@ typedef enum {
 	OCS_EVT_ADISC_RCVD,
 	OCS_EVT_RSCN_RCVD,
 	OCS_EVT_SCR_RCVD,
+	OCS_EVT_AUTH_RCVD,
 	OCS_EVT_ELS_RCVD,
 
 	OCS_EVT_FCP_CMD_RCVD,
+	OCS_EVT_NVME_CMD_RCVD,
+	OCS_EVT_TOW_DATA_RCVD,
 
 	/* Used by fabric emulation */
 	OCS_EVT_RFT_ID_RCVD,
@@ -152,26 +163,33 @@ typedef enum {
 	OCS_EVT_RSPN_ID_RCVD,
 	OCS_EVT_RHBA_RCVD,
 	OCS_EVT_RPA_RCVD,
-	OCS_EVT_DA_ID_RCVD,
 	OCS_EVT_GA_NXT_RCVD,
 
-	OCS_EVT_GIDFT_DELAY_EXPIRED,
+	OCS_EVT_GIDPT_DELAY_EXPIRED,
 
 	/* SCSI Target Server events */
 	OCS_EVT_ABORT_IO,
 	OCS_EVT_ABORT_IO_NO_RESP,
+	OCS_EVT_IO_DELAY_TIMER_EXPIRY,
 	OCS_EVT_IO_CMPL,
 	OCS_EVT_IO_CMPL_ERRORS,
 	OCS_EVT_RESP_CMPL,
 	OCS_EVT_ABORT_CMPL,
 	OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY,
+	OCS_EVT_NODE_LAST_ACTIVE_IO,
 	OCS_EVT_NODE_DEL_INI_COMPLETE,
 	OCS_EVT_NODE_DEL_TGT_COMPLETE,
+	OCS_EVT_NODE_SESS_REG_OK,
+	OCS_EVT_NODE_SESS_REG_FAIL,
 	OCS_EVT_IO_ABORTED_BY_TMF,
 	OCS_EVT_IO_ABORT_IGNORED,
 	OCS_EVT_IO_FIRST_BURST,
 	OCS_EVT_IO_FIRST_BURST_ERR,
 	OCS_EVT_IO_FIRST_BURST_ABORTED,
+
+	/* Loopback events */
+	OCS_EVT_CT_LOOPBACK_RCVD,
+	OCS_EVT_CT_LOOPBACK_RCVD_NO_IO,
 
 	/* Must be last */
 	OCS_EVT_LAST
@@ -193,10 +211,11 @@ struct ocs_sm_ctx_s {
 extern int ocs_sm_post_event(ocs_sm_ctx_t *, ocs_sm_event_t, void *);
 extern void ocs_sm_transition(ocs_sm_ctx_t *, ocs_sm_function_t, void *);
 extern void ocs_sm_disable(ocs_sm_ctx_t *ctx);
+extern ocs_sm_function_t ocs_sm_state(ocs_sm_ctx_t *ctx);
 extern const char *ocs_sm_event_name(ocs_sm_event_t evt);
 
 #if 0
-#define smtrace(sm)	ocs_log_debug(NULL, "%s: %-20s -->   %s\n", sm, ocs_sm_event_name(evt), __func__)
+#define smtrace(sm)	ocs_log_debug(NULL, "%s: %-20s\n", sm, ocs_sm_event_name(evt))
 #else
 #define smtrace(...)
 #endif

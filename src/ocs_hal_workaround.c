@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -52,9 +51,6 @@
 #define HAL_FWREV_ZERO		(0ull)
 #define HAL_FWREV_MAX		(~0ull)
 
-#define SLI4_ASIC_TYPE_ANY	0
-#define SLI4_ASIC_REV_ANY	0
-
 /**
  * @brief Internal definition of workarounds
  */
@@ -74,7 +70,6 @@ typedef enum {
 	HAL_WORKAROUND_OVERRIDE_FCFI_IN_SRB,	/**< FCFI reported in SRB not correct, use "first" registered domain */
 	HAL_WORKAROUND_FW_VERSION_TOO_LOW,	/**< The FW version is not the min version supported by this driver */
 	HAL_WORKAROUND_SGLC_MISREPORTED,	/**< Chip supports SGL Chaining but SGLC is not set in SLI4_PARAMS */
-	HAL_WORKAROUND_IGNORE_SEND_FRAME_CAPABLE,	/**< Don't use SEND_FRAME capable if FW version is too old */
 } hal_workaround_e;
 
 /**
@@ -155,10 +150,6 @@ static hal_workaround_t hal_workarounds[] = {
 	/* Bug 177061, Lancer FW does not set the SGLC bit */
 	{SLI4_ASIC_TYPE_LANCER, SLI4_ASIC_REV_ANY, HAL_FWREV_ZERO, HAL_FWREV_MAX,
 		HAL_WORKAROUND_SGLC_MISREPORTED, 0},
-
-	/* BZ 181208/183914, enable this workaround for ALL revisions */
-	{SLI4_ASIC_TYPE_ANY, SLI4_ASIC_REV_ANY, HAL_FWREV_ZERO, HAL_FWREV_MAX,
-		HAL_WORKAROUND_IGNORE_SEND_FRAME_CAPABLE, 0},
 };
 
 /**
@@ -308,7 +299,7 @@ ocs_hal_workaround_setup(struct ocs_hal_s *hal)
 				 */
 				if (sli_resource_alloc(&hal->sli, SLI_RSRC_FCOE_RPI, &hal->workaround.unregistered_rid,
 					&hal->workaround.unregistered_index)) {
-					ocs_log_err(hal->os, "%s: sli_resource_alloc unregistered RPI failed\n", __func__);
+					ocs_log_err(hal->os, "sli_resource_alloc unregistered RPI failed\n");
 					hal->workaround.use_unregistered_rpi = FALSE;
 				}
 				break;
@@ -340,10 +331,6 @@ ocs_hal_workaround_setup(struct ocs_hal_s *hal)
 			case HAL_WORKAROUND_SGLC_MISREPORTED:
 				ocs_log_debug(hal->os, "HAL Workaround: SGLC misreported - chaining is enabled\n");
 				hal->workaround.sglc_misreported = TRUE;
-				break;
-			case HAL_WORKAROUND_IGNORE_SEND_FRAME_CAPABLE:
-				ocs_log_debug(hal->os, "HAL Workaround: not SEND_FRAME capable - disabled\n");
-				hal->workaround.ignore_send_frame = TRUE;
 				break;
 			} /* switch(w->workaround) */
 		}

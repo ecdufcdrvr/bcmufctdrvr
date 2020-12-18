@@ -41,24 +41,69 @@
 #include "ocs.h"
 #include "ocs_os.h"
 
+extern uint32_t ocs_spdk_master_core;
+
+typedef void (*ocs_spdk_worker_func)(void *func_arg);
+
+typedef enum {
+	OCS_SPDK_WORKER_THREAD_EXIT,
+	OCS_SPDK_WORKER_START_EVENT_PROCESS,
+	OCS_SPDK_WORKER_STOP_EVENT_PROCESS,
+	OCS_SPDK_WORKER_NODE_POST_EVENT,
+} ocs_spdk_worker_msg_t;
+
+struct ocs_spdk_worker_node_post_args {
+	ocs_node_t *node;
+	ocs_sm_event_t event;
+};
+
+typedef struct {
+	ocs_spdk_worker_msg_t msg;
+	bool sync;
+	ocs_sem_t sync_sem;
+
+	/* Async context */
+	ocs_spdk_worker_func func;
+	void *func_arg;
+} ocs_spdk_worker_q_msg_t;
+
+struct ocs_nvme_tgt {
+	ocs_thread_t worker_thr;
+	ocs_mqueue_t worker_msg_q;
+
+	struct spdk_nvmf_fc_hw_port_init_args *args;
+};
+
 int ocs_nvme_nport_offline(ocs_t *ocs);
 int ocs_nvme_nport_online(ocs_t *ocs);
 int ocs_nvme_nport_create(ocs_sport_t *sport);
-int ocs_nvme_nport_delete(ocs_t *ocs);
+int ocs_nvme_nport_delete(ocs_sport_t *sport);
 int ocs_nvme_hw_port_create(ocs_t *ocs);
-void ocs_hw_port_cleanup(ocs_t *ocs);
-int ocs_nvme_process_hw_port_online(ocs_sport_t *sport);
+void ocs_hw_port_cleanup(ocs_t *ocs, struct spdk_nvmf_fc_hw_port_init_args *args);
+int ocs_nvme_hw_port_quiesce(ocs_t *ocs);
+int ocs_nvme_process_hw_port_online(ocs_t *ocs);
 int ocs_nvme_process_hw_port_offline(ocs_t *ocs);
 int ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id);
 int ocs_nvme_process_prlo(ocs_io_t *io, uint16_t ox_id);
 int ocs_nvme_node_lost(ocs_node_t *node);
-int ocs_nvme_process_abts(ocs_t *ocs, uint16_t oxid, uint16_t rxid, uint32_t rpi);
-void ocs_nvme_tgt_del_domain(ocs_domain_t *domain);
-
+int ocs_nvme_process_abts(ocs_node_t *node, uint16_t oxid, uint16_t rxid);
+int ocs_nvme_hw_port_free(ocs_t *ocs);
 int32_t ocs_nvme_tgt_new_sport(ocs_sport_t *sport);
 int32_t ocs_nvme_tgt_del_device(ocs_t *ocs);
 int32_t ocs_nvme_tgt_new_device(ocs_t *ocs);
-void ocs_nvme_tgt_del_domain(ocs_domain_t *domain);
+int32_t ocs_nvme_tgt_del_domain(ocs_domain_t *domain);
 int32_t ocs_nvme_tgt_new_domain(ocs_domain_t *domain);
+int ocs_nvme_new_initiator(ocs_node_t *node);
+int ocs_nvme_del_initiator(ocs_node_t *node);
+int ocs_nvme_tgt_del_sport(ocs_sport_t *sport);
+int ocs_send_msg_to_worker(ocs_t *ocs, ocs_spdk_worker_msg_t msg, bool sync,
+		       ocs_spdk_worker_func func, void *func_arg1);
+
+#ifndef _FIXME_
+#include "nvmf_fc.h"
+struct spdk_nvmf_fc_port *spdk_nvmf_fc_port_lookup(uint8_t port_hdl);
+int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
+int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
+#endif
 
 #endif //__OCS_SPDK_NVMET_H__

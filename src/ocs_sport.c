@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -41,17 +40,20 @@
 #include "ocs_fabric.h"
 #include "ocs_els.h"
 #include "ocs_device.h"
-#include "ocs_spdk_nvmet.h"
 
 static void ocs_vport_update_spec(ocs_sport_t *sport);
 static void ocs_vport_link_down(ocs_sport_t *sport);
+static void _ocs_sport_free(void *arg);
 
 void ocs_mgmt_sport_list(ocs_textbuf_t *textbuf, void *sport);
 void ocs_mgmt_sport_get_all(ocs_textbuf_t *textbuf, void *sport);
 int ocs_mgmt_sport_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *sport);
 int ocs_mgmt_sport_set(char *parent, char *name, char *value, void *sport);
 int ocs_mgmt_sport_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
-		void *arg_out, uint32_t arg_out_length, void *sport);
+			void *arg_out, uint32_t arg_out_length, void *object);
+static int32_t ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args, uint32_t fdmi_cmd_code);
+static void ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data);
+
 static ocs_mgmt_functions_t sport_mgmt_functions = {
 	.get_list_handler = ocs_mgmt_sport_list,
 	.get_handler = ocs_mgmt_sport_get,
@@ -87,31 +89,31 @@ ocs_port_cb(void *arg, ocs_hal_port_event_e event, void *data)
 
 	switch (event) {
 	case OCS_HAL_PORT_ALLOC_OK:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_ALLOC_OK\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_ALLOC_OK\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_ALLOC_OK, NULL);
 		break;
 	case OCS_HAL_PORT_ALLOC_FAIL:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_ALLOC_FAIL\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_ALLOC_FAIL\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_ALLOC_FAIL, NULL);
 		break;
 	case OCS_HAL_PORT_ATTACH_OK:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_ATTACH_OK\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_ATTACH_OK\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_ATTACH_OK, NULL);
 		break;
 	case OCS_HAL_PORT_ATTACH_FAIL:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_ATTACH_FAIL\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_ATTACH_FAIL\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_ATTACH_FAIL, NULL);
 		break;
 	case OCS_HAL_PORT_FREE_OK:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_FREE_OK\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_FREE_OK\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_FREE_OK, NULL);
 		break;
 	case OCS_HAL_PORT_FREE_FAIL:
-		ocs_log_debug(ocs, "%s: OCS_HAL_PORT_FREE_FAIL\n", __func__);
+		ocs_log_debug(ocs, "OCS_HAL_PORT_FREE_FAIL\n");
 		ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_FREE_FAIL, NULL);
 		break;
 	default:
-		ocs_log_test(ocs, "%s: unknown event %#x\n", __func__, event);
+		ocs_log_test(ocs, "unknown event %#x\n", event);
 	}
 
 	return 0;
@@ -136,7 +138,8 @@ ocs_port_cb(void *arg, ocs_hal_port_event_e event, void *data)
  */
 
 ocs_sport_t *
-ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_id, uint8_t enable_ini, uint8_t enable_tgt)
+ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_id, uint8_t enable_ini,
+		uint8_t ini_fc_types, uint8_t enable_tgt, uint8_t tgt_fc_types)
 {
 	ocs_sport_t *sport;
 
@@ -148,13 +151,20 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 	if (wwpn != 0) {
 		sport = ocs_sport_find_wwn(domain, wwnn, wwpn);
 		if (sport != NULL) {
-			ocs_log_test(domain->ocs, "%s: Failed: SPORT %016" PRIx64 " %016" PRIx64 " already allocated\n",
-				__func__, wwnn, wwpn);
+			ocs_log_test(domain->ocs, "SPORT %016" PRIx64 " %016" PRIx64 " already allocated\n", wwnn, wwpn);
+			ocs_domain_lock(domain);
+				if (sport->shutting_down) {
+					sport->re_enable = 1;
+					sport->unreg_rpi_all = 0;
+					ocs_domain_unlock(domain);
+					return sport;
+				}
+			ocs_domain_unlock(domain);
 			return NULL;
 		}
 	}
 
-	sport = ocs_malloc(domain->ocs, sizeof(*sport), OCS_M_NOWAIT | OCS_M_ZERO);
+	sport = ocs_malloc(domain->ocs, sizeof(*sport), OCS_M_ZERO);
 	if (sport) {
 		sport->ocs = domain->ocs;
 		ocs_snprintf(sport->display_name, sizeof(sport->display_name), "------");
@@ -165,8 +175,11 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		ocs_list_init(&sport->node_list, ocs_node_t, link);
 		sport->sm.app = sport;
 		sport->enable_ini = enable_ini;
+		sport->ini_fc_types = ini_fc_types;
 		sport->enable_tgt = enable_tgt;
+		sport->tgt_fc_types = tgt_fc_types;
 		sport->enable_rscn = (sport->enable_ini || (sport->enable_tgt && enable_target_rscn(sport->ocs)));
+		sport->unreg_rpi_all = 0;
 
 		/* Copy service parameters from domain */
 		ocs_memcpy(sport->service_params, domain->service_params, sizeof(fc_plogi_payload_t));
@@ -193,6 +206,7 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		ocs_domain_unlock(domain);
 
 		sport->mgmt_functions = &sport_mgmt_functions;
+		ocs_ref_init(&sport->ref, _ocs_sport_free, sport);
 
 		ocs_log_debug(domain->ocs, "[%s] allocate sport\n", sport->display_name);
 	}
@@ -211,9 +225,10 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
  * @return None.
  */
 
-void
-ocs_sport_free(ocs_sport_t *sport)
+static void
+_ocs_sport_free(void *arg)
 {
+	ocs_sport_t *sport = (ocs_sport_t *)arg;
 	ocs_domain_t *domain;
 	ocs_node_group_dir_t *node_group_dir;
 	ocs_node_group_dir_t *node_group_dir_next;
@@ -264,8 +279,16 @@ ocs_sport_free(ocs_sport_t *sport)
 		ocs_sport_lock_free(sport);
 		ocs_lock_free(&sport->node_group_lock);
 
-		ocs_free(domain->ocs, sport, sizeof(*sport));
+		ocs_free(sport->ocs, sport, sizeof(*sport));
 	}
+}
+
+void
+ocs_sport_free(ocs_sport_t *sport)
+{
+	/* Just put the refcount */
+	ocs_assert(ocs_ref_read_count(&sport->ref) > 0);
+	ocs_ref_put(&sport->ref); /* ocs_ref_get(): ocs_sport_alloc() */
 }
 
 /**
@@ -285,16 +308,15 @@ void ocs_sport_force_free(ocs_sport_t *sport)
 	ocs_node_t *node;
 	ocs_node_t *next;
 
-	/* shutdown sm processing */
-	ocs_sm_disable(&sport->sm);
-
-	ocs_scsi_notify_sport_force_free(sport);
-
 	ocs_sport_lock(sport);
 		ocs_list_foreach_safe(&sport->node_list, node, next) {
 			ocs_node_force_free(node);
 		}
 	ocs_sport_unlock(sport);
+
+	if (sport->is_vport)
+		ocs_vport_link_down(sport);
+
 	ocs_sport_free(sport);
 }
 
@@ -348,8 +370,7 @@ ocs_sport_find(ocs_domain_t *domain, uint32_t d_id)
 	ocs_assert(domain, NULL);
 	ocs_lock(&domain->lookup_lock);
 		if (domain->lookup == NULL) {
-			ocs_log_test(domain->ocs, "%s(%d): assertion failed: domain->lookup is not valid\n",
-				__func__, __LINE__);
+			ocs_log_test(domain->ocs, "domain->lookup is not valid\n");
 			ocs_unlock(&domain->lookup_lock);
 			return NULL;
 		}
@@ -420,11 +441,11 @@ ocs_sport_attach(ocs_sport_t *sport, uint32_t fc_id)
 			ocs_node_update_display_name(node);
 		}
 	ocs_sport_unlock(sport);
-	ocs_log_debug(sport->ocs, "[%s] attach sport: fc_id x%06x\n", sport->display_name, fc_id);
+	ocs_log_info(sport->ocs, "[%s] sport reg vpi: fc_id x%06x\n", sport->display_name, fc_id);
 
 	rc = ocs_hal_port_attach(&sport->ocs->hal, sport, fc_id);
 	if (rc != OCS_HAL_RTN_SUCCESS) {
-		ocs_log_err(sport->ocs, "%s: ocs_hal_port_attach failed: %d\n", __func__, rc);
+		ocs_log_err(sport->ocs, "ocs_hal_port_attach failed: %d\n", rc);
 		return -1;
 	}
 	return 0;
@@ -453,7 +474,7 @@ ocs_sport_attach(ocs_sport_t *sport, uint32_t fc_id)
 #define sport_sm_trace(sport)  \
 	do { \
 		if (OCS_LOG_ENABLE_DOMAIN_SM_TRACE(ocs)) \
-			ocs_log_debug(ocs, "[%s] %-20s %-20s\n", sport->display_name, __func__, ocs_sm_event_name(evt)); \
+			ocs_log_debug(ocs, "[%s] %-20s\n", sport->display_name, ocs_sm_event_name(evt)); \
 	} while (0)
 
 
@@ -483,7 +504,7 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 	case OCS_EVT_ALL_CHILD_NODES_FREE:
 		break;
 	case OCS_EVT_SPORT_ATTACH_OK:
-			ocs_sm_transition(ctx, __ocs_sport_attached, NULL);
+		ocs_sm_transition(ctx, __ocs_sport_attached, NULL);
 		break;
 	case OCS_EVT_SHUTDOWN: {
 		ocs_node_t *node;
@@ -493,9 +514,8 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 		/* Flag this sport as shutting down */
 		sport->shutting_down = 1;
 
-		if (sport->is_vport) {
+		if (sport->is_vport)
 			ocs_vport_link_down(sport);
-		}
 
 		ocs_sport_lock(sport);
 			node_list_empty = ocs_list_empty(&sport->node_list);
@@ -507,36 +527,47 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 			ocs_lock(&domain->lookup_lock);
 				spv_set(domain->lookup, sport->fc_id, NULL);
 			ocs_unlock(&domain->lookup_lock);
+
 			ocs_sm_transition(ctx, __ocs_sport_wait_port_free, NULL);
-			if (ocs_hal_port_free(&ocs->hal, sport)) {
-				ocs_log_test(sport->ocs, "%s: ocs_hal_port_free failed\n", __func__);
-				/* Not much we can do, free the sport anyways */
-				ocs_sport_free(sport);
-			}
+			if (ocs_hal_port_free(&ocs->hal, sport))
+				ocs_log_err(ocs, "ocs_hal_port_free failed\n");
 		} else {
+			bool unreg_rpi_all_now = TRUE;
+
 			//sm: node list is not empty / shutdown nodes
 			ocs_sm_transition(ctx, __ocs_sport_wait_shutdown, NULL);
-			ocs_sport_lock(sport);
+			ocs_device_lock(ocs);
 				ocs_list_foreach_safe(&sport->node_list, node, node_next) {
+
+					/* Issue unreg_rpi_all only if at least one node is active on this particular sport */
+					ocs_node_lock(node);
+					if (node->attached && !node->unreg_rpi) {
+						node->unreg_rpi = 1;
+						sport->unreg_rpi_all = 1;
+					}
+					ocs_node_unlock(node);
+
 					/*
-					 * If this is a vport, logout of the fabric controller so that it
-					 * deletes the vport on the switch.
+					 * If this is a vport, logout of the fabric controller so that it deletes
+					 * the vport on the switch. Also defer unreg_rpi_all till logo completes.
 					 */
-					if((node->rnode.fc_id == FC_ADDR_FABRIC) && (sport->is_vport)) {
-						/* if link is down, don't send logo */
-						if (sport->ocs->hal.link.status == SLI_LINK_STATUS_DOWN) {
+					if (sport->is_vport && node->rnode.fc_id == FC_ADDR_FABRIC) {
+						/* If link is down, don't send logo */
+						if (sport->ocs->hal.link.status == SLI_LINK_STATUS_DOWN ||
+						    sport->ocs->hal.state != OCS_HAL_STATE_ACTIVE) {
 							ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
 						} else {
-							ocs_log_debug(ocs,"[%s] %s: sport shutdown vport,sending logo to node\n",
-								node->display_name, __func__);
-						
+							ocs_log_debug(ocs, "[%s] sport shutdown vport, sending logo to node\n",
+								      node->display_name);
+
 							if (ocs_send_logo(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-								  0, NULL, NULL) == NULL) {
-								/* failed to send LOGO, go ahead and cleanup node anyways */
+									  0, NULL, NULL) == NULL) {
+								/* Failed to send LOGO, go ahead and cleanup node anyways */
 								node_printf(node, "Failed to send LOGO\n");
 								ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 							} else {
-								/* sent LOGO, wait for response */
+								/* Defer unreg_rpi_all till logo of fabric node completes */
+								unreg_rpi_all_now = FALSE;
 								ocs_node_transition(node, __ocs_d_wait_logo_rsp, NULL);
 							}
 						}
@@ -544,7 +575,11 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 						ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
 					}
 				}
-			ocs_sport_unlock(sport);
+
+				if (sport->unreg_rpi_all && unreg_rpi_all_now)
+					ocs_hal_unreg_rpi_all(&ocs->hal, sport);
+
+			ocs_device_unlock(ocs);
 		}
 		break;
 	}
@@ -691,7 +726,7 @@ __ocs_sport_vport_wait_alloc(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (sport->fc_id == UINT32_MAX) {
 			fabric = ocs_node_alloc(sport, FC_ADDR_FABRIC, FALSE, FALSE);
 			if (fabric == NULL) {
-				ocs_log_err(ocs, "%s: ocs_node_alloc() failed\n", __func__);
+				ocs_log_err(ocs, "ocs_node_alloc() failed\n");
 				return NULL;
 			}
 			ocs_node_transition(fabric, __ocs_vport_fabric_init, NULL);
@@ -740,7 +775,7 @@ __ocs_sport_vport_allocated(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			/* Find our fabric node, and forward this event */
 			node = ocs_node_find(sport, FC_ADDR_FABRIC);
 			if (node == NULL) {
-				ocs_log_test(ocs, "%s: can't find node %06x\n", __func__, FC_ADDR_FABRIC);
+				ocs_log_test(ocs, "can't find node %06x\n", FC_ADDR_FABRIC);
 				break;
 			}
 			//sm: / forward sport attach to fabric node
@@ -814,20 +849,9 @@ __ocs_sport_attached(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			}
 		}
 #endif
-
 		break;
 	}
 
-	case OCS_EVT_EXIT:
-		ocs_log_debug(ocs, "[%s] SPORT deattached WWPN %016" PRIx64 " WWNN %016" PRIx64 "\n", sport->display_name,
-			sport->wwpn, sport->wwnn);
-		if (ocs->enable_ini) {
-			ocs_scsi_ini_del_sport(sport);
-		}
-		if (ocs->enable_tgt) {
-			ocs_scsi_tgt_del_sport(sport);
-		}
-		break;
 	default:
 		__ocs_sport_common(__func__, ctx, evt, arg);
 		return NULL;
@@ -870,12 +894,11 @@ __ocs_sport_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_lock(&domain->lookup_lock);
 			spv_set(domain->lookup, sport->fc_id, NULL);
 		ocs_unlock(&domain->lookup_lock);
+
 		ocs_sm_transition(ctx, __ocs_sport_wait_port_free, NULL);
-		if (ocs_hal_port_free(&ocs->hal, sport)) {
-			ocs_log_err(sport->ocs, "%s: ocs_hal_port_free failed\n", __func__);
-			/* Not much we can do, free the sport anyways */
-			ocs_sport_free(sport);
-		}
+		if (ocs_hal_port_free(&ocs->hal, sport))
+			ocs_log_err(ocs, "ocs_hal_port_free failed\n");
+
 		break;
 	}
 	default:
@@ -911,9 +934,29 @@ __ocs_sport_wait_port_free(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		/* Ignore as we are waiting for the free CB */
 		break;
 	case OCS_EVT_SPORT_FREE_OK: {
-		/* All done, free myself */
-		//sm: / ocs_sport_free
-		ocs_sport_free(sport);
+		ocs_domain_lock(sport->domain);
+		if (sport->is_vport && sport->re_enable) {
+			sport->re_enable = 0;
+			sport->fc_id = UINT32_MAX;
+			sport->shutting_down = 0;
+			ocs_domain_unlock(domain);
+			/* Transition to vport_init */
+			ocs_sm_transition(&sport->sm, __ocs_sport_vport_init, NULL);
+		} else {
+			ocs_log_debug(ocs, "[%s] SPORT deattached WWPN %016" PRIx64 " WWNN %016" PRIx64 "\n",
+				      sport->display_name, sport->wwpn, sport->wwnn);
+
+			if (ocs->enable_ini)
+				ocs_scsi_ini_del_sport(sport);
+
+			if (ocs->enable_tgt) {
+				ocs_scsi_tgt_del_sport(sport);
+				ocs_nvme_tgt_del_sport(sport);
+			}
+
+			ocs_domain_unlock(domain);
+			ocs_sport_free(sport);
+		}
 		break;
 	}
 	default:
@@ -955,9 +998,11 @@ ocs_vport_start(ocs_domain_t *domain)
 #endif
 			/* Allocate a sport */
 			vport->sport = sport = ocs_sport_alloc(domain, vport->wwpn, vport->wwnn, vport->fc_id,
-							       vport->enable_ini, vport->enable_tgt);
+							       vport->enable_ini, vport->ini_fc_types, vport->enable_tgt, vport->tgt_fc_types);
 			if (sport == NULL) {
 				rc = -1;
+			} else if (sport->re_enable) {
+				rc = 0;
 			} else {
 				sport->is_vport = 1;
 				sport->tgt_data = vport->tgt_data;
@@ -1030,29 +1075,31 @@ ocs_sport_vport_new(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn,
 	ocs_sport_t *sport;
 
 	if (ini && (domain->ocs->enable_ini == 0)) {
-		ocs_log_test(domain->ocs, "%s: driver initiator functionality not enabled\n", __func__);
+		ocs_log_test(domain->ocs, "driver initiator functionality not enabled\n");
 		return -1;
 	}
 
 	if (tgt && (domain->ocs->enable_tgt == 0)) {
-		ocs_log_test(domain->ocs, "%s: driver target functionality not enabled\n", __func__);
+		ocs_log_test(domain->ocs, "driver target functionality not enabled\n");
 		return -1;
 	}
 
 	/* Create a vport spec if we need to recreate this vport after a link up event */
 	if (restore_vport) {
-		if (ocs_vport_create_spec(domain->ocs, wwnn, wwpn, fc_id, ini, tgt, tgt_data, ini_data)) {
-			ocs_log_test(domain->ocs,"%s: failed to create vport object entry\n",__func__);
+		if (ocs_vport_create_spec(domain->ocs, wwnn, wwpn, fc_id, ini, domain->ocs->ini_fc_types, tgt, domain->ocs->tgt_fc_types, tgt_data, ini_data)) {
+			ocs_log_test(domain->ocs, "failed to create vport object entry\n");
 			return -1;
 		}
 		return ocs_vport_start(domain);
 	}
 
 	/* Allocate a sport */
-	sport = ocs_sport_alloc(domain, wwpn, wwnn, fc_id, ini, tgt);
+	sport = ocs_sport_alloc(domain, wwpn, wwnn, fc_id, ini, domain->ocs->ini_fc_types, tgt, domain->ocs->tgt_fc_types);
 
 	if (sport == NULL) {
 		return -1;
+	} else if (sport->re_enable) {
+		return 0;
 	}
 
 	sport->is_vport = 1;
@@ -1081,7 +1128,7 @@ ocs_sport_vport_new(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn,
  * @return Returns 0 on success, or a negative error value on failure.
  */
 
-int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn)
+int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint8_t delete_vport)
 {
 	ocs_xport_t *xport = ocs->xport;
 	ocs_sport_t *sport;
@@ -1097,8 +1144,9 @@ int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uin
 		instance = domain->instance_index;
 	}
 
-	/* walk the ocs_vport_list and remove from there */
-	ocs_device_lock(ocs);
+	if (delete_vport) {
+		/* walk the ocs_vport_list and remove from there */
+		ocs_device_lock(ocs);
 		ocs_list_foreach_safe(&xport->vport_list, vport, next) {
 			if ((vport->domain_instance == instance) &&
 				(vport->wwpn == wwpn) && (vport->wwnn == wwnn)) {
@@ -1107,7 +1155,8 @@ int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uin
 				break;
 			}
 		}
-	ocs_device_unlock(ocs);
+		ocs_device_unlock(ocs);
+	}
 
 	if (domain == NULL) {
 		// No domain means no sport to look for
@@ -1414,30 +1463,184 @@ ocs_mgmt_sport_set(char *parent, char *name, char *value, void *object)
 	return retval;
 }
 
+typedef struct ocs_fdmi_get_cmd_results_s {
+	ocs_lock_t cb_lock;
+	int32_t status;
+	ocs_atomic_t refcnt;
+	uint16_t fdmi_cmd_code;
+	void *fdmi_get_cmd_rsp_buf;
+	size_t fdmi_get_cmd_rsp_buf_len;
+	ocs_sport_exec_arg_t *sport_exec_args;
+} ocs_fdmi_get_cmd_results_t;
+
+static void
+ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
+{
+	ocs_fdmi_get_cmd_results_t *result = cb_data;
+	ocs_sport_exec_arg_t *sport_exec_args;
+	ocs_t *ocs = node->ocs;
+	int rc = 0;
+
+	if (result) {
+		sport_exec_args = result->sport_exec_args;
+
+		switch (result->fdmi_cmd_code) {
+		case FC_GS_FDMI_GRHL:
+			rc = ocs_process_fdmi_grhl_payload(node, node_data->els->els_info->els_rsp.virt,
+					node_data->els->els_info->els_rsp.len, result->fdmi_get_cmd_rsp_buf);
+			break;
+		case FC_GS_FDMI_GRPL:
+			rc = ocs_process_fdmi_grpl_payload(node, node_data->els->els_info->els_rsp.virt,
+					node_data->els->els_info->els_rsp.len, result->fdmi_get_cmd_rsp_buf);
+			break;
+		case FC_GS_FDMI_GHAT:
+			rc = ocs_process_fdmi_ghat_payload(node, node_data->els->els_info->els_rsp.virt,
+					node_data->els->els_info->els_rsp.len, result->fdmi_get_cmd_rsp_buf);
+			break;
+		case FC_GS_FDMI_GPAT:
+			rc = ocs_process_fdmi_gpat_payload(node, node_data->els->els_info->els_rsp.virt,
+					node_data->els->els_info->els_rsp.len, result->fdmi_get_cmd_rsp_buf);
+			break;
+		default:
+			rc = -EINVAL;
+			ocs_log_err(ocs, "Unsupported FDMI command code(0x%x)\n", result->fdmi_cmd_code);
+		}
+
+		if (rc) {
+			ocs_log_err(ocs, "failed to process FDMI response payload\n");
+			sport_exec_args->retval = rc;
+		}
+
+		if (sport_exec_args) {
+			if (!ocs_memcpy((uint8_t *)sport_exec_args->arg_out, (uint8_t *)result->fdmi_get_cmd_rsp_buf,
+					MIN(sport_exec_args->arg_out_length, result->fdmi_get_cmd_rsp_buf_len))) {
+				ocs_log_err(ocs, "Failed to copy resp to user buffer\n");
+				sport_exec_args->retval = -EFAULT;
+			}
+			sport_exec_args->exec_cb(node->sport, sport_exec_args);
+		}
+		ocs_free(ocs, result->fdmi_get_cmd_rsp_buf, result->fdmi_get_cmd_rsp_buf_len);
+		ocs_free(ocs, result, sizeof(*result));
+	}
+}
+
+/**
+ * @brief send FDMI get command.
+ *
+ * @param sport : Pointer to sport
+ * @param sport_exec_args: sport exec arguments
+ * @param fdmi_cmd_code: FDMI command code
+ * @return Returns 0 on success, or a negative value on failure.
+ */
+static int32_t
+ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args, uint32_t fdmi_cmd_code)
+{
+	int rc = 0;
+	ocs_fdmi_get_cmd_results_t *result = NULL;
+	ocs_fdmi_get_cmd_req_info_t fdmi_cmd_req;
+	ocs_t *ocs = sport->ocs;
+	uint64_t identifier = 0;
+	void *wwpn = sport_exec_args->arg_in;
+
+	if ((fdmi_cmd_code != FC_GS_FDMI_GRHL) && !wwpn) {
+		ocs_log_err(ocs, "Error: Please provide WWPN as input\n");
+		return -EFAULT;
+	}
+
+	result = ocs_malloc(ocs, sizeof(*result), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (result == NULL) {
+		ocs_log_err(ocs, "failed to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	result->sport_exec_args = sport_exec_args;
+	switch (fdmi_cmd_code) {
+	case FC_GS_FDMI_GRHL:
+		result->fdmi_get_cmd_rsp_buf_len = sizeof(ocs_fdmi_hba_list_info_t);
+		fdmi_cmd_req.ct_cmd_req_size = sizeof(fcct_fdmi_grhl_req_t);
+		break;
+	case FC_GS_FDMI_GRPL:
+		parse_wwn((char *)wwpn, &identifier);
+		result->fdmi_get_cmd_rsp_buf_len = sizeof(ocs_fdmi_port_list_info_t);
+		fdmi_cmd_req.ct_cmd_req_size = sizeof(fcct_fdmi_grpl_req_t);
+		break;
+	case FC_GS_FDMI_GHAT:
+		parse_wwn((char *)wwpn, &identifier);
+		result->fdmi_get_cmd_rsp_buf_len = sizeof(ocs_fdmi_hba_attr_info_t);
+		fdmi_cmd_req.ct_cmd_req_size = sizeof(fcct_fdmi_ghat_req_t);
+		break;
+	case FC_GS_FDMI_GPAT:
+		parse_wwn((char *)wwpn, &identifier);
+		result->fdmi_get_cmd_rsp_buf_len = sizeof(ocs_fdmi_port_attr_info_t);
+		fdmi_cmd_req.ct_cmd_req_size = sizeof(fcct_fdmi_gpat_req_t);
+		break;
+	default:
+		ocs_log_err(ocs, "Unsupported FDMI cmd code: 0x%x\n", fdmi_cmd_code);
+		ocs_free(ocs, result, sizeof(*result));
+		return -EFAULT;
+	}
+	/* Allocate memory to hold FDMI command response */
+	result->fdmi_get_cmd_rsp_buf = ocs_malloc(ocs, result->fdmi_get_cmd_rsp_buf_len,
+			      OCS_M_ZERO | OCS_M_NOWAIT);
+	if (result->fdmi_get_cmd_rsp_buf == NULL) {
+		ocs_log_err(ocs, "failed to allocate memory for fdmi_get_cmd_rsp_buf\n");
+		ocs_free(ocs, result, sizeof(*result));
+		return -ENOMEM;
+	}
+
+	result->fdmi_cmd_code = fdmi_cmd_code;
+
+	fdmi_cmd_req.cmd_code = fdmi_cmd_code;
+	fdmi_cmd_req.identifier = identifier;
+
+	rc = ocs_fdmi_get_cmd(sport, ocs_fdmi_get_cmd_cb, result, &fdmi_cmd_req);
+	if (rc) {
+		ocs_log_err(ocs, "Failed to submit FDMI get cmd(0x%x) ELS IO\n", fdmi_cmd_code);
+		ocs_free(ocs, result->fdmi_get_cmd_rsp_buf, result->fdmi_get_cmd_rsp_buf_len);
+		ocs_free(ocs, result, sizeof(*result));
+		return -EFAULT;
+	}
+
+	return rc;
+}
+
+void ocs_mgmt_sport_exec_cb(ocs_sport_t *sport, void *arg_in)
+{
+	ocs_sport_exec_arg_t *sport_exec_args = arg_in;
+
+	if (sport_exec_args) {
+		ocs_domain_exec_arg_t *domain_exec_args = sport_exec_args->domain_exec_args;
+		domain_exec_args->retval = sport_exec_args->retval;
+		domain_exec_args->exec_cb(sport->domain, domain_exec_args);
+	}
+}
 
 int
 ocs_mgmt_sport_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
-		    void *arg_out, uint32_t arg_out_length, void *object)
+			void *arg_out, uint32_t arg_out_length, void *object)
 {
 	ocs_node_t *node;
 	ocs_sport_t *sport = (ocs_sport_t *)object;
+	ocs_sport_exec_arg_t *sport_exec_args = arg_in;
 	char qualifier[80];
-	int retval = -1;
+	int retval = -EOPNOTSUPP;
 
-	snprintf(qualifier, sizeof(qualifier), "%s.sport%d", parent, sport->instance_index);
+	snprintf(qualifier, sizeof(qualifier), "%s/sport[%d]", parent, sport->instance_index);
 
 	/* If it doesn't start with my qualifier I don't know what to do with it */
 	if (ocs_strncmp(action, qualifier, strlen(qualifier)) == 0) {
-		// char *unqualified_name = name + strlen(qualifier) +1;
+		char *unqualified_name = action + strlen(qualifier) + 1;
 
 		/* See if it's an action I can perform */
-
-		/* if (ocs_strcmp ....
-		 * {
-		 * } else
-		 */
-
-		{
+		if (ocs_strcmp(unqualified_name, "get_fdmi_hba_list") == 0) {
+			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GRHL);
+		} else if (ocs_strcmp(unqualified_name, "get_fdmi_hba_info") == 0) {
+			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GHAT);
+		} else if (ocs_strcmp(unqualified_name, "get_fdmi_port_list") == 0) {
+			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GRPL);
+		} else if (ocs_strcmp(unqualified_name, "get_fdmi_port_info") == 0) {
+			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GPAT);
+		} else {
 			/* If I didn't know how to do this action pass the request to each of my children */
 			ocs_sport_lock(sport);
 				ocs_list_foreach(&sport->node_list, node) {
@@ -1509,24 +1712,23 @@ ocs_vport_update_spec(ocs_sport_t *sport)
  */
 
 int8_t 
-ocs_vport_create_spec(ocs_t *ocs, uint64_t wwnn, uint64_t wwpn, uint32_t fc_id, uint32_t enable_ini, uint32_t enable_tgt, void *tgt_data, void *ini_data)
+ocs_vport_create_spec(ocs_t *ocs, uint64_t wwnn, uint64_t wwpn, uint32_t fc_id, uint32_t enable_ini, uint32_t ini_fc_types, uint32_t enable_tgt, uint32_t tgt_fc_types, void *tgt_data, void *ini_data)
 {
 	ocs_xport_t *xport = ocs->xport;
 	ocs_vport_spec_t *vport;
 
-	/* walk the ocs_vport_list and return failure if vport entry 
+	/* walk the ocs_vport_list and return failure if a valid(vport with non zero WWPN and WWNN) vport entry 
 	   is already created */
 	ocs_list_foreach(&xport->vport_list, vport) {
-		if ((vport->wwpn == wwpn) && (vport->wwnn == wwnn)) {
-			ocs_log_test(ocs, "%s: Failed: VPORT %016" PRIx64 " %016" PRIx64 " already allocated\n",
-				__func__, wwnn, wwpn);
+		if ((wwpn && (vport->wwpn == wwpn)) && (wwnn && (vport->wwnn == wwnn))) {
+			ocs_log_test(ocs, "Failed: VPORT %016" PRIx64 " %016" PRIx64 " already allocated\n", wwnn, wwpn);
 			return -1;
 		}
 	}
-			
-	vport = ocs_malloc(ocs, sizeof(*vport), OCS_M_ZERO | OCS_M_NOWAIT);
+
+	vport = ocs_malloc(ocs, sizeof(*vport), OCS_M_ZERO);
 	if (vport == NULL) {
-		ocs_log_err(ocs, "%s: ocs_malloc failed\n", __func__);
+		ocs_log_err(ocs, "ocs_malloc failed\n");
 		return -1;
 	}
 
@@ -1536,6 +1738,8 @@ ocs_vport_create_spec(ocs_t *ocs, uint64_t wwnn, uint64_t wwpn, uint32_t fc_id, 
 	vport->domain_instance = 0;	//TODO: may need to change this
 	vport->enable_tgt = enable_tgt;
 	vport->enable_ini = enable_ini;
+	vport->ini_fc_types = ini_fc_types;
+	vport->tgt_fc_types = tgt_fc_types;
 	vport->tgt_data = tgt_data;
 	vport->ini_data = ini_data;
 
@@ -1640,7 +1844,7 @@ ocs_node_group_dir_alloc(ocs_sport_t *sport, uint8_t *sparms)
 {
 	ocs_node_group_dir_t *node_group_dir;
 
-	node_group_dir = ocs_malloc(sport->ocs, sizeof(*node_group_dir), OCS_M_ZERO | OCS_M_NOWAIT);
+	node_group_dir = ocs_malloc(sport->ocs, sizeof(*node_group_dir), OCS_M_ZERO);
 	if (node_group_dir != NULL) {
 		node_group_dir->sport = sport;
 
@@ -1748,32 +1952,29 @@ ocs_remote_node_group_alloc(ocs_node_group_dir_t *node_group_dir)
 	ocs = sport->ocs;
 
 
-	node_group = ocs_malloc(ocs, sizeof(*node_group), OCS_M_ZERO | OCS_M_NOWAIT);
+	node_group = ocs_malloc(ocs, sizeof(*node_group), OCS_M_ZERO);
 	if (node_group != NULL) {
 
 		/* set pointer to node group directory */
 		node_group->node_group_dir = node_group_dir;
 
-		ocs_lock(&node_group_dir->sport->node_group_lock);
-			node_group->instance_index = sport->node_group_next_instance++;
-		ocs_unlock(&node_group_dir->sport->node_group_lock);
-
 		/* invoke HAL node group inialization */
 		hrc = ocs_hal_node_group_alloc(&ocs->hal, node_group);
 		if (hrc != OCS_HAL_RTN_SUCCESS) {
-			ocs_log_err(ocs, "%s: ocs_hal_node_group_alloc() failed: %d\n", __func__, hrc);
+			ocs_log_err(ocs, "ocs_hal_node_group_alloc() failed: %d\n", hrc);
 			ocs_free(ocs, node_group, sizeof(*node_group));
 			return NULL;
 		}
 
-		ocs_log_debug(ocs, "[%s] [%d] indicator x%03x allocating node group\n", sport->display_name,
-			node_group->indicator, node_group->instance_index);
-
-			/* add to the node group directory entry node group list */
+		/* add to the node group directory entry node group list */
 		ocs_lock(&node_group_dir->sport->node_group_lock);
+			node_group->instance_index = sport->node_group_next_instance++;
 			ocs_list_add_tail(&node_group_dir->node_group_list, node_group);
 			node_group_dir->node_group_list_count ++;
 		ocs_unlock(&node_group_dir->sport->node_group_lock);
+
+		ocs_log_debug(ocs, "[%s] [%d] indicator x%03x allocating node group\n", sport->display_name,
+			      node_group->indicator, node_group->instance_index);
 	}
 	return node_group;
 }
@@ -1793,19 +1994,22 @@ ocs_remote_node_group_alloc(ocs_node_group_dir_t *node_group_dir)
 void
 ocs_remote_node_group_free(ocs_remote_node_group_t *node_group)
 {
+	ocs_t *ocs;
 	ocs_sport_t *sport;
 	ocs_node_group_dir_t *node_group_dir;
 
 	if (node_group != NULL) {
-
-		ocs_assert(node_group->node_group_dir);
-		ocs_assert(node_group->node_group_dir->sport);
-		ocs_assert(node_group->node_group_dir->sport->ocs);
-
 		node_group_dir = node_group->node_group_dir;
-		sport = node_group_dir->sport;
+		ocs_assert(node_group->node_group_dir);
 
-		ocs_log_debug(sport->ocs, "[%s] [%d] freeing node group\n", sport->display_name, node_group->instance_index);
+		sport = node_group_dir->sport;
+		ocs_assert(sport);
+
+		ocs = sport->ocs;
+		ocs_assert(ocs);
+
+		ocs_log_debug(ocs, "[%s] [%d] indicator x%03x freeing node group\n",
+			      sport->display_name, node_group->indicator, node_group->instance_index);
 
 		/* Remove from node group directory node group list */
 		ocs_lock(&sport->node_group_lock);
@@ -1861,7 +2065,7 @@ ocs_node_group_init(ocs_node_t *node)
 			/* node group directory allocation failed ... can't continue, however,
 			 * the node will be allocated with a normal (not shared) RPI
 			 */
-			ocs_log_err(ocs, "%s: ocs_node_group_dir_alloc() failed\n", __func__);
+			ocs_log_err(ocs, "ocs_node_group_dir_alloc() failed\n");
 			return -1;
 		}
 	}
@@ -1874,7 +2078,7 @@ ocs_node_group_init(ocs_node_t *node)
 			ocs_unlock(&node->sport->node_group_lock);
 				node_group = ocs_remote_node_group_alloc(node_group_dir);
 			if (node_group == NULL) {
-				ocs_log_err(ocs, "%s: ocs_remote_node_group_alloc() failed\n", __func__);
+				ocs_log_err(ocs, "ocs_remote_node_group_alloc() failed\n");
 				return -1;
 			}
 			ocs_lock(&node->sport->node_group_lock);
@@ -1883,8 +2087,7 @@ ocs_node_group_init(ocs_node_t *node)
 
 			ocs_list_foreach(&node_group_dir->node_group_list, node_group) {
 				if (idx >= ocs->hlm_group_size) {
-					ocs_log_err(node->ocs, "%s(%d): assertion failed: idx >= ocs->hlm_group_size\n",
-						__func__, __LINE__);
+					ocs_log_err(node->ocs, "idx >= ocs->hlm_group_size\n");
 					ocs_unlock(&node->sport->node_group_lock);
 					return -1;
 				}
@@ -1911,5 +2114,3 @@ ocs_node_group_init(ocs_node_t *node)
 
 	return (hrc == OCS_HAL_RTN_SUCCESS) ? 0 : -1;
 }
-
-

@@ -1,34 +1,33 @@
 /*
- *  BSD LICENSE
+ * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -60,6 +59,7 @@ extern const sli4_reg_t regmap[SLI4_REG_MAX][SLI4_MAX_IF_TYPES];
  * @param qmem DMA memory for the queue.
  * @param cq_id Associated CQ_ID.
  * @param ulp The ULP to bind
+ * @param ignored Ignored (Used for consistency among queue creation functions)
  *
  * @note This creates a Version 0 message.
  *
@@ -67,31 +67,30 @@ extern const sli4_reg_t regmap[SLI4_REG_MAX][SLI4_MAX_IF_TYPES];
  */
 int32_t
 sli_cmd_fcoe_wq_create(sli4_t *sli4, void *buf, size_t size,
-		       ocs_dma_t *qmem, uint16_t cq_id, uint16_t ulp)
+		       ocs_dma_t *qmem, uint16_t cq_id, uint16_t ulp, bool ignored)
 {
 	sli4_req_fcoe_wq_create_t	*wq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_fcoe_wq_create_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_fcoe_wq_create_t),
 				sizeof(sli4_res_common_create_queue_t));
-
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	wq = (sli4_req_fcoe_wq_create_t *)((uint8_t *)buf + sli_config_off);
 
 	wq->hdr.opcode = SLI4_OPC_FCOE_WQ_CREATE;
 	wq->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
-	wq->hdr.request_length = sizeof(sli4_req_fcoe_wq_create_t) -
-					sizeof(sli4_req_hdr_t);
+	wq->hdr.request_length = sizeof(sli4_req_fcoe_wq_create_t) - sizeof(sli4_req_hdr_t);
+
 	/* valid values for number of pages: 1-4 (sec 4.5.1) */
-	wq->num_pages = sli_page_count(qmem->size, SLI_PAGE_SIZE);
+	wq->num_pages = sli_page_count(qmem_size, qpage_size);
 	if (!wq->num_pages || (wq->num_pages > SLI4_FCOE_WQ_CREATE_V0_MAX_PAGES)) {
 		return 0;
 	}
@@ -104,9 +103,8 @@ sli_cmd_fcoe_wq_create(sli4_t *sli4, void *buf, size_t size,
 		wq->ulp = ulp;
 	}
 
-	for (p = 0, addr = qmem->phys;
-			p < wq->num_pages;
-			p++, addr += SLI_PAGE_SIZE) {
+	for (p = 0; p < wq->num_pages; p++) {
+		addr = qmem[p].phys;
 		wq->page_physical_address[p].low  = ocs_addr32_lo(addr);
 		wq->page_physical_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -124,89 +122,60 @@ sli_cmd_fcoe_wq_create(sli4_t *sli4, void *buf, size_t size,
  * @param qmem DMA memory for the queue.
  * @param cq_id Associated CQ_ID.
  * @param ignored This parameter carries the ULP for WQ (ignored for V1)
-
+ * @param sfq WQ for Send Frames
  *
  * @return Returns the number of bytes written.
  */
 int32_t
 sli_cmd_fcoe_wq_create_v1(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *qmem,
-			  uint16_t cq_id, uint16_t ignored)
+			  uint16_t cq_id, uint16_t ignored, bool sfq)
 {
 	sli4_req_fcoe_wq_create_v1_t	*wq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
-	uint32_t	page_size = 0;
-	uint32_t	page_bytes = 0;
-	uint32_t	n_wqe = 0;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_fcoe_wq_create_v1_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_fcoe_wq_create_v1_t),
 				sizeof(sli4_res_common_create_queue_t));
 
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	wq = (sli4_req_fcoe_wq_create_v1_t *)((uint8_t *)buf + sli_config_off);
 
 	wq->hdr.opcode = SLI4_OPC_FCOE_WQ_CREATE;
 	wq->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
-	wq->hdr.request_length = sizeof(sli4_req_fcoe_wq_create_v1_t) -
-					sizeof(sli4_req_hdr_t);
+	wq->hdr.request_length = sizeof(sli4_req_fcoe_wq_create_v1_t) - sizeof(sli4_req_hdr_t);
 	wq->hdr.version = 1;
 
-	n_wqe = qmem->size / sli4->config.wqe_size;
-
-	// This heuristic to determine the page size is simplistic but could be made more
-	// sophisticated
-	switch (qmem->size) {
-	case 4096:
-	case 8192:
-	case 16384:
-	case 32768:
-		page_size = 0x1;
-		break;
-	case 65536:
-		page_size = 0x2;
-		break;
-	case 131072:
-		page_size = 0x4;
-		break;
-	case 262144:
-		page_size = 0x8;
-		break;
-	case 524288:
-		page_size = 0x10;
-		break;
-	default:
-		return 0;
-	}
-	page_bytes = page_size * SLI_PAGE_SIZE;
-
 	/* valid values for number of pages: 1-8 */
-	wq->num_pages = sli_page_count(qmem->size, page_bytes);
+	wq->num_pages = sli_page_count(qmem_size, qpage_size);
 	if (!wq->num_pages || (wq->num_pages > SLI4_FCOE_WQ_CREATE_V1_MAX_PAGES)) {
 		return 0;
 	}
 
 	wq->cq_id = cq_id;
 
-	wq->page_size = page_size;
+	/* Fill the page_size_multiplier */
+	wq->page_size = (qpage_size / SLI_PAGE_SIZE);
 
-	if (sli4->config.wqe_size == SLI4_WQE_EXT_BYTES) {
+	if (sli4->config.wqe_size == SLI4_WQE_EXT_BYTES)
 		wq->wqe_size = SLI4_WQE_EXT_SIZE;
-	} else {
+	else
 		wq->wqe_size = SLI4_WQE_SIZE;
-	}
 
-	wq->wqe_count = n_wqe;
+	if (sli4->config.dpp)
+		wq->dpp = 1;
 
-	for (p = 0, addr = qmem->phys;
-			p < wq->num_pages;
-			p++, addr += page_bytes) {
+	wq->sfq = sfq;
+	wq->wqe_count = (qmem_size / sli4->config.wqe_size);
+
+	for (p = 0; p < wq->num_pages; p++) {
+		addr = qmem[p].phys;
 		wq->page_physical_address[p].low  = ocs_addr32_lo(addr);
 		wq->page_physical_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -282,8 +251,9 @@ sli_cmd_fcoe_post_sgl_pages(sli4_t *sli4, void *buf, size_t size,
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_fcoe_post_sgl_pages_t),
-				sizeof(sli4_res_hdr_t));
+		payload_size = max(sizeof(sli4_req_fcoe_post_sgl_pages_t) +
+				   xri_count*sizeof(sli4_fcoe_post_sgl_page_desc_t),
+				   sizeof(sli4_res_hdr_t));
 
 		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
 				dma);
@@ -308,14 +278,14 @@ sli_cmd_fcoe_post_sgl_pages(sli4_t *sli4, void *buf, size_t size,
 	post->xri_count = xri_count;
 
 	for (i = 0; i < xri_count; i++) {
-		post->page_set[i].page0_low  = ocs_addr32_lo(page0[i]->phys);
-		post->page_set[i].page0_high = ocs_addr32_hi(page0[i]->phys);
+		post->page_desc[i].page0_low  = ocs_addr32_lo(page0[i]->phys);
+		post->page_desc[i].page0_high = ocs_addr32_hi(page0[i]->phys);
 	}
 
 	if (page1) {
 		for (i = 0; i < xri_count; i++) {
-			post->page_set[i].page1_low  = ocs_addr32_lo(page1[i]->phys);
-			post->page_set[i].page1_high = ocs_addr32_hi(page1[i]->phys);
+			post->page_desc[i].page1_low  = ocs_addr32_lo(page1[i]->phys);
+			post->page_desc[i].page1_high = ocs_addr32_hi(page1[i]->phys);
 		}
 	}
 
@@ -343,28 +313,28 @@ sli_cmd_fcoe_rq_create(sli4_t *sli4, void *buf, size_t size,
 		ocs_dma_t *qmem, uint16_t cq_id, uint16_t ulp, uint16_t buffer_size)
 {
 	sli4_req_fcoe_rq_create_t	*rq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
+	uint32_t	p, sli_config_off = 0;
 	uintptr_t	addr;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_fcoe_rq_create_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_fcoe_rq_create_t),
 				sizeof(sli4_res_common_create_queue_t));
 
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	rq = (sli4_req_fcoe_rq_create_t *)((uint8_t *)buf + sli_config_off);
 
 	rq->hdr.opcode = SLI4_OPC_FCOE_RQ_CREATE;
 	rq->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
-	rq->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_t) -
-					sizeof(sli4_req_hdr_t);
+	rq->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_t) - sizeof(sli4_req_hdr_t);
+
 	/* valid values for number of pages: 1-8 (sec 4.5.6) */
-	rq->num_pages = sli_page_count(qmem->size, SLI_PAGE_SIZE);
+	rq->num_pages = sli_page_count(qmem_size, qpage_size);
 	if (!rq->num_pages || (rq->num_pages > SLI4_FCOE_RQ_CREATE_V0_MAX_PAGES)) {
 		ocs_log_test(sli4->os, "num_pages %d not valid\n", rq->num_pages);
 		return 0;
@@ -373,7 +343,7 @@ sli_cmd_fcoe_rq_create(sli4_t *sli4, void *buf, size_t size,
 	/*
 	 * RQE count is the log base 2 of the total number of entries
 	 */
-	rq->rqe_count = ocs_lg2(qmem->size / SLI4_FCOE_RQE_SIZE);
+	rq->rqe_count = ocs_lg2(qmem_size / SLI4_FCOE_RQE_SIZE);
 
 	if ((buffer_size < SLI4_FCOE_RQ_CREATE_V0_MIN_BUF_SIZE) ||
 			(buffer_size > SLI4_FCOE_RQ_CREATE_V0_MAX_BUF_SIZE)) {
@@ -393,9 +363,8 @@ sli_cmd_fcoe_rq_create(sli4_t *sli4, void *buf, size_t size,
 		rq->ulp = ulp;
 	}
 
-	for (p = 0, addr = qmem->phys;
-			p < rq->num_pages;
-			p++, addr += SLI_PAGE_SIZE) {
+	for (p = 0; p < rq->num_pages; p++) {
+		addr = qmem[p].phys;
 		rq->page_physical_address[p].low  = ocs_addr32_lo(addr);
 		rq->page_physical_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -421,51 +390,47 @@ sli_cmd_fcoe_rq_create(sli4_t *sli4, void *buf, size_t size,
  */
 int32_t
 sli_cmd_fcoe_rq_create_v1(sli4_t *sli4, void *buf, size_t size,
-			  ocs_dma_t *qmem, uint16_t cq_id, uint16_t ulp,
-			  uint16_t buffer_size)
+		ocs_dma_t *qmem, uint16_t cq_id, uint16_t ulp, uint16_t buffer_size)
 {
 	sli4_req_fcoe_rq_create_v1_t	*rq = NULL;
-	uint32_t	sli_config_off = 0;
-	uint32_t	p;
 	uintptr_t	addr;
+	uint32_t	p, sli_config_off = 0;
+	size_t		qmem_size = sli_get_qmem_size(qmem);
+	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
 
 		/* Payload length must accomodate both request and response */
-		payload_size = max(sizeof(sli4_req_fcoe_rq_create_v1_t),
+		payload_size = OCS_MAX(sizeof(sli4_req_fcoe_rq_create_v1_t),
 				sizeof(sli4_res_common_create_queue_t));
 
-		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size,
-				NULL);
+		sli_config_off = sli_cmd_sli_config(sli4, buf, size, payload_size, NULL);
 	}
 	rq = (sli4_req_fcoe_rq_create_v1_t *)((uint8_t *)buf + sli_config_off);
 
 	rq->hdr.opcode = SLI4_OPC_FCOE_RQ_CREATE;
 	rq->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
-	rq->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_v1_t) -
-					sizeof(sli4_req_hdr_t);
+	rq->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_v1_t) - sizeof(sli4_req_hdr_t);
 	rq->hdr.version = 1;
 
-	/* Disable "no buffer warnings" to avoid Lancer bug */
-	rq->dnb = TRUE;
-
 	/* valid values for number of pages: 1-8 (sec 4.5.6) */
-	rq->num_pages = sli_page_count(qmem->size, SLI_PAGE_SIZE);
+	rq->num_pages = sli_page_count(qmem_size, qpage_size);
 	if (!rq->num_pages || (rq->num_pages > SLI4_FCOE_RQ_CREATE_V1_MAX_PAGES)) {
 		ocs_log_test(sli4->os, "num_pages %d not valid, max %d\n",
-                rq->num_pages, SLI4_FCOE_RQ_CREATE_V1_MAX_PAGES);
+				rq->num_pages, SLI4_FCOE_RQ_CREATE_V1_MAX_PAGES);
 		return 0;
 	}
 
 	/*
 	 * RQE count is the total number of entries (note not lg2(# entries))
 	 */
-	rq->rqe_count = qmem->size / SLI4_FCOE_RQE_SIZE;
+	rq->rqe_count = (qmem_size / SLI4_FCOE_RQE_SIZE);
 
 	rq->rqe_size = SLI4_FCOE_RQE_SIZE_8;
 
-	rq->page_size = SLI4_FCOE_RQ_PAGE_SIZE_4096;
+	/* Fill the page_size_multiplier */
+	rq->page_size = qpage_size / SLI_PAGE_SIZE;
 
 	if ((buffer_size < sli4->config.rq_min_buf_size) ||
 	    (buffer_size > sli4->config.rq_max_buf_size)) {
@@ -479,9 +444,8 @@ sli_cmd_fcoe_rq_create_v1(sli4_t *sli4, void *buf, size_t size,
 
 	rq->cq_id = cq_id;
 
-	for (p = 0, addr = qmem->phys;
-			p < rq->num_pages;
-			p++, addr += SLI_PAGE_SIZE) {
+	for (p = 0; p < rq->num_pages; p++) {
+		addr = qmem[p].phys;
 		rq->page_physical_address[p].low  = ocs_addr32_lo(addr);
 		rq->page_physical_address[p].high = ocs_addr32_hi(addr);
 	}
@@ -863,6 +827,16 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 		els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
 		els->context_tag = rnode->sport->indicator;
 		break;
+	case FC_ELS_CMD_AUTH:
+		els->els_id = SLI4_ELS_REQUEST64_OTHER;
+		if (rnode->fc_id == FC_ADDR_FABRIC) {
+			els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
+			els->context_tag = rnode->sport->indicator;
+			is_fabric = TRUE;
+		} else {
+			/* TODO RPI: not used yet */
+		}
+		break;
 	default:
 		els->els_id = SLI4_ELS_REQUEST64_OTHER;
 		if (rnode->attached) {
@@ -922,8 +896,7 @@ sli_fcp_icmnd64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl,
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1004,8 +977,7 @@ sli_fcp_iread64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1106,8 +1078,7 @@ sli_fcp_iwrite64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint3
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1204,16 +1175,18 @@ int32_t
 sli_fcp_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32_t first_data_sge,
 		       uint32_t relative_off, uint32_t xfer_len, uint16_t xri, uint16_t tag, uint16_t cq_id,
 		       uint16_t xid, uint32_t rpi, ocs_remote_node_t *rnode, uint32_t flags, uint8_t dif, uint8_t bs,
-		       uint8_t csctl)
+		       uint8_t csctl, uint32_t app_id, uint8_t timer)
 {
 	sli4_fcp_treceive64_wqe_t *trecv = buf;
+	sli4_fcp_128byte_wqe_t *trecv_128 = buf;
 	sli4_sge_t	*sge = NULL;
+	bool iftype_g7 = (SLI4_IF_TYPE_LANCER_G7 == sli4->if_type) ? true : false;
+	bool disable_pbde = true; /* BZ 217434: Disable pbde use till we have a proper fix to work around prism asic issue */
 
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1221,14 +1194,23 @@ sli_fcp_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uin
 	if (sli4->config.sgl_pre_registered) {
 		trecv->xbl = FALSE;
 
-		trecv->dbde = TRUE;
-		trecv->bde.bde_type = SLI4_BDE_TYPE_BDE_64;
+		if (!dif && !disable_pbde && iftype_g7 && (xfer_len <= sge[2].buffer_length) && (!relative_off)) {
+			/* For single bde, use the pbde optimization to get the latency benefit with G7 */
+			trecv->pbde = true;
+			trecv->first_data_bde.bde_type = SLI4_BDE_TYPE_BDE_64;
+			trecv->first_data_bde.buffer_length = sge[2].buffer_length;
+			trecv->first_data_bde.u.data.buffer_address_low = sge[2].buffer_address_low;
+			trecv->first_data_bde.u.data.buffer_address_high = sge[2].buffer_address_high;
+		} else {
+			trecv->dbde = TRUE;
+			trecv->bde.bde_type = SLI4_BDE_TYPE_BDE_64;
 
-		trecv->bde.buffer_length = sge[0].buffer_length;
-		trecv->bde.u.data.buffer_address_low  = sge[0].buffer_address_low;
-		trecv->bde.u.data.buffer_address_high = sge[0].buffer_address_high;
+			trecv->bde.buffer_length = sge[0].buffer_length;
+			trecv->bde.u.data.buffer_address_low  = sge[0].buffer_address_low;
+			trecv->bde.u.data.buffer_address_high = sge[0].buffer_address_high;
 
-		trecv->payload_offset_length = sge[0].buffer_length;
+			trecv->payload_offset_length = sge[0].buffer_length;
+		}
 	} else {
 		trecv->xbl = TRUE;
 
@@ -1267,7 +1249,8 @@ sli_fcp_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uin
 	trecv->class = SLI4_ELS_REQUEST64_CLASS_3;
 	trecv->ct = SLI4_ELS_REQUEST64_CONTEXT_RPI;
 	trecv->dif = dif;
-	trecv->bs  = bs;
+	trecv->bs = bs;
+	trecv->timer = timer;
 
 	trecv->remote_xid = xid;
 
@@ -1299,6 +1282,12 @@ sli_fcp_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uin
 	if (csctl & SLI4_MASK_CCP) {
 		trecv->ccpe = 1;
 		trecv->ccp = (csctl & SLI4_MASK_CCP);
+	}
+
+	if (app_id && (sli4->config.wqe_size == SLI4_WQE_EXT_BYTES) && !trecv->eat) {
+		trecv->app_id_valid = 1;
+		trecv->wqes = 1;
+		trecv_128->dw[31] = app_id;
 	}
 
 	return 0;
@@ -1336,18 +1325,19 @@ int32_t
 sli_fcp_cont_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32_t first_data_sge,
 			uint32_t relative_off, uint32_t xfer_len, uint16_t xri, uint16_t sec_xri, uint16_t tag,
 			uint16_t cq_id, uint16_t xid, uint32_t rpi, ocs_remote_node_t *rnode, uint32_t flags,
-			uint8_t dif, uint8_t bs, uint8_t csctl)
+			uint8_t dif, uint8_t bs, uint8_t csctl, uint32_t app_id, uint8_t timer)
 {
 	int32_t rc;
 
 	rc = sli_fcp_treceive64_wqe(sli4, buf, size, sgl, first_data_sge, relative_off, xfer_len, xri, tag,
-			cq_id, xid, rpi, rnode, flags, dif, bs, csctl);
+				    cq_id, xid, rpi, rnode, flags, dif, bs, csctl, app_id, timer);
 	if (rc == 0) {
 		sli4_fcp_treceive64_wqe_t *trecv = buf;
 
 		trecv->command = SLI4_WQE_FCP_CONT_TRECEIVE64;
 		trecv->dword5.sec_xri_tag = sec_xri;
 	}
+
 	return rc;
 }
 
@@ -1378,9 +1368,10 @@ sli_fcp_cont_treceive64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl
 int32_t
 sli_fcp_trsp64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32_t rsp_len,
 		   uint16_t xri, uint16_t tag, uint16_t cq_id, uint16_t xid, uint32_t rpi, ocs_remote_node_t *rnode,
-		   uint32_t flags, uint8_t csctl, uint8_t port_owned)
+		   uint32_t flags, uint8_t csctl, uint8_t port_owned, uint32_t app_id)
 {
 	sli4_fcp_trsp64_wqe_t *trsp = buf;
+	sli4_fcp_128byte_wqe_t *trsp_128 = buf;
 
 	ocs_memset(buf, 0, size);
 
@@ -1439,6 +1430,12 @@ sli_fcp_trsp64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32_
 		trsp->ccp = (csctl & SLI4_MASK_CCP);
 	}
 
+	if (app_id && (sli4->config.wqe_size == SLI4_WQE_EXT_BYTES) && !trsp->eat) {
+		trsp->app_id_valid = 1;
+		trsp->wqes = 1;
+		trsp_128->dw[31] = app_id;
+	}
+
 	return 0;
 }
 
@@ -1473,16 +1470,16 @@ int32_t
 sli_fcp_tsend64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32_t first_data_sge,
 		    uint32_t relative_off, uint32_t xfer_len,
 		    uint16_t xri, uint16_t tag, uint16_t cq_id, uint16_t xid, uint32_t rpi, ocs_remote_node_t *rnode,
-		    uint32_t flags, uint8_t dif, uint8_t bs, uint8_t csctl)
+		    uint32_t flags, uint8_t dif, uint8_t bs, uint8_t csctl, uint32_t app_id)
 {
 	sli4_fcp_tsend64_wqe_t *tsend = buf;
+	sli4_fcp_128byte_wqe_t *tsend_128 = buf;
 	sli4_sge_t	*sge = NULL;
 
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1529,6 +1526,8 @@ sli_fcp_tsend64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32
 
 	if (flags & SLI4_IO_AUTO_GOOD_RESPONSE) {
 		tsend->ar = TRUE;
+		if (flags & SLI4_IO_SUPPRESS_RESPONSE)
+			tsend->suppress_rsp = TRUE;
 	}
 
 	tsend->command = SLI4_WQE_FCP_TSEND64;
@@ -1565,6 +1564,12 @@ sli_fcp_tsend64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint32
 	if (csctl & SLI4_MASK_CCP) {
 		tsend->ccpe = 1;
 		tsend->ccp = (csctl & SLI4_MASK_CCP);
+	}
+
+	if (app_id && (sli4->config.wqe_size == SLI4_WQE_EXT_BYTES) && !tsend->eat) {
+		tsend->app_id_valid = 1;
+		tsend->wqes = 1;
+		tsend_128->dw[31] = app_id;
 	}
 
 	return 0;
@@ -1605,8 +1610,7 @@ sli_gen_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl,
 	ocs_memset(buf, 0, size);
 
 	if (!sgl || !sgl->virt) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    sgl, sgl ? sgl->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", sgl, sgl ? sgl->virt : NULL);
 		return -1;
 	}
 	sge = sgl->virt;
@@ -1724,8 +1728,7 @@ sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eo
 
 	sf->qosd = 0;
 	sf->lenloc = 1;
-	sf->xc = 0;
-
+	sf->xc = 1;
 	sf->xbl = 1;
 
 	sf->cmd_type = SLI4_CMD_SEND_FRAME_WQE;
@@ -1770,8 +1773,7 @@ sli_xmit_sequence64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *payload
 	ocs_memset(buf, 0, size);
 
 	if ((payload == NULL) || (payload->virt == NULL)) {
-		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n",
-			    payload, payload ? payload->virt : NULL);
+		ocs_log_err(sli4->os, "bad parameter sgl=%p virt=%p\n", payload, payload ? payload->virt : NULL);
 		return -1;
 	}
 
@@ -1858,6 +1860,7 @@ sli_requeue_xri_wqe(sli4_t *sli4, void *buf, size_t size, uint16_t xri, uint16_t
 	requeue->xc = 1;
 	requeue->qosd = 1;
 	requeue->cq_id = cq_id;
+	requeue->disable_cqe = 1;	// Disable Completion CQE
 	requeue->cmd_type = SLI4_CMD_REQUEUE_XRI_WQE;
 	return 0;
 }
@@ -1942,8 +1945,7 @@ sli_xmit_bls_rsp64_wqe(sli4_t *sli4, void *buf, size_t size, sli_bls_payload_t *
 	 * Callers can either specify RPI or S_ID, but not both
 	 */
 	if (rnode->attached && (s_id != UINT32_MAX)) {
-		ocs_log_test(sli4->os, "S_ID specified for attached remote node %d\n",
-			     rnode->indicator);
+		ocs_log_test(sli4->os, "S_ID specified for attached remote node %d\n", rnode->indicator);
 		return -1;
 	}
 
@@ -1958,8 +1960,7 @@ sli_xmit_bls_rsp64_wqe(sli4_t *sli4, void *buf, size_t size, sli_bls_payload_t *
 		bls->payload_word0 = *((uint32_t *)&payload->u.rjt);
 		bls->ar = TRUE;
 	} else {
-		ocs_log_test(sli4->os, "bad BLS type %#x\n",
-				payload->type);
+		ocs_log_test(sli4->os, "bad BLS type %#x\n", payload->type);
 		return -1;
 	}
 
@@ -2121,8 +2122,7 @@ sli_fc_process_link_state(sli4_t *sli4, void *acqe)
 		event.medium   = SLI_LINK_MEDIUM_ETHERNET;
 	} else {
 		// TODO is this supported for anything other than FCoE?
-		ocs_log_test(sli4->os, "unsupported link type %#x\n",
-				link_state->link_type);
+		ocs_log_test(sli4->os, "unsupported link type %#x\n", link_state->link_type);
 		event.topology = SLI_LINK_TOPO_MAX;
 		event.medium   = SLI_LINK_MEDIUM_MAX;
 		rc = -1;
@@ -2138,8 +2138,7 @@ sli_fc_process_link_state(sli4_t *sli4, void *acqe)
 		event.status = SLI_LINK_STATUS_UP;
 		break;
 	default:
-		ocs_log_test(sli4->os, "unsupported link status %#x\n",
-				link_state->port_link_status);
+		ocs_log_test(sli4->os, "unsupported link status %#x\n", link_state->port_link_status);
 		event.status = SLI_LINK_STATUS_MAX;
 		rc = -1;
 	}
@@ -2183,6 +2182,247 @@ sli_fc_process_link_state(sli4_t *sli4, void *acqe)
 	return rc;
 }
 
+typedef struct sli4_tcm_parity_event_s {
+	uint32_t	tcm_parity_event;
+	uint32_t	tcm_address:24,
+			ulp_id:8;
+	uint32_t	pbec:16,
+			tpec:16;
+	uint32_t	:8,
+			event_code:8,
+			event_type:8,
+			:6,
+			async_event:1,
+			valid:1;
+} sli4_tcm_parity_event_t;
+
+static void
+sli_fc_log_link_state(sli4_t *sli4, uint8_t state)
+{
+	switch (state) {
+		case 0:
+			ocs_log_info(sli4->os, "Link is valid\n");
+			break;
+		case 1:
+			ocs_log_info(sli4->os, "Link not present\n");
+			break;
+		case 2:
+			ocs_log_info(sli4->os, "Link is present but incompatible physical media type\n");
+			break;
+		case 3:
+			ocs_log_info(sli4->os, "Present, Unsupported PHY\n");
+			break;
+		default:
+			ocs_log_err(sli4->os, "Unknown link state %d\n", state);
+			break;
+	}
+}
+
+static void
+sli_fc_report_link_state(sli4_t *sli4, sli4_port_event_acqe_t *pe_acqe)
+{
+	switch (sli4->config.port_number) {
+		case 0:
+			sli_fc_log_link_state(sli4, pe_acqe->p0_linkstate);
+			break;
+		case 1:
+			sli_fc_log_link_state(sli4, pe_acqe->p1_linkstate);
+			break;
+		case 2:
+			sli_fc_log_link_state(sli4, pe_acqe->p2_linkstate);
+			break;
+		case 3:
+			sli_fc_log_link_state(sli4, pe_acqe->p3_linkstate);
+			break;
+		default:
+			ocs_log_err(sli4->os, "Invalid port number %d\n", sli4->config.port_number);
+			break;
+	}
+}
+
+/**
+ * @ingroup sli_fc
+ * @brief Process an asynchronous sli port event.
+ *
+ * @par Description
+ * Parses Asynchronous Completion Queue Entry (ACQE)
+ * and logs driver debug messages for correct SFP link status
+ *
+ * @param sli4 SLI context.
+ * @param acqe Pointer to the ACQE.
+ *
+ * @return Returns 0 on success, or a non-zero value on failure.
+ */
+int32_t
+sli_fc_process_sli_port_event(sli4_t *sli4, void *acqe)
+{
+	sli4_port_event_acqe_t	*pe_acqe = acqe;
+	sli4_link_event_t	event = { 0 };
+
+	if (!sli4->link)
+		return 0;
+
+	switch (pe_acqe->event_type) {
+		case SLI4_ACQE_PORT_EVENT_TYPE_ITCM_PARITY_EVENT: {
+			sli4_tcm_parity_event_t *evt = acqe;
+
+			ocs_log_warn(sli4->os, "ITCM parity event detected; ULP id = %d, "\
+				"parity_bit_error_count = %d, total_parity_error_count = %d\n",
+				evt->ulp_id, evt->pbec, evt->tpec);
+			break;
+		}
+		case SLI4_ACQE_PORT_EVENT_TYPE_MISCONF_PHYPORTS:
+			sli_fc_report_link_state(sli4, pe_acqe);
+			break;
+		default:
+			ocs_log_err(sli4->os, "Unhandled async event type %d\n", pe_acqe->event_type);
+			break;
+	}
+
+	event.status = SLI_LINK_STATUS_CHANGED;
+	sli4->link(sli4->link_arg, (void *)&event);
+	return 0;
+}
+
+static uint32_t
+sli_fc_decode_port_speed(uint32_t speed_code)
+{
+	uint32_t speed_gbps = 0;
+
+	/* Speed in Gbps */
+	switch (speed_code) {
+	case SLI4_LINK_ATTN_64G:
+		speed_gbps = 0x40;
+		break;
+	case SLI4_LINK_ATTN_128G:
+		speed_gbps = 0x80;
+		break;
+	case SLI4_LINK_ATTN_256G:
+		speed_gbps = 0x100;
+		break;
+	default:
+		speed_gbps = speed_code;
+	}
+
+	/* Return Mbps value */
+	return speed_gbps * 1000;
+}
+
+static int32_t
+sli_fc_process_fc_link_attention(sli4_t *sli4, sli4_link_attention_t *link_attn, sli4_link_event_t *event)
+{
+	int32_t rc = 0;
+
+	switch (link_attn->attn_type) {
+	case SLI4_LINK_ATTN_TYPE_LINK_UP:
+		event->status = SLI_LINK_STATUS_UP;
+		break;
+	case SLI4_LINK_ATTN_TYPE_LINK_DOWN:
+		event->status = SLI_LINK_STATUS_DOWN;
+		break;
+	case SLI4_LINK_ATTN_TYPE_NO_HARD_ALPA:
+		ocs_log_debug(sli4->os, "attn_type: no hard alpa\n");
+		event->status = SLI_LINK_STATUS_NO_ALPA;
+		break;
+	default:
+		ocs_log_test(sli4->os, "attn_type: unknown\n");
+		return -1;
+	}
+
+	switch (link_attn->topology) {
+	case SLI4_LINK_ATTN_P2P:
+		event->topology = SLI_LINK_TOPO_NPORT;
+		break;
+	case SLI4_LINK_ATTN_FC_AL:
+		event->topology = SLI_LINK_TOPO_LOOP;
+		break;
+	case SLI4_LINK_ATTN_INTERNAL_LOOPBACK:
+		ocs_log_debug(sli4->os, "topology Internal loopback\n");
+		event->topology = SLI_LINK_TOPO_LOOPBACK_INTERNAL;
+		break;
+	case SLI4_LINK_ATTN_SERDES_LOOPBACK:
+		ocs_log_debug(sli4->os, "topology serdes loopback\n");
+		event->topology = SLI_LINK_TOPO_LOOPBACK_EXTERNAL;
+		break;
+	default:
+		ocs_log_test(sli4->os, "topology: unknown\n");
+		rc = -1;
+		break;
+	}
+
+	event->speed = sli_fc_decode_port_speed(link_attn->port_speed);
+	return rc;
+}
+
+static void
+sli_fc_report_trunk_links(sli4_t *sli4, uint8_t ports_active, char *active_ports_str, size_t max_str_len)
+{
+	char tmp[8];
+	char *ptr = active_ports_str;
+	int i;
+
+	ocs_memset(active_ports_str, 0x0, max_str_len);
+	for (i = 0; i < 4; i++) {
+		if (!(ports_active & (1 << i)))
+			continue;
+
+		if (!ocs_strlen(active_ports_str)) {
+			ocs_snprintf(tmp, sizeof(tmp), "%d", i);
+		} else {
+			ocs_snprintf(tmp, sizeof(tmp), ",%d", i);
+		}
+
+		if (ocs_strlen(active_ports_str) + ocs_strlen(tmp) > max_str_len)
+			break;
+
+		ocs_strcpy(ptr, tmp);
+		ptr += ocs_strlen(tmp);
+	}
+
+	if (!ocs_strlen(active_ports_str))
+		ocs_strcpy(active_ports_str, "None");
+}
+
+static void
+sli_fc_process_trunk_link_attention(sli4_t *sli4, sli4_link_attention_t *link_attn)
+{
+	uint8_t ports_active;
+	uint32_t potential_agg_speed;
+	uint32_t current_trunk_speed;
+	char active_ports_str[16];
+
+	potential_agg_speed = sli_fc_decode_port_speed(link_attn->port_speed);
+	current_trunk_speed = link_attn->logical_link_speed * 10;	/* is in units of 10 Mbps */
+	ports_active = link_attn->topology & SLI4_FC_TRUNK_LINK_STATE_MASK;
+
+	switch (link_attn->topology & SLI4_FC_TRUNK_CONFIG_MASK) {
+	case SLI4_FC_TRUNK_2_PORT_CONFIG:
+		/* 2 port trunk, member ports 0/1 */
+		sli_fc_report_trunk_links(sli4, ports_active, active_ports_str, sizeof(active_ports_str));
+		ocs_log_debug(sli4->os,
+			"[ Trunk ] Links=2, Ports={ Member={0,1}, Active={%s} }, Speed={max=%dMbps, current=%dMbps}\n",
+			active_ports_str, potential_agg_speed, current_trunk_speed);
+		break;
+	case SLI4_FC_TRUNK_2_PORT_HI_CONFIG:
+		/* 2 port trunk, member ports 2/3 */
+		sli_fc_report_trunk_links(sli4, ports_active, active_ports_str, sizeof(active_ports_str));
+		ocs_log_debug(sli4->os,
+			"[ Trunk ] Links=2, Ports={ Member={2,3}, Active={%s} }, Speed={max=%dMbps, current=%dMbps}\n",
+			active_ports_str, potential_agg_speed, current_trunk_speed);
+		break;
+	case SLI4_FC_TRUNK_4_PORT_CONFIG:
+		/* All 4 ports are members of the same trunk */
+		sli_fc_report_trunk_links(sli4, ports_active, active_ports_str, sizeof(active_ports_str));
+		ocs_log_debug(sli4->os,
+			"[ Trunk ] Links=4, Ports={ Member={0,1,2,3}, Active={%s} }, Speed={max=%dMbps, current=%dMbps}\n",
+			active_ports_str, potential_agg_speed, current_trunk_speed);
+		break;
+	default:
+		ocs_log_debug(sli4->os,
+			"[ Trunk ] Invalid config: topology=%#x, reported max speed=%d Mbps, current speed=%d Mbps\n",
+			link_attn->topology, potential_agg_speed, current_trunk_speed);
+	}
+}
 
 /**
  * @ingroup sli_fc
@@ -2204,6 +2444,7 @@ sli_fc_process_link_attention(sli4_t *sli4, void *acqe)
 {
 	sli4_link_attention_t	*link_attn = acqe;
 	sli4_link_event_t	event = { 0 };
+	int32_t rc = 0;
 
 	ocs_log_debug(sli4->os, "link_number=%d attn_type=%#x topology=%#x port_speed=%#x "
 			"port_fault=%#x shared_link_status=%#x logical_link_speed=%#x "
@@ -2216,60 +2457,41 @@ sli_fc_process_link_attention(sli4_t *sli4, void *acqe)
 		return 0;
 	}
 
-	event.medium   = SLI_LINK_MEDIUM_FC;
-
-	switch (link_attn->attn_type) {
-	case SLI4_LINK_ATTN_TYPE_LINK_UP:
-		event.status = SLI_LINK_STATUS_UP;
-		break;
-	case SLI4_LINK_ATTN_TYPE_LINK_DOWN:
-		event.status = SLI_LINK_STATUS_DOWN;
-		break;
-	case SLI4_LINK_ATTN_TYPE_NO_HARD_ALPA:
-		ocs_log_debug(sli4->os, "attn_type: no hard alpa\n");
-		event.status = SLI_LINK_STATUS_NO_ALPA;
-		break;
-	default:
-		ocs_log_test(sli4->os, "attn_type: unknown\n");
-		break;
-	}
-
 	switch (link_attn->event_type) {
 	case SLI4_FC_EVENT_LINK_ATTENTION:
+		ocs_log_debug(sli4->os, "event_type: SLI4_FC_EVENT_LINK_ATTENTION\n");
 		break;
 	case SLI4_FC_EVENT_SHARED_LINK_ATTENTION:
 		ocs_log_debug(sli4->os, "event_type: FC shared link event \n");
 		break;
 	default:
-		ocs_log_test(sli4->os, "event_type: unknown\n");
+		ocs_log_test(sli4->os, "event_type: unknown, %d\n", link_attn->event_type);
 		break;
 	}
 
-	switch (link_attn->topology) {
-	case SLI4_LINK_ATTN_P2P:
-		event.topology = SLI_LINK_TOPO_NPORT;
+	event.medium   = SLI_LINK_MEDIUM_FC;
+
+	switch (link_attn->attn_type) {
+	case SLI4_LINK_ATTN_TYPE_LINK_UP:
+	case SLI4_LINK_ATTN_TYPE_LINK_DOWN:
+	case SLI4_LINK_ATTN_TYPE_NO_HARD_ALPA:
+		rc = sli_fc_process_fc_link_attention(sli4, link_attn, &event);
+		sli4->link(sli4->link_arg, (void *)&event);
 		break;
-	case SLI4_LINK_ATTN_FC_AL:
-		event.topology = SLI_LINK_TOPO_LOOP;
-		break;
-	case SLI4_LINK_ATTN_INTERNAL_LOOPBACK:
-		ocs_log_debug(sli4->os, "topology Internal loopback\n");
-		event.topology = SLI_LINK_TOPO_LOOPBACK_INTERNAL;
-		break;
-	case SLI4_LINK_ATTN_SERDES_LOOPBACK:
-		ocs_log_debug(sli4->os, "topology serdes loopback\n");
-		event.topology = SLI_LINK_TOPO_LOOPBACK_EXTERNAL;
+	case SLI4_LINK_ATTN_TYPE_TRUNK_EVENT:
+		sli_fc_process_trunk_link_attention(sli4, link_attn);
+		event.status = SLI_LOGICAL_LINK_SPEED_CHANGED;
+		event.logical_link_speed = link_attn->logical_link_speed * 10; /* is in units of 10 Mbps */
+		event.aggregate_link_speed = sli_fc_decode_port_speed(link_attn->port_speed);
+		sli4->link(sli4->link_arg, (void *)&event);
 		break;
 	default:
-		ocs_log_test(sli4->os, "topology: unknown\n");
+		ocs_log_test(sli4->os, "attn_type: unknown\n");
+		rc = -1;
 		break;
 	}
 
-	event.speed    = link_attn->port_speed * 1000;
-
-	sli4->link(sli4->link_arg, (void *)&event);
-
-	return 0;
+	return rc;
 }
 
 /**
@@ -2302,13 +2524,11 @@ sli_fc_cqe_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *et
 
 		// Flag errors except for FCP_RSP_FAILURE
 		if (rc && (rc != SLI4_FC_WCQE_STATUS_FCP_RSP_FAILURE)) {
-
-			ocs_log_test(sli4->os, "WCQE: status=%#x hw_status=%#x tag=%#x w1=%#x w2=%#x xb=%d\n",
-				wcqe->status, wcqe->hw_status,
-				wcqe->request_tag, wcqe->wqe_specific_1,
-				wcqe->wqe_specific_2, wcqe->xb);
-			ocs_log_test(sli4->os, "      %08X %08X %08X %08X\n", ((uint32_t*) cqe)[0], ((uint32_t*) cqe)[1],
-				((uint32_t*) cqe)[2], ((uint32_t*) cqe)[3]);
+			ocs_log_err(sli4->os, "WCQE: status=%#x hw_status=%#x tag=%#x w1=%#x w2=%#x xb=%d\n",
+				wcqe->status, wcqe->hw_status, wcqe->request_tag,
+				wcqe->wqe_specific_1, wcqe->wqe_specific_2, wcqe->xb);
+			ocs_log_err(sli4->os, "      %08X %08X %08X %08X\n", ((uint32_t *)cqe)[0],
+				((uint32_t *)cqe)[1], ((uint32_t *)cqe)[2], ((uint32_t *)cqe)[3]);
 		}
 
 //TODO: need to pass additional status back out of here as well as status (could overload rc as status/addlstatus
@@ -2352,8 +2572,8 @@ sli_fc_cqe_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *et
 
 		// Flag errors
 		if (rc != SLI4_FC_WCQE_STATUS_SUCCESS) {
-			ocs_log_test(sli4->os, "Optimized DATA CQE: status=%#x hw_status=%#x xri=%#x dpl=%#x w3=%#x xb=%d\n",
-				dcqe->status, dcqe->hw_status,
+			ocs_log_err(sli4->os, "Optimized DATA CQE: status=%#x ext_status=%#x hw_status=%#x xri=%#x dpl=%#x w3=%#x xb=%d\n",
+				dcqe->status, ((uint32_t*) cqe)[2], dcqe->hw_status,
 				dcqe->xri, dcqe->total_data_placed,
 				((uint32_t*) cqe)[3], dcqe->xb);
 		}
@@ -2383,6 +2603,14 @@ sli_fc_cqe_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *et
 		*etype = SLI_QENTRY_WQ_RELEASE;
 		*r_id = wqec->wq_id;
 		rc = 0;
+		break;
+	}
+	case SLI4_CQE_CODE_MARKER: {
+		sli4_fc_marker_rcqe_t *marker_cqe = (void *)cqe;
+
+		*etype = SLI_QENTRY_RQ;
+		*r_id = marker_cqe->rq_id;
+		rc = marker_cqe->status;
 		break;
 	}
 	default:
@@ -2516,10 +2744,12 @@ sli_fc_rqe_rqid_and_index(sli4_t *sli4, uint8_t *cqe, uint16_t *rq_id, uint32_t 
 		} else {
 			*index = rcqe->rq_element_index;
 			rc = rcqe->status;
-			ocs_log_test(sli4->os, "status=%02x (%s) rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
+			ocs_log_err_ratelimited(sli4->os, "RCQE: status=%02x (%s) rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
 				rcqe->status, sli_fc_get_status_string(rcqe->status), rcqe->rq_id,
 				rcqe->rq_element_index, rcqe->payload_data_placement_length, rcqe->sof_byte,
 				rcqe->eof_byte, rcqe->header_data_placement_length);
+			ocs_log_err_ratelimited(sli4->os, "      %08X %08X %08X %08X\n", ((uint32_t *)cqe)[0],
+				((uint32_t *)cqe)[1], ((uint32_t *)cqe)[2], ((uint32_t *)cqe)[3]);
 		}
 	} else if (code == SLI4_CQE_CODE_RQ_ASYNC_V1) {
 		*rq_id = rcqe_v1->rq_id;
@@ -2529,11 +2759,12 @@ sli_fc_rqe_rqid_and_index(sli4_t *sli4, uint8_t *cqe, uint16_t *rq_id, uint32_t 
 		} else {
 			*index = rcqe_v1->rq_element_index;
 			rc = rcqe_v1->status;
-			ocs_log_test(sli4->os, "status=%02x (%s) rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
-				rcqe_v1->status, sli_fc_get_status_string(rcqe_v1->status),
-				rcqe_v1->rq_id, rcqe_v1->rq_element_index,
-				rcqe_v1->payload_data_placement_length, rcqe_v1->sof_byte,
+			ocs_log_err_ratelimited(sli4->os, "RCQE: status=%02x (%s) rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
+				rcqe_v1->status, sli_fc_get_status_string(rcqe_v1->status), rcqe_v1->rq_id,
+				rcqe_v1->rq_element_index, rcqe_v1->payload_data_placement_length, rcqe_v1->sof_byte,
 				rcqe_v1->eof_byte, rcqe_v1->header_data_placement_length);
+			ocs_log_err_ratelimited(sli4->os, "      %08X %08X %08X %08X\n", ((uint32_t *)cqe)[0],
+				((uint32_t *)cqe)[1], ((uint32_t *)cqe)[2], ((uint32_t *)cqe)[3]);
 		}
 	} else if (code == SLI4_CQE_CODE_OPTIMIZED_WRITE_CMD) {
 		sli4_fc_optimized_write_cmd_cqe_t *optcqe = (void *)cqe;
@@ -2545,10 +2776,10 @@ sli_fc_rqe_rqid_and_index(sli4_t *sli4, uint8_t *cqe, uint16_t *rq_id, uint32_t 
 		} else {
 			*index = optcqe->rq_element_index;
 			rc = optcqe->status;
-			ocs_log_test(sli4->os, "status=%02x (%s) rq_id=%d, index=%x pdpl=%x hdpl=%x oox=%d agxr=%d xri=0x%x rpi=0x%x\n",
+			ocs_log_test_ratelimited(sli4->os, "status=%02x (%s) rq_id=%d, index=%x pdpl=%x hdpl=%x oox=%d agxr=%d xri=0x%x rpi=0x%x\n",
 				optcqe->status, sli_fc_get_status_string(optcqe->status), optcqe->rq_id,
 				optcqe->rq_element_index, optcqe->payload_data_placement_length,
-				optcqe->header_data_placement_length, optcqe->oox, optcqe->agxr, optcqe->xri,
+				optcqe->header_data_placement_length, optcqe->oox, optcqe->tow, optcqe->xri,
 				optcqe->rpi);
 		}
 	} else if (code == SLI4_CQE_CODE_RQ_COALESCING) {
@@ -2562,16 +2793,28 @@ sli_fc_rqe_rqid_and_index(sli4_t *sli4, uint8_t *cqe, uint16_t *rq_id, uint32_t 
 			*index = UINT32_MAX;
 			rc = rcqe->status;
 
-			ocs_log_test(sli4->os, "status=%02x (%s) rq_id=%d, index=%x rq_id=%#x sdpl=%x\n",
+			ocs_log_test_ratelimited(sli4->os, "status=%02x (%s) rq_id=%d, index=%x rq_id=%#x sdpl=%x\n",
 				rcqe->status, sli_fc_get_status_string(rcqe->status), rcqe->rq_id,
 				rcqe->rq_element_index, rcqe->rq_id, rcqe->sequence_reporting_placement_length);
+		}
+	} else if (code == SLI4_CQE_CODE_MARKER) {
+		sli4_fc_marker_rcqe_t *rcqe = (void *)cqe;
+		*rq_id = rcqe->rq_id;
+
+		if (SLI4_FC_ASYNC_RQ_SUCCESS == rcqe->status) {
+			*index = rcqe->rq_element_index;
+			rc = 0;
+		} else {
+			*index = UINT32_MAX;
+			rc = rcqe->status;
+			ocs_log_test(sli4->os, "marker rcqe failed, status=%d\n", rc);
 		}
 	} else {
 		*index = UINT32_MAX;
 
 		rc = rcqe->status;
 
-		ocs_log_debug(sli4->os, "status=%02x rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
+		ocs_log_debug_ratelimited(sli4->os, "status=%02x rq_id=%d, index=%x pdpl=%x sof=%02x eof=%02x hdpl=%x\n",
 			rcqe->status, rcqe->rq_id, rcqe->rq_element_index, rcqe->payload_data_placement_length,
 			rcqe->sof_byte, rcqe->eof_byte, rcqe->header_data_placement_length);
 	}
@@ -2674,8 +2917,7 @@ sli_fc_rq_alloc(sli4_t *sli4, sli4_queue_t *q,
 		return -1;
 	}
 
-	if (__sli_queue_init(sli4, q, SLI_QTYPE_RQ, SLI4_FCOE_RQE_SIZE,
-				n_entries, SLI_PAGE_SIZE)) {
+	if (__sli_queue_init(sli4, q, SLI_QTYPE_RQ, SLI4_FCOE_RQE_SIZE, n_entries, SLI_PAGE_SIZE)) {
 		return -1;
 	}
 
@@ -2685,28 +2927,30 @@ sli_fc_rq_alloc(sli4_t *sli4, sli4_queue_t *q,
 		rq_create = sli_cmd_fcoe_rq_create_v1;
 	}
 
-	if (rq_create(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, &q->dma,
-		      cq->id, ulp, buffer_size)) {
+	if (rq_create(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, q->dma, cq->id, ulp, buffer_size)) {
 		if (__sli_create_queue(sli4, q)) {
-			ocs_dma_free(sli4->os, &q->dma);
+			ocs_log_err(sli4->os, "create %s failed\n", SLI_QNAME[SLI_QTYPE_RQ]);
 			return -1;
 		}
+
 		if (is_hdr && q->id & 1) {
 			ocs_log_test(sli4->os, "bad header RQ_ID %d\n", q->id);
-			ocs_dma_free(sli4->os, &q->dma);
+			sli_queue_dma_free(sli4, q);
 			return -1;
 		} else if (!is_hdr  && (q->id & 1) == 0) {
 			ocs_log_test(sli4->os, "bad data RQ_ID %d\n", q->id);
-			ocs_dma_free(sli4->os, &q->dma);
+			sli_queue_dma_free(sli4, q);
 			return -1;
 		}
 	} else {
 		return -1;
 	}
+
 	q->u.flag.is_hdr = is_hdr;
 	if (SLI4_IF_TYPE_BE3_SKH_PF == sli4->if_type) {
 		q->u.flag.rq_batch = TRUE;
 	}
+
 	return 0;
 }
 
@@ -2733,26 +2977,31 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 		    uint32_t n_entries, uint32_t header_buffer_size,
 		    uint32_t payload_buffer_size,  uint16_t ulp)
 {
-	uint32_t i, p, offset = 0;
-	uint32_t payload_size, total_page_count = 0;
-	uintptr_t addr;
-	ocs_dma_t dma;
+	sli4_req_fcoe_rq_create_v2_t *req = NULL;
 	sli4_res_common_create_queue_set_t *rsp = NULL;
-	sli4_req_fcoe_rq_create_v2_t    *req = NULL;
+	uint32_t	i, p, offset = 0;
+	uint32_t	cmd_size, payload_size;
+	uint32_t	total_page_count;
+	uintptr_t	addr;
+	ocs_dma_t	dma;
+	size_t		qmem_size;
+	uint32_t	qpage_size;
+
+	ocs_memset(&dma, 0, sizeof(dma));
 
 	for (i = 0; i < (num_rq_pairs * 2); i++) {
-		if (__sli_queue_init(sli4, qs[i], SLI_QTYPE_RQ, SLI4_FCOE_RQE_SIZE,
-					n_entries, SLI_PAGE_SIZE)) {
+		if (__sli_queue_init(sli4, qs[i], SLI_QTYPE_RQ, SLI4_FCOE_RQE_SIZE, n_entries, SLI_PAGE_SIZE)) {
 			goto error;
 		}
 	}
 
-	total_page_count = sli_page_count(qs[0]->dma.size, SLI_PAGE_SIZE) * num_rq_pairs * 2;
+	qmem_size = sli_get_qmem_size(qs[0]->dma);
+	qpage_size = sli_get_qpage_size(qmem_size);
+	total_page_count = (sli_page_count(qmem_size, qpage_size) * num_rq_pairs * 2);
 
 	/* Payload length must accomodate both request and response */
-	payload_size = max((sizeof(sli4_req_fcoe_rq_create_v2_t) +
-				(sizeof(sli4_physical_page_descriptor_t) * total_page_count)),
-			sizeof(sli4_res_common_create_queue_set_t));
+	cmd_size = (sizeof(sli4_req_fcoe_rq_create_v2_t) + (8 * total_page_count));
+	payload_size = OCS_MAX((size_t)cmd_size, sizeof(sli4_res_common_create_queue_set_t));
 
 	if (ocs_dma_alloc(sli4->os, &dma, payload_size, SLI_PAGE_SIZE)) {
 		ocs_log_err(sli4->os, "DMA allocation failed\n");
@@ -2760,8 +3009,7 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 	}
 	ocs_memset(dma.virt, 0, payload_size);
 
-	if (sli_cmd_sli_config(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE,
-			payload_size, &dma) == -1) {
+	if (sli_cmd_sli_config(sli4, sli4->bmbx.virt, SLI4_BMBX_SIZE, payload_size, &dma) == -1) {
 		goto error;
 	}
 	req = (sli4_req_fcoe_rq_create_v2_t *)((uint8_t *)dma.virt);
@@ -2770,22 +3018,22 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 	req->hdr.opcode    = SLI4_OPC_FCOE_RQ_CREATE;
 	req->hdr.subsystem = SLI4_SUBSYSTEM_FCFCOE;
 	req->hdr.version   = 2;
-	req->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_v2_t) - sizeof(sli4_req_hdr_t)
-		+ (sizeof(sli4_physical_page_descriptor_t) * total_page_count);
+	req->hdr.request_length = cmd_size - sizeof(sli4_req_hdr_t);
 
 	/* Fill Payload fields */
-	req->dnb           = TRUE;
-	req->num_pages     = sli_page_count(qs[0]->dma.size, SLI_PAGE_SIZE);
-	req->rqe_count     = qs[0]->dma.size / SLI4_FCOE_RQE_SIZE;
+	req->num_pages     = sli_page_count(qmem_size, qpage_size);
+	req->rqe_count     = (qmem_size / SLI4_FCOE_RQE_SIZE);
 	req->rqe_size      = SLI4_FCOE_RQE_SIZE_8;
-	req->page_size     = SLI4_FCOE_RQ_PAGE_SIZE_4096;
+	/* Fill the page_size_multiplier */
+	req->page_size     = qpage_size / SLI_PAGE_SIZE;
 	req->rq_count      = num_rq_pairs * 2;
 	req->base_cq_id    = base_cq_id;
 	req->hdr_buffer_size     = header_buffer_size;
 	req->payload_buffer_size = payload_buffer_size;
 
 	for (i = 0; i < (num_rq_pairs * 2); i++) {
-		for (p = 0, addr = qs[i]->dma.phys; p < req->num_pages; p++, addr += SLI_PAGE_SIZE) {
+		for (p = 0; p < req->num_pages; p++) {
+			addr = qs[i]->dma[p].phys;
 			req->page_physical_address[offset].low  = ocs_addr32_lo(addr);
 			req->page_physical_address[offset].high = ocs_addr32_hi(addr);
 			offset++;
@@ -2803,12 +3051,6 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 			rsp->hdr.status, rsp->hdr.additional_status);
 		goto error;
 	} else {
-		/* Only first byte of num_q_allocated is valid for RQ set. */
-		if ((rsp->num_q_allocated & 0xff) != (num_rq_pairs * 2)) {
-			ocs_log_err(sli4->os, "create RQSet could not get requested queues\n");
-			goto error;
-		}
-
 		for (i = 0; i < (num_rq_pairs * 2); i++) {
 			qs[i]->id = i + rsp->q_id;
 			if ((qs[i]->id & 1) == 0) {
@@ -2827,9 +3069,7 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 
 error:
 	for (i = 0; i < (num_rq_pairs * 2); i++) {
-		if (qs[i]->dma.size) {
-			ocs_dma_free(sli4->os, &qs[i]->dma);
-		}
+		sli_queue_dma_free(sli4, qs[i]);
 	}
 
 	if (dma.size) {
