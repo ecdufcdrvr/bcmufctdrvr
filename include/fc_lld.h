@@ -48,11 +48,9 @@ void nvmf_fc_lld_fini(void);
 
 void nvmf_fc_lld_start(void);
 
-#ifdef _FIXME_
 int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
 
 int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
-#endif
 
 int nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp); // Remove this after WIP
 

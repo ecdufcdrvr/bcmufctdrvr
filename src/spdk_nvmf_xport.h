@@ -173,10 +173,4 @@ void nvmf_fc_wrkq_reqtag_copy(struct fc_wrkq *wq_prev, struct fc_wrkq *wq_curr);
 void nvmf_fc_tgt_free_xri_pending(struct spdk_nvmf_fc_port *fc_port);
 void spdk_nvmf_hwqp_free_wq_reqtags(struct spdk_nvmf_fc_port *fc_port);
 
-#ifndef _FIXME_
-int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
-
-int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
-#endif
-
 #endif
