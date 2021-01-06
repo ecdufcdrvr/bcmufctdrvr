@@ -2085,7 +2085,6 @@ nvmf_fc_lld_start(void)
 	ocs_spdk_start_pollers();
 }
 
-
 int
 nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port)
 {
@@ -2334,11 +2333,6 @@ int
 nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	int rc;
-	struct bcm_nvmf_fc_port *fc_hw_port = BCM_HWPORT(hwqp->fc_port);
-
-	/* For last hwqp */
-	if (hwqp->hwqp_id == (fc_hw_port->num_cores - 1))
-		nvmf_fc_lld_port_add(hwqp->fc_port);
 
 	/*
 	 * IO WQ reqtag pool

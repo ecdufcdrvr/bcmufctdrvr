@@ -48,6 +48,10 @@ void nvmf_fc_lld_fini(void);
 
 void nvmf_fc_lld_start(void);
 
+int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
+
+int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
+
 int nvmf_fc_init_q(struct spdk_nvmf_fc_hwqp *hwqp);
 
 void nvmf_fc_reinit_q(void *queues_prev, void *queues_curr);
