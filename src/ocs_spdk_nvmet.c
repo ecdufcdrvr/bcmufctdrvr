@@ -613,13 +613,6 @@ error:
 	return -1;
 }
 
-#define SPDK_FC_HW_PORT_FREE 20
-
-struct spdk_nvmf_fc_hw_port_free_args {
-	uint8_t                 port_handle;
-	void                    *cb_ctx;
-};
-
 int
 ocs_nvme_hw_port_free(ocs_t *ocs)
 {
