@@ -2612,6 +2612,11 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 		goto io_done;
 	}
 
+	if (fc_req->fc_conn->qpair.state != SPDK_NVMF_QPAIR_ACTIVE ||
+			fc_req->fc_conn->conn_state != SPDK_NVMF_FC_OBJECT_CREATED) {
+		goto io_done;
+	}
+
 	/* Write Tranfer done */
 	if (fc_req->state == SPDK_NVMF_FC_REQ_WRITE_XFER) {
 		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
