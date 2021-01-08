@@ -47,6 +47,9 @@
 #include "fc.h"
 #include "spdk/barrier.h"
 
+spdk_nvmf_transport_destroy_done_cb g_transport_destroy_done_cb_fn;
+void *g_transport_destroy_done_cb_arg;
+
 static void *
 ocs_get_virt(struct spdk_nvmf_fc_xchg *xchg);
 
@@ -2074,8 +2077,11 @@ nvmf_fc_lld_init(void)
 }
 
 void
-nvmf_fc_lld_fini(void)
+nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx)
 {
+	g_transport_destroy_done_cb_fn = cb_fn;
+	g_transport_destroy_done_cb_arg = ctx;
+
 	ocsu_shutdown();
 }
 

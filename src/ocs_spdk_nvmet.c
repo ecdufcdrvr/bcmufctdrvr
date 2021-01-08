@@ -626,10 +626,6 @@ ocs_nvme_hw_port_free(ocs_t *ocs)
 		ocs_log_err(ocs, "HW Port free failed.\n");
 	}
 
-#ifndef _FIXME_
-	nvmf_fc_lld_port_remove(nvmf_fc_port_lookup(args.port_handle));
-#endif
-
 	ocs_hw_port_cleanup(ocs, ocs->tgt_ocs.args);
 	return 0;
 }
