@@ -3408,7 +3408,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 	bcm_fcp_trsp64_wqe_t *trsp = (bcm_fcp_trsp64_wqe_t *)wqe;
 	struct spdk_nvmf_fc_hwqp *hwqp = fc_req->hwqp;
 
-	if (nvmf_fc_use_send_frame(&fc_req->req)) {
+	if (nvmf_fc_use_send_frame(fc_req)) {
 		return nvmf_fc_sendframe_rsp(fc_req, ersp_buf, ersp_len);
 	}
 
