@@ -47,6 +47,9 @@
 #include "fc.h"
 #include "spdk/barrier.h"
 
+spdk_nvmf_transport_destroy_done_cb g_transport_destroy_done_cb_fn;
+void *g_transport_destroy_done_cb_arg;
+
 static void *
 ocs_get_virt(struct spdk_nvmf_fc_xchg *xchg);
 
@@ -2074,8 +2077,11 @@ nvmf_fc_lld_init(void)
 }
 
 void
-nvmf_fc_lld_fini(void)
+nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx)
 {
+	g_transport_destroy_done_cb_fn = cb_fn;
+	g_transport_destroy_done_cb_arg = ctx;
+
 	ocsu_shutdown();
 }
 
@@ -2536,7 +2542,6 @@ nvmf_fc_def_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 static void
 nvmf_fc_process_fused_command(struct spdk_nvmf_fc_request *fc_req)
 {
-#ifdef _FIXME_
 	struct spdk_nvmf_fc_request *n = NULL, *tmp, *command_1 = NULL, *command_2 = NULL;
 	struct spdk_nvme_cmd *cmd = &fc_req->req.cmd->nvme_cmd;
 	struct spdk_nvmf_fc_conn *fc_conn = fc_req->fc_conn;
@@ -2579,7 +2584,6 @@ nvmf_fc_process_fused_command(struct spdk_nvmf_fc_request *fc_req)
 
 	nvmf_fc_request_set_state(command_2, SPDK_NVMF_FC_REQ_WRITE_BDEV);
 	spdk_nvmf_request_exec(&command_2->req);
-#endif
 }
 
 static inline int
@@ -2603,6 +2607,11 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	assert(fc_req->magic != 0xDEADBEEF);
 
 	if (status || fc_req->is_aborted) {
+		goto io_done;
+	}
+
+	if (fc_req->fc_conn->qpair.state != SPDK_NVMF_QPAIR_ACTIVE ||
+		fc_req->fc_conn->conn_state != SPDK_NVMF_FC_OBJECT_CREATED) {
 		goto io_done;
 	}
 
@@ -2827,7 +2836,6 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	trecv->cq_id = 0xFFFF;
 	trecv->fcp_data_receive_length = fc_req->req.length;
 
-#ifdef _FIXME_
 	/* Priority */
 	if (fc_req->csctl) {
 		trecv->ccpe = true;
@@ -2840,9 +2848,7 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 		trecv->app_id = fc_req->app_id;
 		trecv->wqes = 1;
 	}
-#endif
 
-	//fc_req->rxid = fc_req->xchg->xchg_id;
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trecv, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
 		fc_req->xchg->active = true;
@@ -3245,7 +3251,6 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 	tsend->cq_id = 0xFFFF;
 	tsend->fcp_data_transmit_length = fc_req->req.length;
 
-#ifdef _FIXME_
 	/* Priority */
 	if (fc_req->csctl) {
 		tsend->ccpe = true;
@@ -3258,9 +3263,6 @@ nvmf_fc_send_data(struct spdk_nvmf_fc_request *fc_req)
 		tsend->app_id = fc_req->app_id;
 		tsend->wqes = 1;
 	}
-#endif
-
-	//fc_req->rxid = fc_req->xchg->xchg_id;
 
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)tsend, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
@@ -3372,15 +3374,9 @@ nvmf_fc_sendframe_rsp(struct spdk_nvmf_fc_request *fc_req,
 		rctl	= FCNVME_R_CTL_ERSP_STATUS;
 	}
 
-#ifndef _FIXME_
-	rc = nvmf_fc_send_frame(fc_req->hwqp, fc_req->s_id, fc_req->d_id, fc_req->oxid,
-				FCNVME_TYPE_FC_EXCHANGE, rctl, FCNVME_F_CTL_RSP,
-				0, rsp, rsp_len);
-#else
 	rc = nvmf_fc_send_frame(fc_req->hwqp, fc_req->s_id, fc_req->d_id, fc_req->oxid,
 				FCNVME_TYPE_FC_EXCHANGE, rctl, FCNVME_F_CTL_RSP,
 				fc_req->csctl, rsp, rsp_len);
-#endif
 	if (rc) {
 		SPDK_ERRLOG("SendFrame failed. rc = %d\n", rc);
 	} else {
@@ -3408,7 +3404,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 	bcm_fcp_trsp64_wqe_t *trsp = (bcm_fcp_trsp64_wqe_t *)wqe;
 	struct spdk_nvmf_fc_hwqp *hwqp = fc_req->hwqp;
 
-	if (nvmf_fc_use_send_frame(&fc_req->req)) {
+	if (nvmf_fc_use_send_frame(fc_req)) {
 		return nvmf_fc_sendframe_rsp(fc_req, ersp_buf, ersp_len);
 	}
 
@@ -3437,7 +3433,6 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 	trsp->cmd_type = BCM_CMD_FCP_TRSP64_WQE;
 	trsp->nvme = 1;
 
-#ifdef _FIXME_
 	/* Priority */
 	if (fc_req->csctl) {
 		trsp->ccpe = true;
@@ -3450,9 +3445,7 @@ nvmf_fc_xmt_rsp(struct spdk_nvmf_fc_request *fc_req, uint8_t *ersp_buf, uint32_t
 		trsp->app_id = fc_req->app_id;
 		trsp->wqes = 1;
 	}
-#endif
 
-	//fc_req->rxid = fc_req->xchg->xchg_id;
 	rc = nvmf_fc_post_wqe(hwqp, (uint8_t *)trsp, true, nvmf_fc_io_cmpl_cb, fc_req);
 	if (!rc) {
 		fc_req->xchg->active = true;

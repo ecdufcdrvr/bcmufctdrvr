@@ -91,11 +91,19 @@ ocs_sriov_enable_vfs(ocs_t *ocs)
 	return -1;
 }
 
+extern spdk_nvmf_transport_destroy_done_cb g_transport_destroy_done_cb_fn;
+extern void *g_transport_destroy_done_cb_arg;
+
 int32_t
 ocsu_spdk_shutdown_thread(ocs_thread_t *mythread)
 {
 	ocsu_exit();
 
+	if (g_transport_destroy_done_cb_fn) {
+		ocs_log_info(NULL, "Notify transport destroy done\n");
+		spdk_thread_send_msg(g_spdk_master_thread, g_transport_destroy_done_cb_fn,
+				g_transport_destroy_done_cb_arg);
+	}
 	return 0;
 }
 

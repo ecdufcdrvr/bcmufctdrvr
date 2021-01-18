@@ -44,7 +44,7 @@ typedef void (*spdk_nvmf_fc_caller_cb)(void *hwqp, int32_t status, void *args);
 
 int nvmf_fc_lld_init(void);
 
-void nvmf_fc_lld_fini(void);
+void nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx);
 
 void nvmf_fc_lld_start(void);
 

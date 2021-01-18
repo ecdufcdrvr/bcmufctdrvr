@@ -98,12 +98,4 @@ int ocs_nvme_del_initiator(ocs_node_t *node);
 int ocs_nvme_tgt_del_sport(ocs_sport_t *sport);
 int ocs_send_msg_to_worker(ocs_t *ocs, ocs_spdk_worker_msg_t msg, bool sync,
 		       ocs_spdk_worker_func func, void *func_arg1);
-
-#ifndef _FIXME_
-#include "nvmf_fc.h"
-struct spdk_nvmf_fc_port *spdk_nvmf_fc_port_lookup(uint8_t port_hdl);
-int nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port);
-int nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port);
-#endif
-
 #endif //__OCS_SPDK_NVMET_H__
