@@ -2574,7 +2574,7 @@ nvmf_fc_process_fused_command(struct spdk_nvmf_fc_request *fc_req)
 	if (!command_1 || !command_2) {
 		/* Wait for other command. */
 		TAILQ_INSERT_TAIL(&fc_conn->fused_waiting_queue, fc_req, fused_link);
-		spdk_nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_FUSED_WAITING);
+		nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_FUSED_WAITING);
 		return;
 	}
 
