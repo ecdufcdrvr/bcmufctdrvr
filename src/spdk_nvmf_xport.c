@@ -2617,7 +2617,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 
 	/* Write Tranfer done */
 	if (fc_req->state == SPDK_NVMF_FC_REQ_WRITE_XFER) {
-		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
+		fc_req->transferred_len = cqe_entry->u.generic.word1.total_data_placed;
 
 		if (nvmf_fc_is_fused_command(&fc_req->req.cmd->nvme_cmd)) {
 			nvmf_fc_process_fused_command(fc_req);
@@ -2632,7 +2632,7 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	/* Read Tranfer done */
 	else if (fc_req->state == SPDK_NVMF_FC_REQ_READ_XFER) {
 
-		fc_req->transfered_len = cqe_entry->u.generic.word1.total_data_placed;
+		fc_req->transferred_len = cqe_entry->u.generic.word1.total_data_placed;
 
 		nvmf_fc_request_set_state(fc_req, SPDK_NVMF_FC_REQ_READ_RSP);
 		if (nvmf_fc_handle_rsp(fc_req)) {
