@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -70,30 +72,59 @@
 extern struct bin_attribute ocs_sysfs_fw_dump_attr;
 extern struct bin_attribute ocs_sysfs_fw_error_attr;
 
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 static inline void
 ocs_mm_read_lock(struct mm_struct *mm)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	down_read(&mm->mmap_sem);
+#else
+	down_read(&mm->mmap_lock);
+#endif
 }
 
 static inline void
 ocs_mm_read_unlock(struct mm_struct *mm)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	up_read(&mm->mmap_sem);
+#else
+	up_read(&mm->mmap_lock);
+#endif
 }
 #endif
 
-#if defined(OCS_INCLUDE_FC)
+void ocs_handle_userapp_lost(ocs_t *ocs);
+void ocs_handle_uapi_rdy(ocs_t *ocs);
+void ocs_nvme_irq_notify(uint32_t eq_index, int cpu);
+
+static inline void
+ocs_io_setup_wq_steering(ocs_io_t *io, uint32_t flags)
+{
+	/* If no steering request is set, use request based steering as default */
+	io->wq_steering = (flags & OCS_SCSI_WQ_STEERING_MASK) >> OCS_SCSI_WQ_STEERING_SHIFT;
+	if (!io->wq_steering)
+		io->wq_steering = OCS_SCSI_WQ_STEERING_REQUEST >> OCS_SCSI_WQ_STEERING_SHIFT;
+	io->wq_class = (flags & OCS_SCSI_WQ_CLASS_MASK) >> OCS_SCSI_WQ_CLASS_SHIFT;
+}
+
+static inline uint32_t
+ocs_get_cq_config_process_limit(ocs_t *ocs)
+{
+	return ocs->cq_process_limit;
+}
+
 static inline bool
 ocs_eq_process_watch_yield(void)
 {
-#if defined(OCS_INCLUDE_SCST)
-        return true;
+#if !defined(OCS_USPACE)
+	/* Kernel mode drivers must yield */
+	return true;
 #else
-        return false;
+	return false;
 #endif
 }
-#endif
+
+extern bool ocs_virtfn(ocs_t *ocs);
 
 #endif // __OCS_COMPAT_H__

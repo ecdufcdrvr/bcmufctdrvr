@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -345,7 +347,7 @@ ocs_textbuf_buffer(ocs_textbuf_t *textbuf, uint8_t *buffer, uint32_t buffer_leng
 {
 	char *s;
 
-	if (!ocs_textbuf_initialized(textbuf)) {
+	if (!ocs_textbuf_initialized(textbuf) || !buffer) {
 		return;
 	}
 

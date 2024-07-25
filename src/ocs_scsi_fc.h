@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -40,11 +42,11 @@
 #if !defined(__OCS_SCSI_FC_H__)
 #define __OCS_SCSI_FC_H__
 
-
 /* Calls within base driver */
 extern int32_t ocs_scsi_io_dispatch(ocs_io_t *io, void *cb);
 extern void ocs_scsi_io_dispatch_abort(ocs_io_t *io, void *hal_abort_cb, bool send_abts);
 extern void ocs_scsi_check_pending(ocs_t *ocs);
-extern void ocs_scsi_io_cancel(ocs_node_t *node);
+extern void ocs_scsi_active_io_cancel(ocs_node_t *node);
+extern void ocs_scsi_pending_io_cancel(ocs_node_t *node);
 
 #endif // __OCS_SCSI_FC_H__

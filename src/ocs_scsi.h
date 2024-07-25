@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +43,7 @@
 
 #include "ocs_ddump.h"
 #include "ocs_mgmt.h"
+#include "ocs_fcp.h"
 
 /* ocs_scsi_rcv_cmd() ocs_scsi_rcv_tmf() flags */
 #define OCS_SCSI_CMD_DIR_IN		(1U << 0)
@@ -63,9 +66,9 @@
 
 #define OCS_SCSI_WQ_STEERING_SHIFT	(16)
 #define OCS_SCSI_WQ_STEERING_MASK	(0xf << OCS_SCSI_WQ_STEERING_SHIFT)
-#define OCS_SCSI_WQ_STEERING_CLASS	(0 << OCS_SCSI_WQ_STEERING_SHIFT)
-#define OCS_SCSI_WQ_STEERING_REQUEST	(1 << OCS_SCSI_WQ_STEERING_SHIFT)
-#define OCS_SCSI_WQ_STEERING_CPU	(2 << OCS_SCSI_WQ_STEERING_SHIFT)
+#define OCS_SCSI_WQ_STEERING_CLASS	(1 << OCS_SCSI_WQ_STEERING_SHIFT)
+#define OCS_SCSI_WQ_STEERING_REQUEST	(2 << OCS_SCSI_WQ_STEERING_SHIFT)
+#define OCS_SCSI_WQ_STEERING_CPU	(3 << OCS_SCSI_WQ_STEERING_SHIFT)
 
 #define OCS_SCSI_WQ_CLASS_SHIFT		(20)
 #define OCS_SCSI_WQ_CLASS_MASK		(0xf << OCS_SCSI_WQ_CLASS_SHIFT)
@@ -74,6 +77,15 @@
 #define OCS_SCSI_WQ_CLASS_LOW_LATENCY	(1)
 
 #define OCS_SCSI_MAX_LOG_LEN		256
+
+typedef enum {
+	OCS_SCSI_IO_PROC_CMD_RECVD_TSTART = 0,
+	OCS_SCSI_IO_PROC_CMD_RECVD_TFIN,
+	OCS_SCSI_IO_PROC_CMD_SUBMITTED_TSTART,
+	OCS_SCSI_IO_PROC_CMD_SUBMITTED_TFIN,
+
+	OCS_SCSI_IO_PROC_CMD_STAGE_MAX,
+} ocs_scsi_io_proc_time_e;
 
 /*!
  * @defgroup scsi_api_base SCSI Base Target/Initiator
@@ -119,8 +131,51 @@ typedef enum {
 	OCS_SCSI_STATUS_TIMEDOUT_AND_ABORTED,
 	OCS_SCSI_STATUS_SHUTDOWN,
 	OCS_SCSI_STATUS_NEXUS_LOST,
-
 } ocs_scsi_io_status_e;
+
+/* Sense Keys */
+#define SNS_NOT_READY				0x02	/* sense key - not ready */
+#define SNS_ILLEGAL_REQ				0x05	/* sense key is byte 3 ([2]) */
+#define SNS_UNIT_ATTENTION			0x06
+#define SNS_ABORTED_CMD				0x0B	/* sense key - aborted command */
+
+/* Sense Codes */
+#define SNSCODE_INV_CMDIU			0x0E	/* INVALID FIELD IN COMMAND IU */
+#define SNSCODE_DIF_ERR				0x10	/* ID CRC OR ECC ERROR */
+#define SNSCODE_BAD_CMD				0x20	/* INVALID COMMAND OPERATION CODE */
+#define SNSCODE_LBA_OOR				0x21	/* LOGICAL BLOCK ADDRESS OUT OF RANGE */
+#define SNSCODE_INV_CDB				0x24	/* INVALID FIELD IN CDB */
+#define SNSCODE_INV_PRM				0x26	/* INVALID FIELD IN PARAMETER LIST */
+#define SNSCODE_SAVE_NOT_SUPPORTED		0x39	/* SAVING PARAMETERS NOT SUPPORTED */
+#define SNSCODE_ABORTED_CMD			0x47	/* Aborted command */
+#define SNSCODE_OFF_ERR				0x4B	/* DATA PHASE ERROR */
+
+/* Additional Sense Code Qualifiers */
+#define SNSCODEQUAL_INV_CMDIU			0x03	/* INVALID FIELD IN COMMAND IU */
+
+/**
+ * @brief Defines the standard sense response bits per the
+ * <i>SCSI Primary Commands (SPC) specification</i>.
+ */
+typedef struct {
+	uint8_t response_code:7,
+		:1;
+	uint8_t :8;
+	uint8_t sense_key:4,
+		:1,
+		ili:1,
+		eom:1,
+		filemark:1;
+	uint8_t information[4];
+	uint8_t additional_sense_length;
+	uint8_t command_specific_information[4];
+	uint8_t asc;
+	uint8_t ascq;
+	uint8_t fru_code;
+	uint8_t sense_key_specific_hi:7,
+		sksv:1;
+	uint8_t sense_key_specific_lo[2];
+} fixed_sense_data_t;
 
 /* Callback used by send_rd_data(), recv_wr_data(), send_resp() */
 typedef int32_t (*ocs_scsi_io_cb_t)(ocs_io_t *io, ocs_scsi_io_status_e status, uint32_t flags, void *arg);
@@ -145,12 +200,12 @@ typedef enum {
 	OCS_SCSI_TMF_LOGICAL_UNIT_RESET,
 	OCS_SCSI_TMF_CLEAR_ACA,
 	OCS_SCSI_TMF_TARGET_RESET,
+	OCS_SCSI_TMF_IT_NEXUS_LOSS,
 } ocs_scsi_tmf_cmd_e;
 
 /* ocs_scsi_send_tmf_resp() response values */
 typedef enum {
 	OCS_SCSI_TMF_FUNCTION_COMPLETE = 1,
-	OCS_SCSI_TMF_FUNCTION_SUCCEEDED,
 	OCS_SCSI_TMF_FUNCTION_IO_NOT_FOUND,
 	OCS_SCSI_TMF_FUNCTION_REJECTED,
 	OCS_SCSI_TMF_INCORRECT_LOGICAL_UNIT_NUMBER,
@@ -228,18 +283,17 @@ typedef struct {
 	ocs_scsi_dif_oper_e dif_oper;
 	ocs_scsi_dif_blk_size_e blk_size;
 	uint32_t ref_tag;
-	uint32_t app_tag:16,
-		check_ref_tag:1,
-		check_app_tag:1,
-		check_guard:1,
-		dif_separate:1,
+	uint16_t app_tag;
+	bool	check_ref_tag;
+	bool	check_app_tag;
+	bool	check_guard;
+	bool	dif_separate;
 
 		/* If the APP TAG is 0xFFFF, disable checking the REF TAG and CRC fields */
-		disable_app_ffff:1,
+	bool	disable_app_ffff;
 
 		/* if the APP TAG is 0xFFFF and REF TAG is 0xFFFF_FFFF, disable checking the received CRC field. */
-		disable_app_ref_ffff:1,
-		:10;
+	bool	disable_app_ref_ffff;
 	uint64_t lba;
 } ocs_scsi_dif_info_t;
 
@@ -258,10 +312,23 @@ typedef enum {
 	OCS_SCSI_IO_ROLE_RESPONDER,
 } ocs_scsi_io_role_e;
 
+typedef struct ocs_sframe_rsp_args_s {
+	uint32_t s_id;
+	uint32_t d_id;
+	uint32_t ox_id;
+	uint32_t rx_id;
+	void (*callback)(ocs_hal_t *hal, int32_t status, void *arg);
+	void *cb_arg;
+	fcp_rsp_iu_t *fcprsp;
+	uint32_t fcprsp_len;
+} ocs_sframe_rsp_args_t;
+
+extern int32_t ocs_sframe_send_fcp_rsp(ocs_node_t *node, ocs_sframe_rsp_args_t *fcp_args);
+
 extern void ocs_scsi_io_alloc_enable(ocs_node_t *node);
 extern void ocs_scsi_io_alloc_disable(ocs_node_t *node);
 extern int32_t ocs_scsi_io_alloc_enabled(ocs_node_t *node);
-extern ocs_io_t *ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role);
+extern ocs_io_t *ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role, uint32_t eq_idx);
 extern void ocs_scsi_io_free(ocs_io_t *io);
 extern ocs_io_t *ocs_io_get_instance(ocs_t *ocs, uint32_t index);
 extern void ocs_scsi_register_bounce(ocs_t *ocs, void(*fctn)(void(*fctn)(void *arg), void *arg,
@@ -275,20 +342,20 @@ extern uint32_t ocs_scsi_tgt_io_state(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_io_init(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_io_exit(ocs_io_t *io);
 extern int32_t ocs_scsi_tgt_new_device(ocs_t *ocs);
+extern void ocs_tgt_common_new_device(ocs_t *ocs);
+extern void ocs_tgt_common_del_device(ocs_t *ocs);
 extern int32_t ocs_scsi_tgt_del_device(ocs_t *ocs);
 extern int32_t ocs_scsi_tgt_new_domain(ocs_domain_t *domain);
 extern int ocs_scsi_tgt_del_domain(ocs_domain_t *domain);
 extern int32_t ocs_scsi_tgt_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_tgt_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_validate_initiator(ocs_node_t *node);
-extern int32_t ocs_scsi_new_initiator(ocs_node_t *node);
+extern int32_t ocs_scsi_new_initiator(ocs_node_t *node, void *cbdata);
+extern int32_t ocs_scsi_del_initiator(ocs_node_t *node, void *cbdata);
+extern bool ocs_tgt_scsi_backend_enabled(ocs_t *ocs, ocs_sport_t *sport);
+extern bool ocs_ini_scsi_backend_enabled(ocs_t *ocs, ocs_sport_t *sport);
+extern bool ocs_scsi_backend_enabled(ocs_t *ocs, ocs_sport_t *sport);
 
-typedef enum {
-	OCS_SCSI_INITIATOR_DELETED,
-	OCS_SCSI_INITIATOR_MISSING,
-} ocs_scsi_del_initiator_reason_e;
-
-extern int32_t ocs_scsi_del_initiator(ocs_node_t *node, ocs_scsi_del_initiator_reason_e reason);
 extern int32_t ocs_scsi_recv_cmd(ocs_io_t *io, uint64_t lun, uint8_t *cdb, uint32_t cdb_len, uint32_t flags);
 extern int32_t ocs_scsi_recv_cmd_first_burst(ocs_io_t *io, uint64_t lun, uint8_t *cdb, uint32_t cdb_len,
 	uint32_t flags, ocs_dma_t first_burst_buffers[], uint32_t first_burst_bytes);
@@ -315,9 +382,7 @@ extern int32_t ocs_scsi_tgt_abort_io(ocs_io_t *io, bool send_abts, ocs_scsi_io_c
 extern void ocs_scsi_io_complete(ocs_io_t *io);
 extern uint32_t ocs_scsi_get_property(ocs_t *ocs, ocs_scsi_property_e prop);
 extern void *ocs_scsi_get_property_ptr(ocs_t *ocs, ocs_scsi_property_e prop);
-
-extern void ocs_scsi_del_initiator_complete(ocs_node_t *node);
-
+extern void ocs_scsi_del_initiator_complete(ocs_node_t *node, void *cbdata);
 extern void ocs_scsi_update_first_burst_transferred(ocs_io_t *io, uint32_t transferred);
 
 /* Calls from base driver to initiator-client */
@@ -328,24 +393,22 @@ extern int32_t ocs_scsi_ini_io_init(ocs_io_t *io);
 extern int32_t ocs_scsi_ini_io_exit(ocs_io_t *io);
 extern int32_t ocs_scsi_host_ml_registered(ocs_t *ocs);
 extern int ocs_scsi_ini_update_fc_host(ocs_t *ocs, uint64_t port_name, uint64_t node_name);
+extern void ocs_scsi_ini_update_symbolic_name(ocs_t *ocs);
 extern int32_t ocs_scsi_ini_new_device(ocs_t *ocs);
 extern int32_t ocs_scsi_ini_del_device(ocs_t *ocs);
 extern int32_t ocs_scsi_ini_new_domain(ocs_domain_t *domain);
 extern int32_t ocs_scsi_host_update_supported_speed(ocs_t *ocs);
+extern void ocs_scsi_host_set_supported_mode(ocs_t *ocs);
+extern void ocs_scsi_host_set_active_mode(ocs_t *ocs);
 extern void ocs_scsi_ini_del_domain(ocs_domain_t *domain);
 extern int32_t ocs_scsi_ini_new_sport(ocs_sport_t *sport);
 extern void ocs_scsi_ini_del_sport(ocs_sport_t *sport);
 extern int32_t ocs_scsi_new_target(ocs_node_t *node);
+extern int32_t ocs_scsi_del_target(ocs_node_t *node);
 
 extern void ocs_get_os_host_name(ocs_t *ocs, void *os_ver_name_str, size_t size);
 extern void ocs_get_os_version_and_name(ocs_t *ocs, void *os_ver_name_str, size_t size);
-extern void ocs_scsi_get_host_name(ocs_t *ocs, void *host_name, size_t size);
-
-typedef enum {
-	OCS_SCSI_TARGET_DELETED,
-	OCS_SCSI_TARGET_MISSING,
-} ocs_scsi_del_target_reason_e;
-extern int32_t ocs_scsi_del_target(ocs_node_t *node, ocs_scsi_del_target_reason_e reason);
+extern void ocs_scsi_get_host_devname(ocs_t *ocs, void *host_devname, size_t size);
 
 /* Calls from the initiator-client to the base driver */
 
@@ -395,6 +458,6 @@ void ocs_scsi_tgt_sess_del_wait(ocs_sport_t *sport);
 void ocs_scsi_tgt_vport_node_shutdown(ocs_sport_t *sport);
 void ocs_scsi_tgt_count_sessions(ocs_t *ocs, uint64_t wwpn);
 int32_t ocs_scsi_tgt_port_online(ocs_t *ocs);
-extern void ocs_vport_logout_notify(ocs_node_t *node);
+extern void ocs_vport_logout_notify(ocs_sport_t *sport);
 
 #endif // __OCS_SCSI_H__

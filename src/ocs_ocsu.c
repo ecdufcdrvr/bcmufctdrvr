@@ -1,34 +1,35 @@
 /*
- *  BSD LICENSE
+ * BSD LICENSE
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -44,7 +45,7 @@
 #include "ocs_impl_spdk.h"
 #include "ocs_recovery.h"
 
-#include "ocs_spdk.h"
+#include "spdk_probe.h"
 #include "spdk/env.h"
 #include "spdk/string.h"
 #include "spdk/event.h"
@@ -67,8 +68,8 @@
 #define SPDK_PCI_PATH_MAX	256
 
 struct ocs_spdk_device {
-	struct spdk_pci_device  *spdk_pci_dev;
-	struct spdk_ocs_t	*ocs;
+	struct spdk_pci_device *spdk_pci_dev;
+	struct spdk_ocs	*ocs;
 	TAILQ_ENTRY(ocs_spdk_device) tailq;
 };
 
@@ -104,6 +105,7 @@ ocsu_spdk_shutdown_thread(ocs_thread_t *mythread)
 		spdk_thread_send_msg(g_spdk_master_thread, g_transport_destroy_done_cb_fn,
 				g_transport_destroy_done_cb_arg);
 	}
+
 	return 0;
 }
 
@@ -280,7 +282,7 @@ probe_cb(void *cb_ctx, struct spdk_pci_device *pci_dev)
 }
 
 static void
-attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ocs_t *spdk_ocs)
+attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ocs *spdk_ocs)
 {
 	struct ocs_spdk_device *dev;
 
@@ -347,7 +349,7 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	int32_t rc = -1, num_interrupts;
 	uint32_t num_cores = 0;
 	const char *desc = "Unknown adapter";
-	struct spdk_ocs_get_pci_config_t pciconfig;
+	struct spdk_ocs_get_pci_config pciconfig;
 
 	num_cores = spdk_env_get_core_count();
 	if (num_cores > OCS_NVME_FC_MAX_IO_QUEUES) {
@@ -379,6 +381,12 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LANCER_G7_FC):
 			desc = "Emulex LightPulse G7 32Gb FC Adapter";
 			break;
+		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LANCER_G7PLUS_FC):
+			desc = "Emulex LightPulse G7+ 64Gb FC Adapter";
+			break;
+		case PCI_DEVICE(PCI_VENDOR_EMULEX, PCI_PRODUCT_EMULEX_LANCER_G7PLUS_S_FC):
+			desc = "Emulex LightPulse G7+ S 64Gb FC Adapter";
+			break;
 		default:
 		{
 			ocs_log_err(NULL, "Unsupported device found.");
@@ -387,7 +395,7 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 		}
 	}
 
-	ocs->desc	= desc;
+	ocs->desc = desc;
 	ocs->ocs_os.spdk_pdev	= pci_dev;
 	ocs->ocs_os.pagesize 	= sysconf(_SC_PAGE_SIZE);
 	ocs->ocs_os.bus		= pciconfig.bus;
@@ -410,7 +418,7 @@ ocsu_device_init(struct spdk_pci_device *pci_dev)
 	ocs->enable_tgt = target;
 	ocs_snprintf(ocs->ocs_os.queue_topology, sizeof(ocs->ocs_os.queue_topology),
 		     MRQ_TOPOLOGY, num_cores);
-	hal_global.queue_topology_string = ocs->ocs_os.queue_topology;
+	ocs->queue_topology = ocs->ocs_os.queue_topology;
 
 	num_interrupts = ocs_device_interrupts_required(ocs);
 	if (num_interrupts < 0) {
@@ -496,6 +504,7 @@ ocsu_init(void)
 
 	rc = ocs_device_init();
 	if (rc) {
+		fprintf(stderr, "ocs_device_init failed\n");
 		return rc;
 	}
 
@@ -584,6 +593,8 @@ ocsu_exit(void)
 	struct ocs_spdk_device *dev;
 	ocs_t *ocs;
 
+	ocs_fw_err_recovery_stop();	
+
 	for_each_ocs(i, ocs) {
 		if (!ocs)
 			continue;
@@ -591,8 +602,6 @@ ocsu_exit(void)
 		ocs_device_detach(ocs);
 		ocs_nvme_hw_port_free(ocs);
 	}
-
-	ocs_fw_err_recovery_stop();	
 
 	while (!TAILQ_EMPTY(&g_devices)) {
 		dev = TAILQ_FIRST(&g_devices);
@@ -633,7 +642,7 @@ ocsu_process_events(ocs_t *ocs)
 	uint32_t eq_count = ocs_hal_get_num_eq(&ocs->hal);
 
 	for (i = 0; i < eq_count; i++) {
-		if (!ocs->hal.hal_eq[i]->nvmeq) {
+		if (ocs->hal.hal_eq[i] && !ocs->hal.hal_eq[i]->nvmeq) {
 			ocs_hal_process(&ocs->hal, i, OCS_OS_MAX_ISR_TIME_MSEC);
 		}
 	}
@@ -695,8 +704,19 @@ static struct spdk_pci_id ocs_pci_driver_id[] = {
 	 .subvendor_id = SPDK_PCI_ANY_ID,
 	 .subdevice_id = SPDK_PCI_ANY_ID,
 	},
+	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
+	 .vendor_id = SPDK_PCI_VID_OCS,
+	 .device_id = PCI_DEVICE_ID_OCS_LANCERG7PLUS,
+	 .subvendor_id = SPDK_PCI_ANY_ID,
+	 .subdevice_id = SPDK_PCI_ANY_ID,
+	},
+	{ .class_id = SPDK_PCI_CLASS_ANY_ID,
+	 .vendor_id = SPDK_PCI_VID_OCS,
+	 .device_id = PCI_DEVICE_ID_OCS_LANCERG7PLUS_S,
+	 .subvendor_id = SPDK_PCI_ANY_ID,
+	 .subdevice_id = SPDK_PCI_ANY_ID,
+	},
 };
 
 SPDK_PCI_DRIVER_REGISTER(vfio_pci, ocs_pci_driver_id,
 			SPDK_PCI_DRIVER_NEED_MAPPING | SPDK_PCI_DRIVER_WC_ACTIVATE);
-

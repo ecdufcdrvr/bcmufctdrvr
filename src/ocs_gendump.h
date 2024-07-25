@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,21 +51,15 @@
 #define OCS_RESET_LEVEL_PORT			OCS_FW_FUNC_DESC_DUMP
 
 /* FW dump type flags */
+#define OCS_FW_DUMP_TYPE_NONE			0
 #define OCS_FW_DUMP_TYPE_DUMPTOHOST		1
 #define OCS_FW_DUMP_TYPE_FLASH			2
-
-/* FW dump ready status flags */
-#define OCS_FW_DUMP_READY_STATUS_NOT_READY	0
-#define OCS_FW_DUMP_READY_STATUS_DD_PRESENT	1
-#define OCS_FW_DUMP_READY_STATUS_FDB_PRESENT	2
-#define OCS_FW_DUMP_READY_STATUS_SKIP_DUMP	3
-#define OCS_FW_DUMP_READY_STATUS_FAILED		-1
 
 struct ocs_fw_dump {
 	uint8_t *saved_buff;
 	uint32_t size;
 	int32_t type;
-	uint32_t recover_func:1;
+	bool	recover_func; /* locking: recovery lock */
 
 	uint32_t num_chip_dump_buffers;
 	uint32_t num_func_dump_buffers;
@@ -75,8 +71,8 @@ struct ocs_fw_dump {
 	uint32_t state;
 };
 
-extern void ocs_fw_dump_init(ocs_t *ocs, int32_t fw_dump_type);
-extern int32_t ocs_trigger_dump(ocs_t *ocs, uint8_t dump_level);
+extern bool ocs_fw_dump_type_validate(ocs_t *ocs);
+extern int32_t ocs_trigger_reset_dump(ocs_t *ocs, uint8_t dump_level, bool trigger_dump);
 extern int32_t ocs_fw_dump_state_check(ocs_t *ocs, uint32_t state);
 extern void ocs_fw_dump_state_set(ocs_t *ocs, uint32_t state);
 extern int32_t ocs_gendump(ocs_t *ocs, uint8_t dump_level, bool force);
@@ -85,10 +81,10 @@ extern int32_t ocs_fw_dump_copy_to_user(ocs_t *ocs, uint8_t *user_buff, uint32_t
 extern int32_t ocs_dump_to_host(ocs_t *ocs, void *buf, uint32_t buflen, uint8_t dump_level);
 extern void ocs_device_send_fw_dump_uevent(ocs_t *ocs, uint8_t dump_level);
 extern int32_t ocs_device_trigger_fw_dump(ocs_t *ocs, uint8_t dump_level);
-extern void ocs_device_trigger_fw_error(ocs_t *ocs, uint8_t dump_level);
+extern void ocs_device_trigger_fw_error(ocs_t *ocs, uint8_t dump_level, bool trigger_dump);
 extern int32_t ocs_fw_dump_save(ocs_t *ocs, uint8_t dump_level);
-extern int32_t ocs_fw_dump_req(ocs_t *ocs, uint8_t dump_level);
-extern int32_t ocs_fw_reset(ocs_t *ocs, uint8_t dump_level);
+extern int32_t ocs_device_request_reset_dump(ocs_t *ocs, uint8_t dump_level, bool trigger_dump);
+extern int32_t ocs_fw_reset(ocs_t *ocs, bool trigger_dump);
 extern int32_t ocsu_gendump(ocs_t *ocs);
 
 #endif // __OCS_GENDUMP_H__

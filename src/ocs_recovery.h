@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,8 +40,10 @@
 #define OCS_RECOVERY_MODE_AUTO			2
 
 /* FW error recovery states */
-#define OCS_RECOVERY_STATE_IDLE		0x0
-#define OCS_RECOVERY_STATE_IN_PROGRESS	0x1
+#define OCS_RECOVERY_STATE_NOT_INIT			0x0
+#define OCS_RECOVERY_STATE_IDLE				0x1
+#define OCS_RECOVERY_STATE_STOP				0x2
+#define OCS_RECOVERY_STATE_IN_PROGRESS			0x3
 
 /* FW error recovery status codes */
 #define OCS_RECOVERY_STATUS_SUCCESS	0
@@ -51,12 +55,19 @@ typedef struct ocs_fw_error_recovery_s {
 
 	ocs_lock_t lock;
 	uint32_t state;
+	ocs_atomic_t pci_err_ref;
 } ocs_fw_error_recovery_t;
 
 extern bool ocs_recovery_state_check(uint32_t state);
-extern bool ocs_recovery_state_set(uint32_t state);
-extern int32_t ocs_recovery_reset(ocs_t *ocs, uint32_t reset_mode, uint8_t reset_level, bool reset_fw);
+extern uint8_t ocs_recovery_state_set(uint32_t state);
+extern void ocs_recovery_pci_err_state(bool enable);
+extern int ocs_recovery_state_set_stop(void);
+extern void ocs_adapter_hal_inactive(ocs_t *ocs, bool port_reset);
+extern int32_t ocs_recovery_reset(ocs_t *ocs, uint32_t reset_mode, uint8_t reset_level, bool trigger_dump);
+extern void ocs_fw_err_recovery_init(void);
 extern int32_t ocs_fw_err_recovery_setup(void);
 extern void ocs_fw_err_recovery_stop(void);
+
+extern bool ocs_node_shutdown_timedout(ocs_t *ocs);
 
 #endif

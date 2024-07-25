@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,93 +35,183 @@
 #include "ocs.h"
 #include "ocs_gendump.h"
 #include "ocs_recovery.h"
+#include "ocs_compat.h"
 
 #define OCS_MAX_HBA_PORTS			4
 #define OCS_XPORT_QUIESCED_TIMEOUT_MSEC		60000
 
-ocs_lock_t ocs_dump_lock;
+ocs_sem_t ocs_dump_sem;
 
 /**
- * @brief Initialize fw dump context
+ * @brief Validate FW dump type
+ *
+ * @return True if FW dump type is valid otherwise false
  */
-void
-ocs_fw_dump_init(ocs_t *ocs, int32_t fw_dump_type)
+bool
+ocs_fw_dump_type_validate(ocs_t *ocs)
 {
-	if (ocs_instance(ocs) == 0) {
-		ocs_lock_init(NULL, &ocs_dump_lock, "dump_access_lock");
+	char prop_buf[32];
+	int32_t fw_dump_type = OCS_FW_DUMP_TYPE_NONE;
+
+	if (0 == ocs_get_property("fw_dump_type", prop_buf, sizeof(prop_buf))) {
+		fw_dump_type = ocs_strtoul(prop_buf, 0, 0);
 	}
 
-	/* Init fw dump lock */
-	ocs_lock_init(ocs, &ocs->fw_dump.lock, "fw_dump_lock[%d]", ocs_instance(ocs));
 	ocs->fw_dump.state = OCS_FW_DUMP_STATE_NONE;
-	ocs->fw_dump.type = fw_dump_type;
 	ocs->fw_dump.chip_dump_buffers = NULL;
 	ocs->fw_dump.func_dump_buffers = NULL;
 	ocs->fw_dump.num_chip_dump_buffers = 0;
 	ocs->fw_dump.num_func_dump_buffers = 0;
+	ocs_lock_init(ocs, &ocs->fw_dump.lock, OCS_LOCK_ORDER_IGNORE,
+			"fw_dump_lock[%d]", ocs_instance(ocs));
+
+	/* OCS virtfn check at first place */
+	if (ocs_virtfn(ocs)) {
+		ocs->fw_dump.type = OCS_FW_DUMP_TYPE_NONE;
+		return true;
+	}
+
+	if (fw_dump_type != OCS_FW_DUMP_TYPE_DUMPTOHOST &&
+	    fw_dump_type != OCS_FW_DUMP_TYPE_FLASH) {
+		ocs_log_info(ocs, "Invalid FW dump type\n");
+		return false;
+	}
+
+	ocs_log_info(ocs, "Selected FW dump type %s\n",
+		(fw_dump_type == OCS_FW_DUMP_TYPE_DUMPTOHOST) ? "dump-to-host" : "dump-to-flash");
+	ocs->fw_dump.type = fw_dump_type;
+
+	if (ocs_instance(ocs) == 0) {
+		ocs_sem_init(&ocs_dump_sem, 1, "dump_access_sem");
+	}
+
+	return true;
+}
+
+static bool
+ocs_check_for_partial_dump(ocs_t *ocs, uint8_t dump_level)
+{
+	ocs_t *other_ocs;
+	ocs_dma_t *dump_buffers = NULL;
+	uint8_t bus, dev, func;
+	uint8_t other_bus, other_dev, other_func;
+	uint32_t index = 0, num_dwords;
+	uint32_t *dword;
+	uint32_t num_buffers = 0;
+
+	if (OCS_FW_DUMP_TYPE_DUMPTOHOST != ocs->fw_dump.type) {
+		return FALSE;
+	}
+
+	if (OCS_FW_FUNC_DESC_DUMP == dump_level) {
+		dump_buffers = ocs->fw_dump.func_dump_buffers;
+		num_buffers = ocs->fw_dump.num_func_dump_buffers;
+	} else {
+		ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
+		for_each_active_ocs(index, other_ocs) {
+			ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
+			if ((bus == other_bus) && (dev == other_dev) && (0 == other_func)) {
+				dump_buffers = other_ocs->fw_dump.chip_dump_buffers;
+				num_buffers = other_ocs->fw_dump.num_chip_dump_buffers;
+				break;
+			}
+		}
+	}
+
+	if (!dump_buffers) {
+		ocs_log_err(ocs, "Failed to locate dump buffers\n");
+		return FALSE;
+	}
+
+	for (index = 0; index < num_buffers; index++) {
+		dword = (uint32_t *)dump_buffers[index].virt;
+		num_dwords = dump_buffers[index].size / sizeof(uint32_t);
+
+		while (num_dwords) {
+			if (*dword) {
+				return TRUE;
+			}
+			dword ++;
+			num_dwords --;
+		}
+	}
+
+	return FALSE;
 }
 
 static uint32_t
-ocs_fw_dump_present(ocs_t *ocs, uint32_t *ms_waited)
+ocs_fw_dump_present(ocs_t *ocs, uint32_t *ms_waited, uint8_t dump_level)
 {
-	uint32_t dump_present = OCS_FW_DUMP_READY_STATUS_NOT_READY;
+	uint32_t dump_present = OCS_FW_DUMP_STATUS_NOT_PRESENT;
 
 	/* Wait for the dump to complete */
-	for (*ms_waited = 0; *ms_waited < SLI4_FW_DUMP_TIMEOUT_MSEC; *ms_waited += 100) {
+	for (*ms_waited = 0; *ms_waited < SLI4_FW_DUMP_TIMEOUT_MSEC;) {
 		/*
 		 * First, wait for the status register to reflect steady state
 		 * values as a result of writing to control/physdev registers.
 		 */
 		ocs_delay_msec(100);
-		ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_READY, &dump_present);
-		if (dump_present)
-			break;
+		*ms_waited += 100;
+		ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_PRESENT, &dump_present);
+		if (dump_present != OCS_FW_DUMP_STATUS_NOT_PRESENT)
+			goto done;
 	}
 
+	/* timed out waiting for dump completion, check if there's a partial dump */
+	if (ocs_check_for_partial_dump(ocs, dump_level)) {
+		ocs_log_info(ocs, "Partial firmware dump present\n");
+		dump_present = (dump_level == OCS_FW_FUNC_DESC_DUMP) ?
+			OCS_FW_DUMP_STATUS_FDB_PRESENT : OCS_FW_DUMP_STATUS_DD_PRESENT;
+	}
+done:
 	return dump_present;
 }
 
 int32_t
-ocs_trigger_dump(ocs_t *ocs, uint8_t dump_level)
+ocs_trigger_reset_dump(ocs_t *ocs, uint8_t dump_level, bool trigger_dump)
 {
+	int32_t rc;
 	uint32_t ms_waited = 0;
-	uint32_t dump_status = OCS_FW_DUMP_READY_STATUS_NOT_READY;
+	int32_t dump_status = OCS_FW_DUMP_STATUS_NOT_PRESENT;
 
 	/* If the chip is in an error state (UE'd), wait for the already triggered dump to complete */
 	if (ocs_hal_reset_pending(&ocs->hal)) {
 		ocs_log_info(ocs, "Waiting for the recovery dump to complete\n");
-		dump_status = ocs_fw_dump_present(ocs, &ms_waited);
+		dump_status = ocs_fw_dump_present(ocs, &ms_waited, dump_level);
 	}
 
-	if (OCS_FW_DUMP_READY_STATUS_NOT_READY == dump_status) {
-		ocs_log_info(ocs, "Initiating the FW dump forcefully\n");
-
-		if (OCS_HAL_RTN_SUCCESS != ocs_hal_raise_ue(&ocs->hal, dump_level)) {
+	if (OCS_FW_DUMP_STATUS_NOT_PRESENT == dump_status) {
+		if (OCS_HAL_RTN_SUCCESS != ocs_hal_raise_ue(&ocs->hal, dump_level, trigger_dump)) {
 			ocs_log_err(ocs, "Failed to trigger the FW dump\n");
 			return OCS_FW_DUMP_STATUS_FAILED;
 		}
 
-		ocs_log_info(ocs, "Dump requested, waiting for it to complete\n");
-		dump_status = ocs_fw_dump_present(ocs, &ms_waited);
+		if (trigger_dump) {
+			ocs_log_info(ocs, "FW dump requested, waiting for it to complete\n");
+			dump_status = ocs_fw_dump_present(ocs, &ms_waited, dump_level);
+		} else {
+			ocs_log_info(ocs, "FW dump is not requested\n");
+			return OCS_FW_DUMP_STATUS_SKIP_DUMP;
+		}
 	}
 
-	if (OCS_FW_DUMP_READY_STATUS_NOT_READY == dump_status) {
-		ocs_log_err(ocs, "Failed to see the FW dump (%d) after %d msec\n", dump_status, ms_waited);
-		return OCS_FW_DUMP_STATUS_FAILED;
+	switch (dump_status) {
+	case OCS_FW_DUMP_STATUS_FAILED:
+	case OCS_FW_DUMP_STATUS_NOT_PRESENT:
+		ocs_log_err(ocs, "Failed to collect the FW dump\n");
+		rc = OCS_FW_DUMP_STATUS_FAILED;
+		break;
+	case OCS_FW_DUMP_STATUS_DD_PRESENT:
+	case OCS_FW_DUMP_STATUS_FDB_PRESENT:
+		ocs_log_info(ocs, "FW dump was generated successfully after %d msec\n", ms_waited);
+		rc = OCS_FW_DUMP_STATUS_SUCCESS;
+		break;
+	default:
+		ocs_log_err(ocs, "Unexpected FW dump status %d\n", dump_status);
+		rc = OCS_FW_DUMP_STATUS_SKIP_DUMP;
 	}
 
-	if (OCS_FW_DUMP_READY_STATUS_SKIP_DUMP == dump_status) {
-		ocs_log_info(ocs, "Skipped the FW dump\n");
-		return OCS_FW_DUMP_STATUS_SKIP;
-	}
-
-	if (ms_waited) {
-		ocs_log_info(ocs, "FW dump was generated successfully in %d msec\n", ms_waited);
-	} else {
-		ocs_log_info(ocs, "FW dump was already present\n");
-	}
-
-	return OCS_FW_DUMP_STATUS_SUCCESS;
+	return rc;
 }
 
 /**
@@ -137,7 +229,7 @@ ocs_fw_dump_state_check(ocs_t *ocs, uint32_t state)
 	uint32_t index = 0;
 
 	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+	for_each_active_ocs(index, other_ocs) {
 		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 		if ((bus == other_bus) && (dev == other_dev)) {
 			/* For CLD, check the dump state only on pci func 0 */
@@ -176,7 +268,7 @@ ocs_fw_dump_state_set(ocs_t *ocs, uint32_t state)
 	uint32_t index = 0;
 
 	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+	for_each_active_ocs(index, other_ocs) {
 		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 		if ((bus == other_bus) && (dev == other_dev)) {
 			/* For CLD, set the dump state only on pci func 0 */
@@ -234,14 +326,20 @@ ocs_gendump(ocs_t *ocs, uint8_t dump_level, bool force)
 	 * And, skip this check when requested to force the dump.
 	 */
 	ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_PRESENT, &dump_present);
-	if (!force && dump_present) {
+	if (!force && (dump_present != OCS_FW_DUMP_STATUS_NOT_PRESENT)) {
 		ocs_log_info(ocs, "FW dump is already present\n");
 		return OCS_FW_DUMP_STATUS_ALREADY_PRESENT;
 	}
 
+	ocs_log_info(ocs, "Initiating chip level dump\n");
 	rc = ocs_initiate_gendump(ocs, dump_level);
-	if (rc < 0)
-		ocs_log_err(ocs, "ocs_initiate_gendump() failed\n");
+	if (rc == OCS_FW_DUMP_STATUS_SUCCESS) {
+		ocs_log_info(ocs, "Gendump is successful\n");
+	} else if (rc == OCS_FW_DUMP_STATUS_IN_PROGRESS) {
+		ocs_log_info(ocs, "Gendump is already in progress\n");
+	} else {
+		ocs_log_err(ocs, "Failed to initiate gendump\n");
+	}
 
 	return rc;
 }
@@ -262,7 +360,7 @@ ocs_fw_dump_buffers_allocated(ocs_t *ocs, uint8_t dump_level)
 		num_buffers = ocs->fw_dump.num_func_dump_buffers;
 	} else {
 		ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-		while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+		for_each_active_ocs(index, other_ocs) {
 			ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 			if ((bus == other_bus) && (dev == other_dev) && (0 == other_func)) {
 				dump_buffers = other_ocs->fw_dump.chip_dump_buffers;
@@ -383,7 +481,10 @@ ocs_dump_to_host(ocs_t *ocs, void *buf, uint32_t buflen, uint8_t dump_level)
 		return -1;
 	}
 
-	ocs_lock(&ocs_dump_lock);
+	if (ocs_sem_p(&ocs_dump_sem, OCS_SEM_FOREVER)) {
+		ocs_log_err(ocs, "ocs_sem_p: dump sem failed\n");
+		return -1;
+	}
 
 	/**
 	 * If FW dump exists already due to recovery processs,
@@ -395,6 +496,8 @@ ocs_dump_to_host(ocs_t *ocs, void *buf, uint32_t buflen, uint8_t dump_level)
 		goto check_ready;
 	}
 
+	ocs_log_info(ocs, "Initiating %s dump\n",
+		     (OCS_FW_FUNC_DESC_DUMP == dump_level) ? "Func Level" : "Chip Level");
 	rc = ocs_initiate_gendump(ocs, dump_level);
 	if (OCS_FW_DUMP_STATUS_FAILED == rc) {
 		ocs_log_err(ocs, "ocs_initiate_gendump() failed\n");
@@ -402,12 +505,12 @@ ocs_dump_to_host(ocs_t *ocs, void *buf, uint32_t buflen, uint8_t dump_level)
 	}
 
 check_ready:
-	if ((OCS_FW_DUMP_STATUS_IN_PROGRESS == rc) || (OCS_FW_DUMP_STATUS_ALREADY_PRESENT == rc)) {
+	if (OCS_FW_DUMP_STATUS_IN_PROGRESS == rc) {
 		ocs_log_debug(ocs, "Waiting for the already triggered FW dump to complete\n");
 		rc = ocs_fw_dump_ready_wait(ocs, dump_level);
 	}
 
-	if (OCS_FW_DUMP_STATUS_SUCCESS == rc) {
+	if (OCS_FW_DUMP_STATUS_SUCCESS == rc || OCS_FW_DUMP_STATUS_ALREADY_PRESENT == rc) {
 		/* Copy the dump from the DMA buffer into the user buffer */
 		rc = ocs_fw_dump_copy_to_user(ocs, (uint8_t *)buf, buflen, dump_level);
 		if (rc) {
@@ -419,7 +522,7 @@ check_ready:
 
 done:
 	ocs_fw_dump_state_set(ocs, OCS_FW_DUMP_STATE_NONE);
-	ocs_unlock(&ocs_dump_lock);
+	ocs_sem_v(&ocs_dump_sem);
 	return rc;
 }
 
@@ -434,6 +537,7 @@ ocs_device_trigger_fw_dump(ocs_t *ocs, uint8_t dump_level)
 		return rc;
 	}
 
+	ocs_log_info(ocs, "Initiating %s dump\n", str);
 	rc = ocs_initiate_gendump(ocs, dump_level);
 	if (OCS_FW_DUMP_STATUS_SUCCESS == rc) {
 		ocs_log_debug(ocs, "Captured the %s dump into host memory successfully\n", str);
@@ -450,15 +554,15 @@ ocs_device_trigger_fw_dump(ocs_t *ocs, uint8_t dump_level)
 }
 
 void
-ocs_device_trigger_fw_error(ocs_t *ocs, uint8_t dump_level)
+ocs_device_trigger_fw_error(ocs_t *ocs, uint8_t dump_level, bool trigger_dump)
 {
 	char *str = ((OCS_FW_FUNC_DESC_DUMP == dump_level) ? "Func Level" : "Chip Level");
 
 	if (ocs_recovery_state_check(OCS_RECOVERY_STATE_IDLE)) {
 		ocs_log_debug(ocs, "Triggering the %s FW error\n", str);
-		ocs_hal_raise_ue(&ocs->hal, dump_level);
 		if (OCS_FW_FUNC_DESC_DUMP == dump_level)
 			ocs->fw_dump.recover_func = TRUE;
+		ocs_hal_raise_ue(&ocs->hal, dump_level, trigger_dump);
 	} else {
 		ocs_log_debug(ocs, "FW error recovery is already in progress\n");
 	}
@@ -491,7 +595,7 @@ ocs_fw_dump_save(ocs_t *ocs, uint8_t dump_level)
 		saved_buff_size = ocs->fw_dump.size;
 	} else {
 		ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-		while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+		for_each_active_ocs(index, other_ocs) {
 			ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 			if ((bus == other_bus) && (dev == other_dev) && (0 == other_func)) {
 				dump_buffers = other_ocs->fw_dump.chip_dump_buffers;
@@ -518,36 +622,37 @@ ocs_fw_dump_save(ocs_t *ocs, uint8_t dump_level)
 
 		offset += dump_buffers[index].size;
 	}
-
-	ocs_log_info(ocs, "FW dump is saved\n");
+	ocs_log_info(ocs, "FW dump is saved. Buffsize = %u SizeFromHeader = %u\n",
+			saved_buff_size, ocs_be32toh(*((uint32_t *)saved_buff)));
 	return 0;
 }
 
 /**
- * @brief Request FW dump
+ * @brief Request for Device reset and/or FW dump
  *
  * @param ocs Pointer to ocs instance
  * @param dump_level Gendump request level can be either chip-level or fdb
+ * @param trigger_dump Trigger dump if requested
  *
  * @return OCS_FW_DUMP_STATUS_SUCCESS on success,
  *         OCS_FW_DUMP_STATUS_IN_PROGRESS if dump is already in progress, or
  *         OCS_FW_DUMP_STATUS_FAILED on failure.
  */
 int32_t
-ocs_fw_dump_req(ocs_t *ocs, uint8_t dump_level)
+ocs_device_request_reset_dump(ocs_t *ocs, uint8_t dump_level, bool trigger_dump)
 {
 	int32_t rc = OCS_FW_DUMP_STATUS_SUCCESS;
-	uint32_t skip_dump = FALSE;
+	bool skip_dump = false;
 
 	/* Validate SLI pause errors */
 	if (sli_is_paused(&ocs->hal.sli)) {
 		sli_validate_pause_errors(&ocs->hal.sli, &skip_dump);
 		/* Don't collect the FW dump if skip_dump is set */
 		if (skip_dump)
-			dump_level = OCS_FW_DUMP_LEVEL_NONE;
+			trigger_dump = false;
 	}
 
-	rc = ocs_trigger_dump(ocs, dump_level);
+	rc = ocs_trigger_reset_dump(ocs, dump_level, trigger_dump);
 	if (OCS_FW_DUMP_STATUS_SUCCESS == rc) {
 		ocs_fw_dump_save(ocs, dump_level);
 		ocs_fw_dump_state_set(ocs, dump_level);
@@ -559,16 +664,25 @@ ocs_fw_dump_req(ocs_t *ocs, uint8_t dump_level)
 }
 
 int32_t
-ocs_fw_reset(ocs_t *ocs, uint8_t dump_level)
+ocs_fw_reset(ocs_t *ocs, bool trigger_dump)
 {
-	ocs_recovery_reset(ocs, OCS_RECOVERY_MODE_MANUAL, dump_level, TRUE);
+	int32_t rc;
+	uint32_t dump_present;
 
-	while (!ocs_recovery_state_check(OCS_RECOVERY_STATE_IDLE)) {
-		/* If recovery has been triggered from a different path, wait till it completes */
-		ocs_msleep(100);
+	ocs_log_info(ocs, "Initiate FW reset\n");
+	rc = ocs_recovery_reset(ocs, OCS_RECOVERY_MODE_MANUAL, OCS_RESET_LEVEL_CHIP, trigger_dump);
+	if (OCS_RECOVERY_STATUS_IN_PROGRESS == rc) {
+		/* If recovery has been triggered from a different path,
+		 * wait till it completes
+		 */
+		while (!ocs_recovery_state_check(OCS_RECOVERY_STATE_IDLE))
+			ocs_msleep(100);
 	}
 
-	ocs_device_send_fw_dump_uevent(ocs, dump_level);
+	ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_PRESENT, &dump_present);
+	if (dump_present != OCS_FW_DUMP_STATUS_NOT_PRESENT)
+		ocs_device_send_fw_dump_uevent(ocs, OCS_FW_CHIP_LEVEL_DUMP);
+
 	return 0;
 }
 
@@ -579,15 +693,15 @@ ocsu_gendump(ocs_t *ocs)
 	uint32_t reset_required;
 
 	/* Collect the FW dump */
-	rc = ocs_trigger_dump(ocs, OCS_FW_CHIP_LEVEL_DUMP);
-	if (rc)
+	rc = ocs_trigger_reset_dump(ocs, OCS_FW_CHIP_LEVEL_DUMP, true);
+	if (OCS_FW_DUMP_STATUS_FAILED == rc)
 		return rc;
 
 	/* now reset the adapter */
 	ocs_hal_get(&ocs->hal, OCS_HAL_RESET_REQUIRED, &reset_required);
 	ocs_log_info(ocs, "Reset required=%d\n", reset_required);
 	if (reset_required) {
-		if (0 == ocs_fw_reset(ocs, OCS_FW_DUMP_LEVEL_NONE)) {
+		if (0 == ocs_fw_reset(ocs, false)) {
 			ocs_log_info(ocs, "All devices reset\n");
 		} else {
 			ocs_log_err(ocs, "All devices NOT reset\n");

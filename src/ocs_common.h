@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,7 +50,7 @@
 typedef enum {OCS_XPORT_FC, OCS_XPORT_ISCSI} ocs_xport_e;
 
 #define OCS_SERVICE_PARMS_LENGTH		0x74
-#define OCS_DISPLAY_NAME_LENGTH			32
+#define OCS_DISPLAY_NAME_LENGTH			64
 #define OCS_DISPLAY_BUS_INFO_LENGTH		16
 
 #define OCS_WWN_LENGTH				32
@@ -58,6 +60,8 @@ typedef enum {OCS_XPORT_FC, OCS_XPORT_ISCSI} ocs_xport_e;
 
 #define OCS_TARGET_TYPE_FCP			0x1
 #define OCS_TARGET_TYPE_NVME			0x2
+
+#define OCS_NODE_MAX_EXPLICIT_LOGO_RETRIES	32
 
 typedef struct ocs_hal_s ocs_hal_t;
 typedef struct ocs_domain_s ocs_domain_t;
@@ -101,11 +105,10 @@ typedef struct ocs_domain_record_s {
 	} map;
 	uint32_t	speed;		/**< link speed */
 	uint32_t	fc_id;		/**< our ports fc_id */
-	uint32_t	is_fc:1,	/**< Connection medium is native FC */
-			is_ethernet:1,	/**< Connection medium is ethernet (FCoE) */
-			is_loop:1,	/**< Topology is FC-AL */
-			is_nport:1,	/**< Topology is N-PORT */
-			:28;
+	bool		is_fc;		/**< Connection medium is native FC */
+	bool		is_ethernet;	/**< Connection medium is ethernet (FCoE) */
+	bool		is_loop;	/**< Topology is FC-AL */
+	bool		is_nport;	/**< Topology is N-PORT */
 } ocs_domain_record_t;
 
 /**
@@ -144,10 +147,12 @@ struct ocs_sli_port_s {
 	uint32_t instance_index;
 	char display_name[OCS_DISPLAY_NAME_LENGTH]; /**< sport display name */
 	ocs_domain_t *domain;			/**< current fabric domain */
-	uint32_t	is_vport:1;		/**< this SPORT is a virtual port */
+	bool		is_vport;		/**< this SPORT is a virtual port */
 	uint64_t	wwpn;			/**< WWPN from HAL (host endian) */
 	uint64_t	wwnn;			/**< WWNN from HAL (host endian) */
 	ocs_list_t node_list;			/**< list of nodes */
+	ocs_lock_t	node_shutdown_lock;
+	ocs_list_t node_shutdown_list;		/**< list of nodes in shutdown stage */
 	ocs_scsi_ini_sport_t ini_sport;		/**< initiator backend private sport data */
 	ocs_scsi_tgt_sport_t tgt_sport;		/**< target backend private sport data */
 	void	*tgt_data;			/**< target backend private pointer */
@@ -166,7 +171,7 @@ struct ocs_sli_port_s {
 	uint8_t		wwnn_str[OCS_WWN_LENGTH];	/**< WWN (ASCII) */
 	uint64_t	sli_wwpn;	/**< WWPN (wire endian) */
 	uint64_t	sli_wwnn;	/**< WWNN (wire endian) */
-	uint32_t	sm_free_req_pending:1;	/**< Free request received while waiting for attach response */
+	bool		sm_free_req_pending;	/**< Free request received while waiting for attach response */
 
 	/*
 	 * Implementation specific fields allowed here
@@ -175,13 +180,14 @@ struct ocs_sli_port_s {
 	sparse_vector_t lookup;			/**< fc_id to node lookup object */
 	ocs_list_link_t link;
 	ocs_ref_t	ref;			/**< refcount object */
-	uint32_t	enable_ini:1,		/**< SCSI initiator enabled for this node */
-			enable_tgt:1,		/**< SCSI target enabled for this node */
-			enable_rscn:1,		/**< This SPORT will be expecting RSCN */
-			shutting_down:1,	/**< sport in process of shutting down */
-			p2p_winner:1,		/**< TRUE if we're the point-to-point winner */
-			unreg_rpi_all:1,	/**< unreg all RPIs for a given VPI */
-			re_enable:1;		/**< TRUE if sport need to schedule for re-enable */
+	bool		enable_ini;		/**< SCSI initiator enabled for this node */
+	bool		enable_tgt;		/**< SCSI target enabled for this node */
+	bool		enable_rscn;		/**< This SPORT will be expecting RSCN */
+	bool		shutting_down;		/**< sport in process of shutting down: locking: device lock */
+	bool		p2p_winner;		/**< TRUE if we're the point-to-point winner: locking: device lock */
+	bool		unreg_rpi_all;		/**< unreg all RPIs for a given VPI: locking: device lock */
+	bool		re_enable;		/**< TRUE if sport has to be re-enabled: locking: device lock */
+	uint8_t		async_flush_state;      /**< Track Flush request on RQs */
 
 	uint8_t		ini_fc_types;		/**< NVME/SCSI initiator */
 	uint8_t		tgt_fc_types;		/**< NVME/SCSI target */
@@ -198,7 +204,13 @@ struct ocs_sli_port_s {
 	ocs_list_t	node_group_dir_list;
 	uint32_t	fdmi_hba_mask;
 	uint32_t	fdmi_port_mask;
+	uint32_t	num_disc_ports;
+	uint32_t	fabric_rpi;
+	uint32_t	fabric_rpi_index;
 };
+
+#define OCS_ASYNC_FLUSH_START		1
+#define OCS_ASYNC_FLUSH_COMPLETE	2
 
 /**
  * @brief Fibre Channel domain object
@@ -225,22 +237,23 @@ struct ocs_domain_s {
 	uint32_t	vlan_id;	/**< VLAN tag for this domain */
 	uint32_t	indicator;	/**< VFI */
 	ocs_dma_t	dma;		/**< memory for Service Parameters */
-	uint32_t	req_rediscover_fcf:1;	/**< TRUE if fcf rediscover is needed (in response
-						 * to Vlink Clear async event */
+	bool		req_rediscover_fcf;	/**< TRUE if fcf rediscover is needed (in response
+						 * to Vlink Clear async event: device lock */
 
 	/* Declarations private to FC transport */
 	uint64_t	fcf_wwn;	/**< WWN for FCF/switch */
 	ocs_list_link_t link;
 	ocs_sm_ctx_t	drvsm;		/**< driver domain sm context */
 	ocs_rlock_t	drvsm_lock;	/**< driver domain sm lock */
-	uint32_t	attached:1,	/**< set true after attach completes */
-			is_fc:1,	/**< is FC */
-			is_loop:1,	/**< is loop topology */
-			is_nlport:1,	/**< is public loop */
-			domain_found_pending:1,	/**< A domain found is pending, drec is updated */
-			req_domain_free:1,	/**< True if domain object should be free'd */
-			req_accept_frames:1,	/**< set in domain state machine to enable frames */
-			domain_notify_pend:1;  /** Set in domain SM to avoid duplicate node event post */
+	bool		attached;	/**< set true after attach completes: device lock */
+	bool		is_fc;		/**< is FC: device lock */
+	bool		is_loop;	/**< is loop topology: device lock */
+	bool		is_nlport;	/**< is public loop: device lock */
+	bool		domain_found_pending;	/**< A domain found is pending, drec is updated: device lock */
+	bool		req_domain_free;	/**< True if domain object should be free'd: device lock */
+	bool		req_accept_frames;	/**< set in domain state machine to enable frames: device lock */
+	bool		domain_notify_pend;  /** Set in domain SM to avoid duplicate node event post: device lock */
+	uint8_t		async_flush_state;	/**< Flush request on all RQs complete */
 	ocs_domain_record_t pending_drec; /**< Pending drec if a domain found is pending */
 	uint8_t		service_params[OCS_SERVICE_PARMS_LENGTH]; /**< any sports service parameters */
 	uint8_t		flogi_service_params[OCS_SERVICE_PARMS_LENGTH]; /**< Fabric/P2p service parameters from FLOGI */
@@ -303,9 +316,9 @@ struct ocs_remote_node_s {
 	uint32_t	index;
 	uint32_t	fc_id;		/**< FC address */
 
-	uint32_t	attached:1,	/**< true if attached */
-			node_group:1,	/**< true if in node group */
-			free_group:1;	/**< true if the node group should be free'd */
+	bool	attached;	/**< true if attached: node lock */
+	bool	node_group;	/**< true if in node group: node lock */
+	bool	free_group;	/**< true if the node group should be free'd: node lock */
 
 	ocs_sli_port_t	*sport;		/**< associated SLI port */
 
@@ -325,12 +338,20 @@ struct ocs_remote_node_group_s {
 	/*
 	 * Implementation specific fields allowed here
 	 */
-
-
 	uint32_t instance_index;		/*<< instance index */
 	ocs_node_group_dir_t *node_group_dir;	/*<< pointer to the node group directory */
 	ocs_list_link_t link;			/*<< linked list link */
 };
+
+typedef enum {
+	OCS_LS_RSP_TYPE_PLOGI = 0,
+	OCS_LS_RSP_TYPE_FCP_PRLI,
+	OCS_LS_RSP_TYPE_NVME_PRLI,
+	OCS_LS_RSP_TYPE_LOGO,
+	OCS_LS_RSP_TYPE_FCP_PRLO,
+	OCS_LS_RSP_TYPE_NVME_PRLO,
+	OCS_LS_RSP_TYPE_MAX,
+} ocs_ls_rsp_type_e;
 
 typedef enum {
 	OCS_NODE_SHUTDOWN_DEFAULT = 0,
@@ -338,11 +359,7 @@ typedef enum {
 	OCS_NODE_SHUTDOWN_IMPLICIT_LOGO,
 } ocs_node_shutd_rsn_e;
 
-typedef enum {
-	OCS_NODE_SEND_LS_RSP_NONE = 0,
-	OCS_NODE_SEND_LS_RSP_PLOGI,
-	OCS_NODE_SEND_LS_RSP_PRLI,
-} ocs_node_send_ls_rsp_e;
+#define NODE_MAGIC 0xcafecafe
 
 /**
  * @brief FC Node object
@@ -352,6 +369,7 @@ struct ocs_node_s {
 
 	ocs_t *ocs;				/**< pointer back to ocs structure */
 	uint32_t instance_index;		/**< unique instance index value */
+	uint32_t magic;				/**< for sanity checks */
 	char display_name[OCS_DISPLAY_NAME_LENGTH]; /**< Node display name */
 	ocs_sport_t *sport;
 	ocs_rlock_t lock;			/**< node wide lock */
@@ -368,27 +386,32 @@ struct ocs_node_s {
 	/* Declarations private to FC transport */
 	ocs_sm_ctx_t		sm;		/**< state machine context */
 	uint32_t		evtdepth;	/**< current event posting nesting depth */
-	uint32_t		req_free:1,	/**< this node is to be free'd */
-				mark_for_deletion:1, /**< this node is marked for deletion */
-				hold_frames:1,	/**< hold incoming frames if true */
-				attached:1,	/**< node is attached (REGLOGIN complete) */
-				fcp_enabled:1,	/**< node is enabled to handle FCP */
-				rscn_pending:1,	/**< for name server node RSCN is pending */
-				send_plogi:1,	/**< if initiator, send PLOGI at node initialization */
-				send_plogi_acc:1, /**< send PLOGI accept, upon completion of node attach */
-				io_alloc_enabled:1; /**< TRUE if ocs_scsi_io_alloc() and ocs_els_io_alloc() are enabled */
+	bool			req_free;	/**< this node is to be free'd: node lock */
+	bool			mark_for_deletion; /**< this node is marked for deletion: node lock */
+	bool			hold_frames;	/**< hold incoming frames if true */
+	bool			attached;	/**< node is attached (REGLOGIN complete): node lock */
+	bool			wait_attached;  /**< node waiting for node attach to complete */
+	bool			fcp_enabled;	/**< node is enabled to handle FCP: node lock */
+	bool			rscn_pending;	/**< for name server node RSCN is pending: node lock */
+	bool			send_plogi;	/**< if initiator, send PLOGI at node initialization: node lock*/
+	bool			send_plogi_acc; /**< send PLOGI accept, upon completion of node attach */
+	bool			io_alloc_enabled; /**< TRUE if ocs_scsi_io_alloc() and ocs_els_io_alloc() are enabled: active_ios_lock */
+	uint8_t			async_flush_state; /**< Flush request on all RQs complete */
 
 	uint16_t		ini_fct_prli_success; /** initiator mode SCSI/NVME PRLI success */
 	uint16_t		tgt_fct_prli_success; /** target mode SCSI/NVME PRLI success */
 	uint16_t		prli_rsp_pend;	/** prli sent and waiting for response */
+	uint16_t		sess_attach_pend; /** backend session registration in progress */
+	bool			remote_nvme_prli_rcvd; /** NVMe PRLI request received from remote node */
+	bool			remote_fcp_prli_rcvd; /** FCP PRLI request received from remote node */
 
-	ocs_node_send_ls_rsp_e	send_ls_rsp;	/**< type of LS rsp to send */
-	ocs_io_t		*ls_rsp_io;	/**< SCSI IO for LS response */
-	uint32_t		ls_rsp_oxid;	/**< OX_ID for pending accept */
-	uint32_t		ls_rsp_did;	/**< D_ID for pending accept */
+	/**
+	 * Array of ELS IO pointers to handle the incoming PLOGI/FCP PRLI/NVMe PRLI
+	 * requests before the node state machine moves to port_logged_in state.
+	 */
+	ocs_io_t		*ls_rsp_io[OCS_LS_RSP_TYPE_MAX];
 	uint32_t		ls_rjt_reason_code; /** < Reason code for LS RJT */
 	uint32_t		ls_rjt_reason_expl_code; /** < Reason explanation code for LS RJT */
-	uint32_t		ls_rsp_fctype;	/**< FC_TYPE for pending request */
 	ocs_node_shutd_rsn_e	shutdown_reason;/**< reason for node shutdown */
 	ocs_dma_t		sparm_dma_buf;	/**< service parameters buffer */
 	uint8_t			service_params[OCS_SERVICE_PARMS_LENGTH]; /**< plogi/acc frame from remote device */
@@ -401,21 +424,21 @@ struct ocs_node_s {
 	uint32_t		els_req_cnt;	/**< number of outstanding ELS requests */
 	uint32_t		els_cmpl_cnt;	/**< number of outstanding ELS completions */
 	uint32_t		abort_cnt;	/**< Abort counter for debugging purpose */
+	uint64_t		shutdown_start_time; /**< node shutdown start ticks */
 
 	char current_state_name[OCS_DISPLAY_NAME_LENGTH]; /**< current node state */
 	char prev_state_name[OCS_DISPLAY_NAME_LENGTH]; /**< previous node state */
 	ocs_sm_event_t		current_evt;	/**< current event */
 	ocs_sm_event_t		prev_evt;	/**< current event */
-	uint32_t		targ:1,		/**< node is scsi target capable */
-				init:1,		/**< node is scsi init capable */
-				nvme_init:1,	/**< node is NVME init capable */
-				nvme_tgt:1,	/**< node is NVME tgt capable */
-				refound:1,	/**< Handle node refound case when node is being deleted */
-				unreg_rpi:1,	/**< Used for synchronizing unreg_rpi / unreg_rpi_all */
-				first_burst:1,
-				nvme_sler:1,
-				nvme_conf:1,
-				:23;
+	bool			targ;		/**< node is scsi target capable: node lock */
+	bool			init;		/**< node is scsi init capable */
+	bool			nvme_init;	/**< node is NVME init capable: node lock*/
+	bool			nvme_tgt;	/**< node is NVME tgt capable: node lock */
+	bool			refound;	/**< Handle node refound case when node is being deleted */
+	bool			unreg_rpi;	/**< Used for synchronizing unreg_rpi / unreg_rpi_all: node lock */
+	bool			first_burst;	/* lock: node lock */
+	bool			nvme_sler;	/* lock: node lock */
+	bool			nvme_conf;	/* lock: node lock */
 	uint32_t		nvme_prli_service_params;
 	ocs_list_t		els_io_pend_list; /**< list of pending (not yet processed) ELS IOs */
 	ocs_list_t		els_io_active_list; /**< list of active (processed) ELS IOs */
@@ -433,6 +456,7 @@ struct ocs_node_s {
 	uint32_t		chained_io_count; /**< count of IOs with chained SGL's */
 
 	ocs_list_link_t		link;		/**< node list link */
+	ocs_list_link_t		shutdown_link;		/**< node list link */
 
 	ocs_remote_node_group_t	*node_group;	/**< pointer to node group (if HLM enabled) */
 
@@ -441,9 +465,18 @@ struct ocs_node_s {
 	/* copy of the auth cfg info for the local/remote node pair */
 	struct ocs_auth_cfg_info auth_cfg;
 	struct ocs_auth_cfg_pass auth_pass;
-#if !defined(OCS_USPACE)
-	ocs_ratelimit_state_t ratelimit;
-#endif
+
+	/* Outstanding plogi request */
+	ocs_io_t *plogi_els_io;
+
+	/* Outstanding duplicate prli context */
+	ocs_node_cb_t *dup_prli_cbdata;
+
+	void (*prep_notify_it_nexus_loss)(ocs_t *ocs, struct ocs_node_s *node);
+
+	/* Retried counter due to explicit logout */
+	uint32_t explicit_logout_retries;
+	bool detach_notify_pending;
 };
 
 /**
@@ -459,8 +492,8 @@ struct ocs_vport_spec_s {
 	uint64_t wwnn;				/*>> node name */
 	uint64_t wwpn;				/*>> port name */
 	uint32_t fc_id;				/*>> port id */
-	uint32_t enable_tgt:1,			/*>> port is a target */
-		 enable_ini:1;			/*>> port is an initiator */
+	bool	enable_tgt;			/*>> port is a target */
+	bool	enable_ini;			/*>> port is an initiator */
 	uint32_t ini_fc_types;			/*>> initiator mode FCP/NVME */
 	uint32_t tgt_fc_types;			/*>> target mode FCP/NVME */
 	ocs_list_link_t link;			/*>> link */

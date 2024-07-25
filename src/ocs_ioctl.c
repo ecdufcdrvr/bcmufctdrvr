@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,10 +39,21 @@
 #include "ocs_vpd.h"
 #include "ocs_gendump.h"
 #include "ocs_elxu.h"
+#include "ocs_uapi.h"
+#include "ocs_recovery.h"
 
 #if defined(OCS_ENABLE_ECD_HELPER)
 static int ocs_process_ecd_helper (ocs_t *ocs, ocs_ioctl_ecd_helper_t *req);
 #endif
+
+unsigned int allowed_cmds_during_recovery[] = {
+	OCS_IOCTL_CMD_TEST,
+	OCS_IOCTL_CMD_DRIVER_INFO,
+	OCS_IOCTL_CMD_GET_PCI_CONFIG,
+	OCS_IOCTL_CMD_SET_UAPI_RESP,
+	OCS_IOCTL_CMD_GET_UAPI_HWPORT_INIT,
+	OCS_IOCTL_CMD_SET_UAPI_READY
+};
 
 /**
  * @brief ocs driver ioctl method
@@ -57,6 +70,23 @@ int32_t
 ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 {
 	int rc = 0;
+
+	if (ocs_recovery_state_check(OCS_RECOVERY_STATE_IN_PROGRESS)) {
+		bool allow = FALSE;
+		uint32_t i;
+
+		for (i = 0; i < ARRAY_SIZE(allowed_cmds_during_recovery); i++) {
+			if (cmd == allowed_cmds_during_recovery[i]) {
+				allow = TRUE;
+				break;
+			}
+		}
+
+		if (!allow) {
+			ocs_log_test(ocs, "Error: Recovery in progress, Try again cmd = %d.\n", cmd);
+			return -EAGAIN;
+		}
+	}
 
 	switch(cmd) {
 
@@ -190,9 +220,9 @@ ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		}
 
-		/* Build a text buffer */
-		if (ocs_textbuf_alloc(ocs, &textbuf, req->user_buffer_len)) {
-			ocs_log_err(ocs, "Error: ocs_textbuf_alloc failed\n");
+		/* Build a text buffer pool */
+		if (ocs_textbuf_pool_alloc(ocs, &textbuf, req->user_buffer_len)) {
+			ocs_log_err(ocs, "Error: ocs_textbuf_pool_alloc failed\n");
 			ocs_ioctl_free(ocs, req, sizeof(*req));
 			return -EFAULT;
 		}
@@ -230,14 +260,18 @@ ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		}
 
-		/* Build a text buffer */
-		if (ocs_textbuf_alloc(ocs, &textbuf, req->user_buffer_len)) {
-			ocs_log_err(ocs, "Error: ocs_textbuf_alloc failed\n");
+		/* Build text buffer pool */
+		if (ocs_textbuf_pool_alloc(ocs, &textbuf, req->user_buffer_len)) {
+			ocs_log_err(ocs, "Error: ocs_textbuf_pool_alloc failed\n");
 			ocs_ioctl_free(ocs, req, sizeof(*req));
 			return -EFAULT;
 		}
 
-		ocs_mgmt_get_all(ocs, &textbuf);
+		if (req->get_all) {
+			ocs_mgmt_get_all(ocs, &textbuf);
+		} else {
+			ocs_mgmt_get_hba_info(ocs, &textbuf);
+		}
 
 		for (idx = 0; (n = ocs_textbuf_ext_get_written(&textbuf, idx)) > 0; idx++) {
 			if (ocs_copy_to_user(req->user_buffer + copied,
@@ -278,9 +312,9 @@ ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		}
 
-		/* Build a text buffer */
-		if (ocs_textbuf_alloc(ocs, &textbuf, req->value_length)) {
-			ocs_log_err(ocs, "Error: ocs_textbuf_alloc failed\n");
+		/* Build a text buffer pool */
+		if (ocs_textbuf_pool_alloc(ocs, &textbuf, req->value_length)) {
+			ocs_log_err(ocs, "Error: ocs_textbuf_pool_alloc failed\n");
 			ocs_ioctl_free(ocs, req, sizeof(ocs_ioctl_cmd_get_t));
 			return -EFAULT;
 		}
@@ -491,8 +525,6 @@ ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 		break;
 	}
 
-
-
 #if defined(OCS_ENABLE_ECD_HELPER)
 	case OCS_IOCTL_CMD_ECD_HELPER: {
 		ocs_ioctl_ecd_helper_t *req;
@@ -514,47 +546,123 @@ ocs_device_ioctl(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 	}
 #endif
 
-#if defined(OCS_INCLUDE_WORKLOAD)
-	case OCS_IOCTL_CMD_SCSI_CMD: {
-		ocs_ioctl_scsi_cmd_t *cmd;
+#if !defined(OCS_USPACE)
+	case OCS_IOCTL_CMD_GET_PCI_CONFIG: {
+		ocs_ioctl_get_pci_config_t req;
 
-		cmd = (ocs_ioctl_scsi_cmd_t *)ocs_ioctl_preprocess(ocs, (void *)arg, sizeof(*cmd));
-		if (cmd == NULL) {
-			ocs_log_test(ocs, "Error: OCS_IOCTL_CMD_SCSI_CMD: copy from user space failed\n");
-			return -EFAULT;
-		}
+		req.vendor = ocs->ocs_os.pdev->vendor;
+		req.device = ocs->ocs_os.pdev->device;
+		req.bar_count = ocs->ocs_os.bar_count;
+		ocs_memcpy(req.bars, ocs->ocs_os.bars, sizeof(req.bars));
+		req.bus = ocs->ocs_os.pdev->bus->number;
+		req.dev = PCI_SLOT(ocs->ocs_os.pdev->devfn);
+		req.func = PCI_FUNC(ocs->ocs_os.pdev->devfn);
+		req.num_msix = ocs->ocs_os.n_msix_vec;
+		req.numa_node = dev_to_node(&ocs->ocs_os.pdev->dev);
 
-		rc = ocs_workload_run(ocs, cmd);
-
-		if (ocs_ioctl_postprocess(ocs, (void*)arg, cmd, sizeof(*cmd))) {
-			ocs_log_test(ocs, "Error: OCS_IOCTL_CMD_SCSI_CMD: copy to user space failed\n");
-			return -EFAULT;
-		}
-
+		rc = ocs_copy_to_user((ocs_ioctl_get_pci_config_t*) arg, &req, sizeof(req));
 		break;
 	}
 
-#if defined(OCS_INCLUDE_FC)
-	case OCS_IOCTL_CMD_SEND_FRAME: {
-		ocs_ioctl_send_frame_t *cmd;
+	case OCS_IOCTL_CMD_SET_UAPI_RESP: {
+		ocs_ioctl_set_uapi_resp_t *cmd;
+		char *ioctl_str = "OCS_IOCTL_CMD_SET_UAPI_RESP";
 
-		/* Fetch command */
 		cmd = ocs_ioctl_preprocess(ocs, (void *)arg, sizeof(*cmd));
+		if (cmd == NULL) {
+			ocs_log_err(ocs, "%s: copy from user space failed\n", ioctl_str);
+			return -EFAULT;
+		}
 
-		/* Process command */
-		ocs_workload_send_frame(ocs, cmd);
+		if (ocs_ioctl_uapi_process_rsp(ocs, cmd))
+			rc = -EFAULT;
 
-		/* Free command */
 		if (ocs_ioctl_postprocess(ocs, NULL, cmd, sizeof(*cmd))) {
-			ocs_log_test(ocs, "Error: OCS_IOCTL_CMD_SCSI_CMD: copy to user space failed\n");
+			ocs_log_err(ocs, "%s command free failed\n", ioctl_str);
 			return -EFAULT;
 		}
 
 		break;
 	}
-#endif
-#endif
 
+	case OCS_IOCTL_CMD_GET_UAPI_HWPORT_INIT: {
+		ocs_ioctl_uapi_hw_port_init_args_t *cmd;
+		char *ioctl_str = "OCS_IOCTL_CMD_GET_UAPI_HWPORT_INIT";
+
+		cmd = ocs_ioctl_preprocess(ocs, (void *)arg, sizeof(*cmd));
+		if (cmd == NULL) {
+			ocs_log_err(ocs, "%s: copy from user space failed\n", ioctl_str);
+			return -EFAULT;
+		}
+
+		if (cmd->user_buffer_len != sizeof(struct ocs_uapi_hw_port_init_args)) {
+			ocs_log_err(ocs, "%s: invalid len %d provided. Expected %zu length.\n",
+				    ioctl_str, cmd->user_buffer_len, sizeof(struct ocs_uapi_hw_port_init_args));
+			ocs_ioctl_free(ocs, cmd, sizeof(*cmd));
+			return -EFAULT;
+		}
+
+		if (ocs_copy_to_user(cmd->user_buffer, ocs->uapi_nvme_args,
+				     sizeof(struct ocs_uapi_hw_port_init_args))) {
+			ocs_log_err(ocs, "%s: copy to user space failed\n", ioctl_str);
+			ocs_ioctl_free(ocs, cmd, sizeof(*cmd));
+			return -EFAULT;
+		}
+
+		if (ocs_ioctl_postprocess(ocs, NULL, cmd, sizeof(*cmd))) {
+			ocs_log_err(ocs, "%s: command free failed\n", ioctl_str);
+			return -EFAULT;
+		}
+		break;
+	}
+	case OCS_IOCTL_CMD_SET_UAPI_READY: {
+		ocs_ioctl_uapi_set_ready_t *cmd;
+		char *ioctl_str = "OCS_IOCTL_CMD_UAPI_SET_READY";
+
+		cmd = ocs_ioctl_preprocess(ocs, (void *)arg, sizeof(*cmd));
+		if (cmd == NULL) {
+			ocs_log_err(ocs, "%s: copy from user space failed\n", ioctl_str);
+			return -EFAULT;
+		}
+
+                if (cmd->uapi_rdy != ocs->uapi_rdy) {
+			ocs_log_info(ocs, "UAPI ready state change %d -> %d\n",
+				     ocs->uapi_rdy, cmd->uapi_rdy);
+			ocs->uapi_rdy = cmd->uapi_rdy;
+
+			ocs_uapi_rdy_notify(ocs);
+		}
+
+		if (ocs_ioctl_postprocess(ocs, NULL, cmd, sizeof(*cmd))) {
+			ocs_log_err(ocs, "%s command free failed\n", ioctl_str);
+			return -EFAULT;
+		}
+
+		break;
+	}
+
+	case OCS_IOCTL_CMD_UAPI_UNKNOWN_FRAME: {
+		ocs_ioctl_uapi_hw_port_unknown_frame_t *cmd;
+		char *ioctl_str = "OCS_IOCTL_CMD_UAPI_UNKNOWN_FRAME";
+
+		cmd = ocs_ioctl_preprocess(ocs, (void *)arg, sizeof(*cmd));
+		if (cmd == NULL) {
+			ocs_log_err(ocs, "%s: copy from user space failed\n", ioctl_str);
+			return -EFAULT;
+		}
+
+		if (ocs->unknown_frame_cb)
+			ocs->unknown_frame_cb(ocs->instance_index, cmd->s_id, cmd->d_id);
+
+		if (ocs_ioctl_postprocess(ocs, NULL, cmd, sizeof(*cmd))) {
+			ocs_log_err(ocs, "%s command free failed\n", ioctl_str);
+			return -EFAULT;
+		}
+
+		break;
+	}
+
+#endif
 	default:
 		rc = ocs_device_ioctl_xport(ocs, cmd, arg);
 		break;

@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -63,8 +65,18 @@
 #define __OCS_USPACE_H__
 
 #if defined(__KERNEL__)
-#include <stdarg.h>
 #include <linux/version.h>
+
+#if defined(RHEL_RELEASE_CODE) 
+
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,1)
+#include <linux/stdarg.h>
+#else
+#include <stdarg.h>
+#endif
+
+#endif
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -113,9 +125,14 @@
 #define PCI_PRODUCT_EMULEX_LPE31004		0xe300	/* LightPulse 16Gb x 4 FC (Lancer-G6) */
 #define PCI_PRODUCT_EMULEX_LPE32002		0xe300  /* LightPulse 32Gb x 2 FC (lancer-g6) */
 #define PCI_PRODUCT_EMULEX_LANCER_G7_FC         0xf400  /* LightPulse 32Gb x 4 FC (lancer-g7) */
+#define PCI_PRODUCT_EMULEX_LANCER_G7PLUS_FC	0xf500  /* LightPulse 64Gb FC (lancer-g7+) */
+#define PCI_PRODUCT_EMULEX_LANCER_G7PLUS_S_FC	0xf600  /* LightPulse 64Gb FC (lancer-g7+ S) */
 #define PCI_PRODUCT_BE3_INI			0x0712  /* OneCore 10Gb iSCSI (be3) */
 #define PCI_PRODUCT_BE3_TGT			0x0713  /* OneCore 10Gb iSCSI (be3) */
 #define PCI_PRODUCT_ATTO_LPE31004               0x0094  /* LightPulse 32Gb x 2 FC (lancer-g6) */
+
+#define IS_DEVICE_LANCER_G7_FAMILY(device_id) ((device_id == PCI_PRODUCT_EMULEX_LANCER_G7_FC) || (device_id == PCI_PRODUCT_EMULEX_LANCER_G7PLUS_FC) ||	\
+						(device_id == PCI_PRODUCT_EMULEX_LANCER_G7PLUS_S_FC))
 
 /* OneCore 10Gb/40Gb iSCSI (skyhawk) Initiator
  */
@@ -230,7 +247,16 @@ typedef struct {
 } ocsu_ioctl_pciref_t;
 
 #if defined(__KERNEL__)
+
+#if defined(RHEL_RELEASE_CODE) 
+
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,1)
+#include <linux/stdarg.h>
+#else
 #include <stdarg.h>
+#endif
+
+#endif
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -311,6 +337,8 @@ struct ocs_uspace {
 #define OCSU_IOCTL_CMD_WAIT_EVENT_VEC		_IO(OCSU_IOCTL_CMD_BASE, 9)
 
 #define SLI4_BMBX_SIZE				256
+
+#include "ocs_common_shared.h"
 
 /* vim: set noexpandtab textwidth=120: */
 #endif // __OCS_USPACE_H__

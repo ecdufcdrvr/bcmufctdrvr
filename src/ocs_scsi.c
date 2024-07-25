@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -46,17 +48,25 @@
 #include "ocs_vpd.h"
 #endif
 #include "ocs_dif.h"
+#include "ocs_compat.h"
 
-#define SCSI_IOFMT " [%04x][i:%0*x t:%0*x h:%04x iotag:%04x] "
+#define SCSI_IOFMT		" [%04x][i:%0*x t:%0*x h:%04x iotag:%04x] "
 #define SCSI_ITT_SIZE(ocs)	((ocs->ocs_xport == OCS_XPORT_FC) ? 4 : 8)
 
-#define SCSI_IOFMT_ARGS(io) io->instance_index, SCSI_ITT_SIZE(io->ocs), io->init_task_tag, SCSI_ITT_SIZE(io->ocs), io->tgt_task_tag, io->hw_tag, io->tag
+#define SCSI_IOFMT_ARGS(io)	io->instance_index, SCSI_ITT_SIZE(io->ocs), io->init_task_tag, SCSI_ITT_SIZE(io->ocs), io->tgt_task_tag, io->hw_tag, io->tag
 
-#define enable_tsend_auto_resp(ocs)		((ocs->ctrlmask & OCS_CTRLMASK_XPORT_DISABLE_AUTORSP_TSEND) == 0)
+#define enable_tsend_auto_resp(ocs)	((ocs->ctrlmask & OCS_CTRLMASK_XPORT_DISABLE_AUTORSP_TSEND) == 0)
 #define enable_treceive_auto_resp(ocs)	((ocs->ctrlmask & OCS_CTRLMASK_XPORT_DISABLE_AUTORSP_TRECEIVE) == 0)
 
 #define scsi_io_printf(io, fmt, ...) ocs_log_info(io->ocs, "[%s]" SCSI_IOFMT fmt, \
 	io->node->display_name, SCSI_IOFMT_ARGS(io), ##__VA_ARGS__)
+
+#define scsi_io_sgl_trace(io, fmt, ...) \
+	do { \
+		if (OCS_LOG_ENABLE_SCSI_IO_SGL_TRACE(io->ocs)) \
+			scsi_io_printf(io, fmt, ##__VA_ARGS__); \
+	} while (0)
+
 
 #define scsi_io_trace(io, fmt, ...) \
 	do { \
@@ -70,13 +80,14 @@
 			ocs_log_info(ocs, fmt, ##__VA_ARGS__); \
 	} while (0)
 
-static int32_t ocs_target_send_bls_resp(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg);
+static int32_t ocs_target_send_bls_acc(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg);
 static int32_t ocs_target_send_bls_rjt(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg);
 static int32_t ocs_scsi_abort_io_cb(struct ocs_hal_io_s *hio, ocs_remote_node_t *rnode, uint32_t len, int32_t status,
 	uint32_t ext, void *arg);
 
 static void ocs_scsi_io_free_ovfl(ocs_io_t *io);
-static uint32_t ocs_scsi_count_sgls(ocs_hal_dif_info_t *hal_dif, ocs_scsi_sgl_t *sgl, uint32_t sgl_count);
+static uint32_t ocs_scsi_count_sgls(ocs_hal_io_type_e io_type, ocs_hal_dif_info_t *hal_dif,
+	ocs_scsi_sgl_t *sgl, uint32_t sgl_count);
 static int ocs_scsi_dif_guard_is_crc(uint8_t direction, ocs_hal_dif_info_t *dif_info);
 static ocs_scsi_io_status_e ocs_scsi_dif_check_unknown(ocs_io_t *io, uint32_t length, uint32_t check_length, int is_crc);
 static uint32_t ocs_scsi_dif_check_guard(ocs_hal_dif_info_t *dif_info, ocs_scsi_vaddr_len_t addrlen[],
@@ -184,13 +195,14 @@ int32_t ocs_scsi_io_alloc_enabled(ocs_node_t *node)
  *
  * @param node Pointer to the associated node structure.
  * @param role Role for IO (originator/responder).
+ * @param eq_idx eq index on which the unsolicated command was received
  *
  * @return Returns the pointer to the IO context, or NULL.
  *
  */
 
 ocs_io_t *
-ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role)
+ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role, uint32_t eq_idx)
 {
 	ocs_t *ocs;
 	ocs_xport_t *xport;
@@ -210,7 +222,7 @@ ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role)
 			return NULL;
 		}
 
-		io = ocs_io_alloc(ocs, OCS_IO_POOL_SCSI);
+		io = ocs_io_alloc(ocs, OCS_IO_POOL_SCSI, eq_idx);
 		if (io == NULL) {
 			ocs_atomic_add_return(&xport->io_alloc_failed_count, 1);
 			ocs_unlock(&node->active_ios_lock);
@@ -247,6 +259,10 @@ ocs_scsi_io_alloc(ocs_node_t *node, ocs_scsi_io_role_e role)
 			io->cmd_tgt = TRUE;
 			break;
 		}
+
+#if defined(OCS_DEBUG_TRACK_IO_PROC_TIME)
+		ocs_memset(io->proc_time, 0, sizeof(io->proc_time));
+#endif
 
 		/* Add to node's active_ios list */
 		ocs_list_add_tail(&node->active_ios, io);
@@ -307,17 +323,10 @@ _ocs_scsi_io_free(void *arg)
 
 	if (post_node_event) {
 		ocs_node_cb_t cb_data;
-		ocs_sport_t *sport = node->sport;
 
 		ocs_memset(&cb_data, 0, sizeof(ocs_node_cb_t));
 		cb_data.io = io;
-		/* take sport ref count */
-		ocs_ref_get(&sport->ref);
-		ocs_sport_lock(sport);
 		ocs_node_post_event(node, OCS_EVT_NODE_LAST_ACTIVE_IO, &cb_data);
-		ocs_sport_unlock(sport);
-		/* release sport ref count */
-		ocs_ref_put(&sport->ref);
 	}
 
 	io->node = NULL;
@@ -727,31 +736,41 @@ ocs_scsi_dif_check_ref_tag(ocs_t *ocs, ocs_hal_dif_info_t *dif_info, uint32_t ex
  * @return Count of SGEs.
  */
 static uint32_t
-ocs_scsi_count_sgls(ocs_hal_dif_info_t *hal_dif, ocs_scsi_sgl_t *sgl, uint32_t sgl_count)
+ocs_scsi_count_sgls(ocs_hal_io_type_e io_type, ocs_hal_dif_info_t *hal_dif,
+		    ocs_scsi_sgl_t *sgl, uint32_t sgl_count)
 {
 	uint32_t count = 0;
-	uint32_t i;
+	uint32_t skips_or_cmd_sges = 0;
+
+	switch(io_type) {
+	case OCS_HAL_IO_TARGET_READ:
+		/* TSEND will include 2 SKIP SGE's */
+	case OCS_HAL_IO_TARGET_WRITE:
+		/* TRECEIVE WQE will include 1 DATA SGE for the XFER_RDY buffer
+		 * + 1 SKIP SGE
+		 **/
+	case OCS_HAL_IO_INITIATOR_READ:
+	case OCS_HAL_IO_INITIATOR_WRITE:
+	case OCS_HAL_IO_INITIATOR_NODATA:
+		/* IREAD and IWRITE WQE's include 1 DATA BDE each for FCP Command
+		 * and response buffers
+		 **/
+		skips_or_cmd_sges = SLI4_SGE_SKIP_PER_WQE_MAX;
+		break;
+	default:
+		;
+	}
 
 	/* Convert DIF Information */
-	if (hal_dif->dif_oper != OCS_HAL_DIF_OPER_DISABLED) {
+	if (hal_dif->dif_oper == OCS_HAL_DIF_OPER_DISABLED)
+		return sgl_count + skips_or_cmd_sges;
 
-		/* If we're not DIF separate, then emit a seed SGE */
-		if (!hal_dif->dif_separate) {
-			count++;
-		}
+	if (hal_dif->dif_separate)
+		count = sgl_count * 3;	/* DISEED SGE + DIF SGE + DATA SGE */
+	else
+		count = sgl_count + 1;	/* Single DISEED SGE only */
 
-		for (i = 0; i < sgl_count; i++) {
-			/* If DIF is enabled, and DIF is separate, then append a SEED then DIF SGE */
-			if (hal_dif->dif_separate) {
-				count += 2;
-			}
-
-			count++;
-		}
-	} else {
-		count = sgl_count;
-	}
-	return count;
+	return count + skips_or_cmd_sges;
 }
 
 static int32_t
@@ -777,7 +796,7 @@ ocs_scsi_build_sgls(ocs_hal_t *hal, ocs_hal_io_t *hio, ocs_hal_dif_info_t *hal_d
 
 		/* If we're not DIF separate, then emit a seed SGE */
 		if (!hal_dif->dif_separate) {
-			rc = ocs_hal_io_add_seed_sge(hal, hio, hal_dif);
+			rc = ocs_hal_io_add_seed_sge(hal, hio, hal_dif, (sgl_count == 1));
 			if (rc) {
 				return rc;
 			}
@@ -815,7 +834,8 @@ ocs_scsi_build_sgls(ocs_hal_t *hal, ocs_hal_io_t *hio, ocs_hal_dif_info_t *hal_d
 			/* If DIF is enabled, and DIF is separate, then append a SEED then DIF SGE */
 			if (hal_dif->dif_separate) {
 				if (sgl[i].dif_addr) {
-					rc = ocs_hal_io_add_seed_sge(hal, hio, hal_dif);
+					rc = ocs_hal_io_add_seed_sge(hal, hio,
+						hal_dif, (i == (sgl_count - 1)));
 					if (rc)
 						return rc;
 
@@ -989,14 +1009,16 @@ static void ocs_log_sgl(ocs_io_t *io)
 	uint32_t i;
 	uint32_t n_sge;
 
-	scsi_io_trace(io, "def_sgl at 0x%x 0x%08x\n",
-		      ocs_addr32_hi(hio->def_sgl.phys),
-		      ocs_addr32_lo(hio->def_sgl.phys));
 	n_sge = (hio->sgl == &hio->def_sgl ? hio->n_sge : hio->def_sgl_count);
+
+	scsi_io_sgl_trace(io, "Def SGL phys %08x %08x N_SGEs %d\n",
+			ocs_addr32_hi(hio->def_sgl.phys),
+			ocs_addr32_lo(hio->def_sgl.phys), n_sge);
+
 	for (i = 0, data = hio->def_sgl.virt; i < n_sge; i++, data++) {
 		dword = (uint32_t*)data;
 
-		scsi_io_trace(io, "SGL %2d 0x%08x 0x%08x 0x%08x 0x%08x\n",
+		scsi_io_sgl_trace(io, "SGE[%2d] %08x %08x %08x %08x\n",
 			 i, dword[0], dword[1], dword[2], dword[3]);
 
 		if (dword[2] & (1U << 31)) {
@@ -1006,14 +1028,15 @@ static void ocs_log_sgl(ocs_io_t *io)
 
 	if (hio->ovfl_sgl != NULL &&
 		hio->sgl == hio->ovfl_sgl) {
-		scsi_io_trace(io, "Overflow at 0x%x 0x%08x\n",
+		scsi_io_sgl_trace(io, "Overflow SGL phys %08x %08x N_SGEs %d\n",
 			      ocs_addr32_hi(hio->ovfl_sgl->phys),
-			      ocs_addr32_lo(hio->ovfl_sgl->phys));
+			      ocs_addr32_lo(hio->ovfl_sgl->phys), hio->n_sge);
 		for (i = 0, data = hio->ovfl_sgl->virt; i < hio->n_sge; i++, data++) {
 			dword = (uint32_t*)data;
 
-			scsi_io_trace(io, "SGL %2d 0x%08x 0x%08x 0x%08x 0x%08x\n",
+			scsi_io_sgl_trace(io, "SGL[%2d] %08x %08x %08x %08x\n",
 				 i, dword[0], dword[1], dword[2], dword[3]);
+
 			if (dword[2] & (1U << 31)) {
 				break;
 			}
@@ -1107,6 +1130,28 @@ ocs_scsi_check_pending(ocs_t *ocs)
 }
 
 /**
+ * @brief Clean up the active_ios list for a given node
+ *
+ * @param node Pointer to the associated node structure.
+ *
+ * @return None.
+ */
+void
+ocs_scsi_active_io_cancel(ocs_node_t *node)
+{
+	ocs_io_t *io = NULL;
+	ocs_io_t *io_next = NULL;
+
+	/* For each SCSI active IO, post an abort WQE to the FW */
+	ocs_lock(&node->active_ios_lock);
+		ocs_list_foreach_safe(&node->active_ios, io, io_next) {
+			if (io->cmd_tgt)
+				ocs_scsi_io_dispatch_abort(io, NULL, FALSE);
+		}
+	ocs_unlock(&node->active_ios_lock);
+}
+
+/**
  * @brief Clean up the io_pending_list for a given node
  *
  * @param node Pointer to the associated node structure.
@@ -1114,7 +1159,7 @@ ocs_scsi_check_pending(ocs_t *ocs)
  * @return None.
  */
 void
-ocs_scsi_io_cancel(ocs_node_t *node)
+ocs_scsi_pending_io_cancel(ocs_node_t *node)
 {
 	ocs_io_t *io = NULL;
 	ocs_io_t *io_next = NULL;
@@ -1163,6 +1208,8 @@ ocs_scsi_io_allow_dispatch(ocs_io_t *io)
 			return FALSE;
 		}
 	} else if (io->wqe_status == SLI4_FC_WCQE_STATUS_DISPATCH_ERROR) {
+		return FALSE;
+	} else if (io->wqe_status == SLI4_FC_WCQE_STATUS_SHUTDOWN) {
 		return FALSE;
 	}
 
@@ -1314,6 +1361,17 @@ ocs_scsi_io_dispatch_abort(ocs_io_t *io, void *hal_abort_cb, bool send_abts)
 	ocs_scsi_io_dispatch_no_hal_io(io, hal_abort_cb, send_abts);
 }
 
+static void
+ocs_scsi_sframe_send_rsp_cb(ocs_hal_t *hal, int32_t status, void *arg)
+{
+	ocs_io_t *io = arg;
+
+	if (status)
+		ocs_log_err(hal->os, "sframe send failed status: 0x%x\n", status);
+
+	ocs_io_invoke_hal_cb(io, status);
+}
+
 /**
  * @brief Dispatch IO
  *
@@ -1333,13 +1391,37 @@ ocs_scsi_io_dispatch_hal_io(ocs_io_t *io, ocs_hal_io_t *hio)
 	int32_t rc;
 	ocs_t *ocs = io->ocs;
 
+	/* Return failure status if we already received an ABTS for this IO */
+	if (io->abts_received) {
+		scsi_io_printf(io, "Failing the IO dispatch\n");
+		return -1;
+	}
+
 	/* Acquire HIO lock to synchronize multiple WQE submissions on same IO */
 	ocs_lock(&hio->lock);
 
-	/* Return failure status if abort WQE is already submitted for this XRI */
-	if (hio->abort_issued) {
+	if (hio->abort_issued && (io->hio_type == OCS_HAL_IO_TARGET_RSP)) {
+		ocs_sframe_rsp_args_t fcp_args;
+		ocs_node_t *node = io->node;
+		fcp_rsp_iu_t *rsp = io->scsi_info->rspbuf.virt;
+
+		/* Use send frame feature to send response*/
+		fcp_args.s_id = node->rnode.fc_id;
+		fcp_args.d_id = node->sport->fc_id;
+		fcp_args.ox_id = io->init_task_tag;
+		fcp_args.rx_id = io->tgt_task_tag;
+		fcp_args.callback = ocs_scsi_sframe_send_rsp_cb;
+		fcp_args.cb_arg = io;
+		fcp_args.fcprsp = rsp;
+		fcp_args.fcprsp_len = io->wire_len;
+		*((uint32_t *)rsp->fcp_rsp_len) = ocs_htobe32(fcp_args.fcprsp_len);
+
+		rc = ocs_sframe_send_fcp_rsp(io->node, &fcp_args);
 		ocs_unlock(&hio->lock);
-		return -1;
+		if (rc)
+			scsi_io_printf(io, "failed to send scsi resp\n");
+
+		return rc;
 	}
 
 	/* Got a HAL IO; update ini/tgt_task_tag with HAL IO info and dispatch */
@@ -1359,6 +1441,7 @@ ocs_scsi_io_dispatch_hal_io(ocs_io_t *io, ocs_hal_io_t *hio)
 	switch(io->wq_steering) {
 	case OCS_SCSI_WQ_STEERING_CLASS >> OCS_SCSI_WQ_STEERING_SHIFT:
 		hio->wq_steering = OCS_HAL_WQ_STEERING_CLASS;
+		hio->wq_class = io->wq_class;
 		break;
 	case OCS_SCSI_WQ_STEERING_REQUEST >> OCS_SCSI_WQ_STEERING_SHIFT:
 		hio->wq_steering = OCS_HAL_WQ_STEERING_REQUEST;
@@ -1372,25 +1455,26 @@ ocs_scsi_io_dispatch_hal_io(ocs_io_t *io, ocs_hal_io_t *hio)
 	case OCS_IO_TYPE_IO: {
 		uint32_t max_sgl;
 		uint32_t total_count;
-		uint32_t host_allocated;
 
 		ocs_hal_get(&ocs->hal, OCS_HAL_N_SGL, &max_sgl);
-		ocs_hal_get(&ocs->hal, OCS_HAL_SGL_CHAINING_HOST_ALLOCATED, &host_allocated);
-
 		/*
 		 * If the requested SGL is larger than the default size, then we can allocate
 		 * an overflow SGL.
 		 */
-		total_count = ocs_scsi_count_sgls(&io->scsi_info->hal_dif, io->scsi_info->sgl, io->scsi_info->sgl_count);
+		total_count =
+			ocs_scsi_count_sgls(io->hio_type, &io->scsi_info->hal_dif,
+					    io->scsi_info->sgl,
+					    io->scsi_info->sgl_count);
 
 		/*
 		 * Lancer requires us to allocate the chained memory area, but
 		 * Skyhawk must use the SGL list associated with another XRI.
 		 */
-		if (host_allocated && total_count > max_sgl) {
+		if (hio->sgl_chaining_allowed && total_count > max_sgl) {
 			/* Compute count needed, the number extra plus 1 for the link sge */
 			uint32_t count = total_count - max_sgl + 1;
-			rc = ocs_dma_alloc(ocs, &io->scsi_info->ovfl_sgl, count*sizeof(sli4_sge_t), 64);
+			rc = ocs_dma_alloc(ocs, &io->scsi_info->ovfl_sgl, count*sizeof(sli4_sge_t),
+					   64, OCS_M_NOWAIT);
 			if (rc) {
 				ocs_log_err(ocs, "ocs_dma_alloc overflow sgl failed\n");
 				break;
@@ -1411,7 +1495,7 @@ ocs_scsi_io_dispatch_hal_io(ocs_io_t *io, ocs_hal_io_t *hio)
 			break;
 		}
 
-		if (OCS_LOG_ENABLE_SCSI_TRACE(ocs)) {
+		if (OCS_LOG_ENABLE_SCSI_IO_SGL_TRACE(ocs)) {
 			ocs_log_sgl(io);
 		}
 
@@ -1495,12 +1579,22 @@ ocs_scsi_io_dispatch_no_hal_io(ocs_io_t *io, void *hal_abort_cb, bool send_abts)
 		if (rc) {
 			int status = SLI4_FC_WCQE_STATUS_SUCCESS;
 
-			if ((OCS_HAL_RTN_IO_NOT_ACTIVE != rc) && (OCS_HAL_RTN_IO_ABORT_IN_PROGRESS != rc)) {
+			switch (rc) {
+			case OCS_HAL_RTN_IO_NOT_ACTIVE:
+				break;
+
+			case OCS_HAL_RTN_IO_ABORT_IN_PROGRESS:
+				/* Wait for the abort WQE to complete before notifying the caller */
+				rc = ocs_hal_io_abort_notify_completion(&io->ocs->hal, io->hio, hal_abort_cb, io);
+				break;
+
+			default:
 				status = -1;
 				scsi_io_printf(io, "Failed to abort IO! status=%d\n", rc);
+				break;
 			}
 
-			if (hal_abort_cb)
+			if ((OCS_HAL_RTN_SUCCESS != rc) && hal_abort_cb)
 				((ocs_hal_done_t)hal_abort_cb)(io->hio, NULL, 0, status, 0, io);
 		}
 	}
@@ -1648,23 +1742,23 @@ ocs_scsi_xfer_data(ocs_io_t *io, uint32_t flags,
 
 	/* Set latency and WQ steering */
 	io->low_latency = (flags & OCS_SCSI_LOW_LATENCY) != 0;
-	io->wq_steering = (flags & OCS_SCSI_WQ_STEERING_MASK) >> OCS_SCSI_WQ_STEERING_SHIFT;
-	io->wq_class = (flags & OCS_SCSI_WQ_CLASS_MASK) >> OCS_SCSI_WQ_CLASS_SHIFT;
+
+	ocs_io_setup_wq_steering(io, flags);
 
 	/* Update driver maintained FCP stats */
 	if (ocs->xport) {
 		if (type == OCS_HAL_IO_TARGET_READ) {
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-			percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.input_requests, 1);
-			percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.input_bytes, xwire_len);
+#if !defined(OCS_USPACE)
+			ocs_percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.input_requests, 1, 1000000);
+			ocs_percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.input_bytes, xwire_len, 100000000);
 #else
 			ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.input_requests, 1);
 			ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.input_bytes, xwire_len);
 #endif
 		} else if (type == OCS_HAL_IO_TARGET_WRITE) {
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-			percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.output_requests, 1);
-			percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.output_bytes, xwire_len);
+#if !defined(OCS_USPACE)
+			ocs_percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.output_requests, 1, 1000000);
+			ocs_percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.output_bytes, xwire_len, 100000000);
 #else
 			ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.output_requests, 1);
 			ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.output_bytes, xwire_len);
@@ -1776,8 +1870,8 @@ ocs_scsi_send_resp(ocs_io_t *io, uint32_t flags, ocs_scsi_cmd_resp_t *rsp, ocs_s
 
 	/* Set low latency queueing request */
 	io->low_latency = (flags & OCS_SCSI_LOW_LATENCY) != 0;
-	io->wq_steering = (flags & OCS_SCSI_WQ_STEERING_MASK) >> OCS_SCSI_WQ_STEERING_SHIFT;
-	io->wq_class = (flags & OCS_SCSI_WQ_CLASS_MASK) >> OCS_SCSI_WQ_CLASS_SHIFT;
+
+	ocs_io_setup_wq_steering(io, flags);
 
 	if ((scsi_status != 0) || residual || OCS_SCSI_SNS_BUF_VALID(sense_data)) {
 		fcp_rsp_iu_t *fcprsp = io->scsi_info->rspbuf.virt;
@@ -1823,6 +1917,8 @@ ocs_scsi_send_resp(ocs_io_t *io, uint32_t flags, ocs_scsi_cmd_resp_t *rsp, ocs_s
 		io->scsi_info->sgl[0].dif_addr = 0;
 		io->scsi_info->sgl[0].len = io->wire_len;
 		io->scsi_info->sgl_count = 1;
+	} else {
+		io->scsi_info->sgl_count = 0;
 	}
 
 	if (auto_resp) {
@@ -1873,7 +1969,6 @@ ocs_scsi_send_tmf_resp(ocs_io_t *io, ocs_scsi_tmf_resp_e rspcode, uint8_t addl_r
 	case OCS_SCSI_TMF_FUNCTION_COMPLETE:
 		fcp_rspcode = FCP_TMF_COMPLETE;
 		break;
-	case OCS_SCSI_TMF_FUNCTION_SUCCEEDED:
 	case OCS_SCSI_TMF_FUNCTION_IO_NOT_FOUND:
 		fcp_rspcode = FCP_TMF_SUCCEEDED;
 		break;
@@ -1898,11 +1993,13 @@ ocs_scsi_send_tmf_resp(ocs_io_t *io, ocs_scsi_tmf_resp_e rspcode, uint8_t addl_r
 
 	if (io->scsi_info->tmf_cmd == OCS_SCSI_TMF_ABORT_TASK) {
 		if (rspcode == OCS_SCSI_TMF_FUNCTION_COMPLETE) {
-			rc = ocs_target_send_bls_resp(io, cb, arg);
+			scsi_io_printf(io, "Sending BLS ACC\n");
+			rc = ocs_target_send_bls_acc(io, cb, arg);
 		} else {
-			ocs_log_debug(io->ocs, "Sending BLS RJT\n");
+			scsi_io_printf(io, "Sending BLS RJT\n");
 			rc = ocs_target_send_bls_rjt(io, cb, arg);
 		}
+
 		goto done;
 	}
 
@@ -2091,7 +2188,7 @@ ocs_target_bls_resp_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t len
  */
 
 static int32_t
-ocs_target_send_bls_resp(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg)
+ocs_target_send_bls_acc(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg)
 {
 	fc_ba_acc_payload_t *acc;
 
@@ -2113,7 +2210,7 @@ ocs_target_send_bls_resp(ocs_io_t *io, ocs_scsi_io_cb_t cb, void *arg)
 
 	/* set type and BLS-specific fields */
 	io->io_type = OCS_IO_TYPE_BLS_RESP;
-	io->display_name = "bls_rsp";
+	io->display_name = "ba_acc";
 	io->hio_type = OCS_HAL_BLS_ACC;
 	io->bls_cb = cb;
 	io->bls_cb_arg = arg;
@@ -2192,6 +2289,45 @@ ocs_scsi_io_complete(ocs_io_t *io)
 	scsi_io_trace(io, "freeing io 0x%p %s\n", io, io->display_name);
 	ocs_assert(ocs_ref_read_count(&io->ref) > 0);
 	ocs_ref_put(&io->ref); /* ocs_ref_get(): ocs_scsi_io_alloc() */
+}
+
+/**
+ * @brief Send FCP response using SEND_FRAME
+ *
+ * The FCP response is send using the SEND_FRAME function.
+ *
+ * @param node Pointer to node object.
+ * @param seq Pointer to inbound sequence.
+ * @param rsp Pointer to response data.
+ * @param rsp_len Length of response data, in bytes.
+ *
+ * @return Returns 0 on success, or a negative error code value on failure.
+ */
+int32_t
+ocs_sframe_send_fcp_rsp(ocs_node_t *node, ocs_sframe_rsp_args_t *fcp_args)
+{
+	ocs_sframe_args_t sframe_args = {0};
+
+	sframe_args.r_ctl = FC_RCTL_FC4_DATA;
+	sframe_args.info  = FC_RCTL_INFO_CMD_STATUS;
+	sframe_args.f_ctl = FC_FCTL_EXCHANGE_RESPONDER |
+			    FC_FCTL_SEQUENCE_INITIATIVE |
+			    FC_FCTL_LAST_SEQUENCE |
+			    FC_FCTL_END_SEQUENCE;
+	sframe_args.type  = FC_TYPE_FCP;
+
+	sframe_args.s_id = fcp_args->s_id;
+	sframe_args.d_id = fcp_args->d_id;
+	sframe_args.ox_id = fcp_args->ox_id;
+	sframe_args.rx_id = fcp_args->rx_id;
+
+	sframe_args.payload = fcp_args->fcprsp;
+	sframe_args.payload_len = fcp_args->fcprsp_len;
+
+	sframe_args.callback = fcp_args->callback;
+	sframe_args.cb_arg = fcp_args->cb_arg;
+
+	return ocs_sframe_common_send(node, &sframe_args);
 }
 
 /**
@@ -3015,10 +3151,10 @@ void *ocs_scsi_get_property_ptr(ocs_t *ocs, ocs_scsi_property_e prop)
  * @return None.
  */
 void
-ocs_scsi_del_initiator_complete(ocs_node_t *node)
+ocs_scsi_del_initiator_complete(ocs_node_t *node, void *cbdata)
 {
 	/* Notify the node to resume */
-	ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, NULL);
+	ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, cbdata);
 }
 
 /**

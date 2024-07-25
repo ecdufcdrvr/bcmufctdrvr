@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,29 +50,19 @@
 #define node_printf(node, fmt, ...)		ocs_log_info(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 #define node_printf_test(node, fmt, ...)	ocs_log_test(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 #define node_printf_err(node, fmt, ...)		ocs_log_err(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
+#define node_printf_warn(node, fmt, ...)	ocs_log_warn(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 
 #if !defined(OCS_USPACE)
 #define node_printf_ratelimited(node, fmt, ...)							\
-        do {											\
-                if (ocs_ratelimit(&node->ratelimit))						\
-			ocs_log_info(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__) \
-        } while(0)
-
+			ocs_log_info_ratelimited(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 #define node_printf_test_ratelimited(node, fmt, ...)						\
-        do {											\
-                if (ocs_ratelimit(&node->ratelimit))						\
-			ocs_log_test(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__) \
-        } while(0)
-
+			ocs_log_test_ratelimited(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 #define node_printf_err_ratelimited(node, fmt, ...)						\
-        do {											\
-                if (ocs_ratelimit(&node->ratelimit))						\
-			ocs_log_err(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)	\
-        } while(0)
+			ocs_log_err_ratelimited(node->ocs, "[%s] " fmt, node->display_name, ##__VA_ARGS__)
 #else
-#define node_printf_ratelimited(node, fmt, ...) node_printf(node, fmt, ##__VA_ARGS__)
-#define node_printf_test_ratelimited(node, fmt, ...) node_printf_test(node, fmt, ##__VA_ARGS__)
-#define node_printf_err_ratelimited(node, fmt, ...) node_printf_err(node, fmt, ##__VA_ARGS__)
+#define node_printf_ratelimited(node, fmt, ...)		node_printf(node, fmt, ##__VA_ARGS__)
+#define node_printf_test_ratelimited(node, fmt, ...)	node_printf_test(node, fmt, ##__VA_ARGS__)
+#define node_printf_err_ratelimited(node, fmt, ...)	node_printf_err(node, fmt, ##__VA_ARGS__)
 #endif
 
 #define node_sm_prologue() \
@@ -101,15 +93,21 @@
  *
  * Structure used as callback argument
  */
+typedef struct ocs_node_evt_prli_ctx_s {
+	ocs_ls_rsp_type_e ls_rsp_type;
+} ocs_node_evt_prli_ctx_t;
 
 struct ocs_node_cb_s {
 	ocs_io_t *io;			/**< SCSI IO for sending response */
 	int32_t status;			/**< completion status */
 	int32_t ext_status;		/**< extended completion status */
-	void *header;   /**< completion header buffer */
-	void *payload;  /**< completion payload buffers */
+	fc_header_t *header;		/**< completion header buffer */
+	void *payload;			/**< completion payload buffers */
 	size_t payload_len;
 	ocs_io_t *els;			/**< ELS IO object */
+	ocs_node_evt_prli_ctx_t prli_ctx;
+	bool flush_rqs_completed;	/**< Used in ABTS processing */
+	ocs_node_t *node;
 };
 
 /**
@@ -155,7 +153,7 @@ extern ocs_node_t *ocs_node_get_instance(ocs_t *ocs, uint32_t index);
 static inline void
 ocs_node_lock_init(ocs_node_t *node)
 {
-	ocs_rlock_init(node->ocs, &node->lock, "node rlock");
+	ocs_rlock_init(node->ocs, &node->lock, OCS_LOCK_ORDER_NODE, "node rlock");
 }
 
 static inline void
@@ -197,6 +195,18 @@ ocs_node_suppress_resp(ocs_remote_node_t *rnode)
 	return node->suppress_rsp;
 }
 
+static inline bool
+ocs_node_nsler_capable(ocs_node_t *node)
+{
+	return node->nvme_sler && node->nvme_conf;
+}
+
+static inline bool
+ocs_node_nsler_negotiated(ocs_node_t *node)
+{
+	return ocs_node_nsler_capable(node) && ocs_nsler_capable(node->ocs);
+}
+
 typedef void* (*ocs_node_common_func_t)(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 
 extern int32_t node_check_els_req(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg, uint8_t cmd, ocs_node_common_func_t node_common_func, const char *funcname);
@@ -205,13 +215,13 @@ extern int32_t node_check_ct_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *a
 extern int32_t ocs_remote_node_cb(void *arg, ocs_hal_remote_node_event_e event, void *data);
 extern int32_t ocs_node_attach(ocs_node_t *node);
 extern ocs_node_t *ocs_node_find(ocs_sport_t *sport, uint32_t port_id);
+extern ocs_node_t *ocs_node_lookup_get(ocs_sport_t *sport, uint32_t port_id);
 extern ocs_node_t *ocs_node_find_wwpn(ocs_sport_t *sport, uint64_t wwpn);
 extern ocs_node_t *ocs_node_find_wwnn(ocs_sport_t *sport, uint64_t wwnn);
 extern void ocs_node_dump(ocs_t *ocs);
 extern ocs_node_t *ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ);
 extern int32_t ocs_node_free(ocs_node_t *node);
-extern void ocs_node_force_free(ocs_node_t *node);
-extern void ocs_notify_node_force_free(ocs_node_t *node);
+extern void ocs_scsi_notify_node_force_free(ocs_node_t *node);
 extern void ocs_node_fcid_display(uint32_t fc_id, char *buffer, uint32_t buffer_length);
 extern void ocs_node_update_display_name(ocs_node_t *node);
 
@@ -238,7 +248,7 @@ extern int32_t ocs_node_resume(ocs_node_t *node);
 extern void *__ocs_node_paused(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 
 extern int ocs_node_active_ios_empty(ocs_node_t *node);
-extern void ocs_node_send_ls_io_cleanup(ocs_node_t *node);
+extern void ocs_node_ls_rsp_io_cleanup(ocs_node_t *node);
 
 extern int32_t ocs_node_recv_link_services_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
 extern int32_t ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq);
@@ -250,6 +260,7 @@ extern int32_t ocs_node_recv_tow_data(ocs_node_t *node, ocs_hal_sequence_t *seq)
 extern int32_t ocs_node_recv_bls_no_sit(ocs_node_t *node, ocs_hal_sequence_t *seq);
 
 extern int32_t ocs_node_is_remote_node(ocs_remote_node_t *rnode);
-extern int32_t ocs_node_nsler_capable(ocs_node_t *node);
+extern void ocs_node_add_shutdown_list(ocs_node_t *node);
+extern void ocs_node_remove_shutdown_list(ocs_node_t *node);
 
 #endif // __OCS_NODE_H__

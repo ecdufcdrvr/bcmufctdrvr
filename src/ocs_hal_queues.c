@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,9 +37,11 @@
  *
  */
 
+#include "ocs.h"
 #include "ocs_os.h"
 #include "ocs_hal.h"
 #include "ocs_hal_queues.h"
+#include "ocs_compat.h"
 
 #define HAL_QTOP_DEBUG		0
 
@@ -68,7 +72,7 @@ ocs_hal_eq_for_send_frame(ocs_hal_t *hal, int32_t scsi_nvme)
 		}
 	}
 
-	ocs_assert(scsi_nvme == OCS_HAL_WQ_SFQ_NVME, NULL);
+	ocs_hal_assert(scsi_nvme == OCS_HAL_WQ_SFQ_NVME);
 	/* For NVMe, first get the RQ */
 	for (i = 0; i < hal->config.n_rq; i++) {
 		rq = hal->hal_rq[i];
@@ -76,7 +80,7 @@ ocs_hal_eq_for_send_frame(ocs_hal_t *hal, int32_t scsi_nvme)
 			continue;
 
 		/* Check if this RQ has the filter of IO */
-		for (j = 0; j < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; j++) {
+		for (j = 0; j < SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG; j++) {
 			if (rq->filter_mask & (1U << j)) {
 				if ((hal->config.filter_def[j] == OCS_NVME_IO_FILTER) && rq->nvmeq) {
 					return rq->cq->eq;
@@ -161,6 +165,14 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 		ocs_memset(&mrq_sets[i], 0, sizeof(ocs_hal_mrq_info_t));
 	}
 
+	/*
+	 * Adjust the the size of the WQs so that the CQ is twice as big as
+	 * the WQ to allow for 2 completions per IO.
+	 */
+	if (hal->num_qentries[SLI_QTYPE_CQ] < (hal->num_qentries[SLI_QTYPE_WQ] * 2)) {
+		hal->num_qentries[SLI_QTYPE_WQ] = hal->num_qentries[SLI_QTYPE_CQ] / 2;
+	}
+
 	default_lengths[QTOP_EQ] = OCS_HAL_EQ_ENTRIES_DEF;
 	default_lengths[QTOP_CQ] = hal->num_qentries[SLI_QTYPE_CQ];
 	default_lengths[QTOP_WQ] = hal->num_qentries[SLI_QTYPE_WQ];
@@ -174,6 +186,8 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 	hal->mq_count = 0;
 	hal->wq_count = 0;
 	hal->rq_count = 0;
+	hal->scsi_rq_pair_count = 0;
+	hal->scsi_io_mrq_pair_count = 0;
 	hal->hal_rq_count = 0;
 	ocs_list_init(&hal->eq_list, hal_eq_t, link);
 
@@ -218,13 +232,13 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 				break;
 			}
 
-			eq = hal_new_eq(hal, len);
+			eq = hal_new_eq(hal, len, qt->nvmeq);
 			if (eq == NULL)
 				goto fail;
 
 			eq->nvmeq = qt->nvmeq;
 			if (!eq->nvmeq) {
-				eq->cpu_core = ocs_sched_cpu(eq->instance);
+				eq->cpu_core = ocs_sched_cpu(eq->queue->id);
 				if (eq->cpu_core == UINT32_MAX) {
 					ocs_log_err(hal->os, "**No cpu/core available**\n");
 					goto fail;
@@ -351,7 +365,10 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 			rqs_info.rq_cfg[rqs_info.num_pairs].policy = qt->policy;
 			rqs_info.rq_cfg[rqs_info.num_pairs].eq = eq;
 			rqs_info.rq_cfg[rqs_info.num_pairs].protocol_valid = qt->protocol_valid;
-			rqs_info.rq_cfg[rqs_info.num_pairs].protocol = qt->protocol;
+			if (eq && eq->nvmeq)
+				rqs_info.rq_cfg[rqs_info.num_pairs].protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME;
+			else
+				rqs_info.rq_cfg[rqs_info.num_pairs].protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI;
 			rqs_info.num_pairs++;
 			break;
 
@@ -438,25 +455,25 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 			if (cq == NULL)
 				goto fail;
 
-			rq = hal_new_rq(cq, rqs_info.rq_cfg[i].len, rqs_info.rq_cfg[i].ulp);
+			rq = hal_new_rq(cq, rqs_info.rq_cfg[i].len, rqs_info.rq_cfg[i].ulp,
+					rqs_info.rq_cfg[i].eq->nvmeq);
 			if (rq == NULL)
 				goto fail;
 
 			rq->filter_mask = rqs_info.rq_cfg[i].filter_mask;
-			rq->nvmeq = rqs_info.rq_cfg[i].eq->nvmeq;
 		}
 	}
 
 	/* Now create RQ Set */
 	for (j = 0; j < OCS_HAL_MAX_MRQ_SETS; j++) {
-		hal_cq_t *cqs[OCE_HAL_MAX_NUM_MRQ_PAIRS] = { NULL };
-		hal_rq_t *rqs[OCE_HAL_MAX_NUM_MRQ_PAIRS] = { NULL };
+		hal_cq_t *cqs[OCS_HAL_MAX_NUM_MRQ_PAIRS] = { NULL };
+		hal_rq_t *rqs[OCS_HAL_MAX_NUM_MRQ_PAIRS] = { NULL };
 
 		if (!mrq_sets[j].num_pairs)
 			continue; /* Not used */
 
-		if (mrq_sets[j].num_pairs > OCE_HAL_MAX_NUM_MRQ_PAIRS) {
-			ocs_log_crit(hal->os, "Max Supported MRQ pairs = %d\n", OCE_HAL_MAX_NUM_MRQ_PAIRS);
+		if (mrq_sets[j].num_pairs > OCS_HAL_MAX_NUM_MRQ_PAIRS) {
+			ocs_log_crit(hal->os, "Max Supported MRQ pairs = %d\n", OCS_HAL_MAX_NUM_MRQ_PAIRS);
 			goto fail;
 		}
 
@@ -473,13 +490,13 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 			goto fail;
 
 		/* Create RQ set */
-		if (hal_new_rq_set(cqs, rqs, mrq_sets[j].num_pairs, mrq_sets[j].len, mrq_sets[j].ulp))
+		if (hal_new_rq_set(cqs, rqs, mrq_sets[j].num_pairs, mrq_sets[j].len, mrq_sets[j].ulp,
+				   mrq_sets[j].nvmeq))
 			goto fail;
 
 		for (i = 0; i < mrq_sets[j].num_pairs; i++) {
 			rqs[i]->filter_mask = mrq_sets[j].filter_mask;
 			rqs[i]->policy = mrq_sets[j].policy;
-			rqs[i]->nvmeq = mrq_sets[j].nvmeq;
 			rqs[i]->is_mrq = TRUE;
 			rqs[i]->base_mrq_id = rqs[0]->hdr->id;
 			rqs[i]->mrq_set_count = mrq_sets[j].num_pairs;
@@ -489,12 +506,16 @@ ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop)
 		}
 	}
 
-	if (hal_new_els_cq(hal)) {
-		if (!hal_new_els_wq(hal))
-			goto fail;
-	} else {
-		goto fail;
-	}
+	/* MRQ sets have been created. Save Marker WQE category of SCSI & NVMe IO mrqs */
+	hal->scsi_mrq_marker_category = ocs_hal_get_mrq_marker_category(hal,
+							REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI,
+							OCS_SCSI_IO_FILTER);
+	hal->nvme_mrq_marker_category = ocs_hal_get_mrq_marker_category(hal,
+							REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME,
+							OCS_NVME_IO_FILTER);
+	hal->scsi_io_mrq_pair_count = ocs_hal_get_rq_count_by_filter(hal,
+							REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI,
+							OCS_SCSI_IO_FILTER);
 
 	/* Create CQ/WQ for Send Frames SCSI dev */
 	if (ocs_hal_init_send_frame_queue(hal, OCS_HAL_WQ_SFQ_SCSI)) {
@@ -523,11 +544,12 @@ fail:
  *
  * @param hal pointer to HAL object
  * @param entry_count number of entries in the EQ
+ * @param nvmeq EQ for NVMe of FCP
  *
  * @return pointer to allocated EQ object
  */
 hal_eq_t*
-hal_new_eq(ocs_hal_t *hal, uint32_t entry_count)
+hal_new_eq(ocs_hal_t *hal, uint32_t entry_count, uint8_t nvmeq)
 {
 	hal_eq_t *eq = ocs_malloc(hal->os, sizeof(*eq), OCS_M_ZERO);
 
@@ -552,8 +574,9 @@ hal_new_eq(ocs_hal_t *hal, uint32_t entry_count)
 				sli_eq_modify_delay(&hal->sli, eq->queue, 1, 0, 8);
 				hal->hal_eq[eq->instance] = eq;
 				ocs_list_add_tail(&hal->eq_list, eq);
-				ocs_log_debug(hal->os, "create eq[%2d] id %3d len %4d\n", eq->instance, eq->queue->id,
-					eq->entry_count);
+				ocs_log_debug(hal->os, "create %s eq[%2d] id %05d len %4d\n",
+					      nvmeq ? "NVMe" : "FCP",
+					      eq->instance, eq->queue->id, eq->entry_count);
 			}
 		}
 	}
@@ -594,8 +617,10 @@ hal_new_cq(hal_eq_t *eq, uint32_t entry_count)
 		} else {
 			hal->hal_cq[cq->instance] = cq;
 			ocs_list_add_tail(&eq->cq_list, cq);
-			ocs_log_debug(hal->os, "create cq[%2d] id %3d len %4d\n", cq->instance, cq->queue->id,
-				cq->entry_count);
+			ocs_log_debug(hal->os, "create cq[%2d] id %05d len %d eq id %05d\n",
+				      cq->instance, cq->queue->id, cq->entry_count, eq->queue->id);
+			/* Override cq proc limit if a default cq process limit is available */
+			sli_queue_set_proc_limit(cq->queue, ocs_get_cq_config_process_limit((ocs_t *) hal->os));
 		}
 	}
 	return cq;
@@ -647,8 +672,17 @@ hal_new_cq_set(hal_eq_t *eqs[], hal_cq_t *cqs[], uint32_t num_cqs, uint32_t entr
 	}
 
 	for (i = 0; i < num_cqs; i++) {
+
+		/* Override cq proc limit if a default cq process limit is available */
+		sli_queue_set_proc_limit(cq->queue,
+			ocs_get_cq_config_process_limit((ocs_t *) hal->os));
+
 		hal->hal_cq[cqs[i]->instance] = cqs[i];
 		ocs_list_add_tail(&cqs[i]->eq->cq_list, cqs[i]);
+
+		ocs_log_debug(hal->os, "create cq_set(%2d): cq[%2d] id %05d len %d eq id %05d\n",
+			      num_cqs, cqs[i]->instance, cqs[i]->queue->id,
+			      cqs[i]->entry_count, cqs[i]->eq->queue->id);
 	}
 
 	return 0;
@@ -697,8 +731,8 @@ hal_new_mq(hal_cq_t *cq, uint32_t entry_count)
 		} else {
 			hal->hal_mq[mq->instance] = mq;
 			ocs_list_add_tail(&cq->q_list, mq);
-			ocs_log_debug(hal->os, "create mq[%2d] id %3d len %4d\n", mq->instance, mq->queue->id,
-				mq->entry_count);
+			ocs_log_debug(hal->os, "create mq[%2d] id %05d len %4d cq id %05d\n",
+				      mq->instance, mq->queue->id, mq->entry_count, cq->queue->id);
 		}
 	}
 	return mq;
@@ -745,62 +779,10 @@ hal_new_wq(hal_cq_t *cq, uint32_t entry_count, uint32_t class, uint32_t ulp, boo
 			wq->fw_sfq_enabled = (sfq & wq->queue->sfq_resp);
 			hal->hal_wq[wq->instance] = wq;
 			ocs_list_add_tail(&cq->q_list, wq);
-			ocs_log_debug(hal->os, "create wq[%2d] id %3d len %4d cls %d ulp %d\n", wq->instance, wq->queue->id,
-				wq->entry_count, wq->class, wq->ulp);
+			ocs_log_debug(hal->os, "create wq[%2d] id %05d len %5d cls %d ulp %d cq id %05d\n",
+				      wq->instance, wq->queue->id, wq->entry_count, wq->class, wq->ulp, cq->queue->id);
 		}
 	}
-	return wq;
-}
-
-/**
- * @brief Allocate a new ELS CQ object
- *
- * A new ELS CQ object is instantiated
- *
- * @param HAL object
- *
- * @return pointer to allocated WQ object
- */
-hal_cq_t*
-hal_new_els_cq(ocs_hal_t *hal)
-{
-	hal_cq_t *cq = NULL;
-
-	ocs_hal_assert(hal);
-	ocs_hal_assert(hal->hal_els_rq_cq);
-
-	if (hal->hal_els_rq_cq->eq) {
-		cq = hal_new_cq(hal->hal_els_rq_cq->eq, hal->num_qentries[SLI_QTYPE_CQ]);
-		if (cq == NULL)
-			ocs_log_err(hal->os, "Creating ELS CQ failed\n");
-	}
-
-	hal->hal_els_cq = cq;
-	return cq;
-}
-
-/**
- * @brief Allocate a new ELS WQ object
- *
- * A new ELS WQ object is instantiated
- *
- * @param HAL object
- *
- * @return pointer to allocated WQ object
- */
-hal_wq_t*
-hal_new_els_wq(ocs_hal_t *hal)
-{
-	hal_wq_t *wq = NULL;
-
-	ocs_hal_assert(hal);
-	if (hal->hal_els_cq) {
-		wq = hal_new_wq(hal->hal_els_cq, hal->num_qentries[SLI_QTYPE_WQ], 0, 0, false);
-		if (wq == NULL)
-			ocs_log_err(hal->os, "Creating ELS WQ failed\n");
-	}
-
-	hal->hal_els_wq = wq;
 	return wq;
 }
 
@@ -816,17 +798,29 @@ hal_new_els_wq(ocs_hal_t *hal)
  * @return pointer to newly allocated hal_rq_t
  */
 hal_rq_t*
-hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp)
+hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp, uint8_t nvmeq)
 {
 	ocs_hal_t *hal = cq->eq->hal;
-	hal_rq_t *rq = ocs_malloc(hal->os, sizeof(*rq), OCS_M_ZERO);
+	hal_rq_t *rq;
 
+	if (cq->entry_count / 2 < entry_count) {
+		ocs_log_err(hal->os, "CQ entry count (%d) should be double the RQ entry count (%d)\n",
+			    cq->entry_count, entry_count);
+		return NULL;
+	}
+
+	rq = ocs_malloc(hal->os, sizeof(*rq), OCS_M_ZERO);
 	if (rq != NULL) {
 		rq->instance = hal->hal_rq_count++;
 		rq->cq = cq;
 		rq->type = SLI_QTYPE_RQ;
 		rq->ulp = ulp;
 		rq->entry_count = entry_count;
+		rq->nvmeq = nvmeq;
+		if (rq->nvmeq)
+			rq->protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME;
+		else
+			rq->protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI;
 
 		/* Create the header RQ */
 		ocs_hal_assert(hal->rq_count < OCS_HAL_MAX_NUM_RQ);
@@ -842,14 +836,14 @@ hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp)
 			ocs_free(hal->os, rq, sizeof(*rq));
 			return NULL;
 		}
-		hal->hal_rq_lookup[hal->rq_count] = rq->instance;	/* Update hal_rq_lookup[] */
-		/* Use the CQ associated with RQ index 0 as ELS CQ RQ */
-		if (rq->instance == 0)
-			hal->hal_els_rq_cq = cq;
 
+		hal->hal_rq_lookup[hal->rq_count] = rq->instance;	/* Update hal_rq_lookup[] */
 		hal->rq_count++;
-		ocs_log_debug(hal->os, "create rq[%2d] id %3d len %4d hdr  size %4d ulp %d\n",
-			rq->instance, rq->hdr->id, rq->entry_count, rq->hdr_entry_size, rq->ulp);
+
+		ocs_log_debug(hal->os, "create %s rq[%2d] id %05d len %d "
+			      "hdr size %d ulp %d cq id %05d\n", nvmeq ? "NVMe" : "FCP",
+			      rq->instance, rq->hdr->id, rq->entry_count,
+			      rq->hdr_entry_size, rq->ulp, cq->queue->id);
 
 		/* Create the default data RQ */
 		ocs_hal_assert(hal->rq_count < OCS_HAL_MAX_NUM_RQ);
@@ -867,8 +861,10 @@ hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp)
 		}
 		hal->hal_rq_lookup[hal->rq_count] = rq->instance;	/* Update hal_rq_lookup[] */
 		hal->rq_count++;
-		ocs_log_debug(hal->os, "create rq[%2d] id %3d len %4d data size %4d ulp %d\n", rq->instance,
-			rq->data->id, rq->entry_count, rq->data_entry_size, rq->ulp);
+		ocs_log_debug(hal->os, "create %s rq[%2d] id %05d len %d "
+			      "data size %d ulp %d cq id %05d\n", nvmeq ? "NVMe" : "FCP",
+			      rq->instance, rq->data->id, rq->entry_count,
+			      rq->data_entry_size, rq->ulp, cq->queue->id);
 
 		hal->hal_rq[rq->instance] = rq;
 		ocs_list_add_tail(&cq->q_list, rq);
@@ -879,6 +875,9 @@ hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp)
 			ocs_log_err(hal->os, "RQ tracker buf allocation failure\n");
 			return NULL;
 		}
+
+		if (!nvmeq)
+			hal->scsi_rq_pair_count++;
 	}
 	return rq;
 }
@@ -899,7 +898,8 @@ hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp)
  * @return 0 in success and -1 on failure.
  */
 uint32_t
-hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t entry_count, uint32_t ulp)
+hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t entry_count, uint32_t ulp,
+	       uint8_t nvmeq)
 {
 	ocs_hal_t *hal = cqs[0]->eq->hal;
 	hal_rq_t *rq = NULL;
@@ -922,6 +922,11 @@ hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t
 		rq->type = SLI_QTYPE_RQ;
 		rq->ulp = ulp;
 		rq->entry_count = entry_count;
+		rq->nvmeq = nvmeq;
+		if (rq->nvmeq)
+			rq->protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME;
+		else
+			rq->protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI;
 
 		/* Header RQ */
 		rq->hdr = hal->rq[hal->rq_count];
@@ -938,6 +943,8 @@ hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t
 		qs[q_count + 1] = rq->data;
 
 		rq->rq_tracker = NULL;
+		if (!nvmeq)
+			hal->scsi_rq_pair_count++;
 	}
 
 	if (sli_fc_rq_set_alloc(&hal->sli, num_rq_pairs, qs,
@@ -950,7 +957,6 @@ hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t
 		goto error;
 	}
 
-
 	for (i = 0; i < num_rq_pairs; i++) {
 		hal->hal_rq[rqs[i]->instance] = rqs[i];
 		ocs_list_add_tail(&cqs[i]->q_list, rqs[i]);
@@ -960,6 +966,13 @@ hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t
 			ocs_log_err(hal->os, "RQ tracker buf allocation failure\n");
 			goto error;
 		}
+
+		ocs_log_debug(hal->os, "create %s rq_set(%2d): rq[%2d] hdr id %05d size %d "
+			      "data id %05d size %d len %d ulp %d cq id %05d\n",
+			      nvmeq ? "NVMe" : "FCP", num_rq_pairs,
+			      rqs[i]->instance, rqs[i]->hdr->id, rqs[i]->hdr_entry_size,
+			      rqs[i]->data->id, rqs[i]->data_entry_size, rqs[i]->entry_count,
+			      rqs[i]->ulp, rqs[i]->cq->queue->id);
 	}
 
 	return 0;
@@ -1038,9 +1051,6 @@ hal_del_cq(hal_cq_t *cq)
 		}
 
 		ocs_list_remove(&cq->eq->cq_list, cq);
-		if (cq->eq->hal->hal_els_cq == cq)
-			cq->eq->hal->hal_els_cq = NULL;
-
 		cq->eq->hal->hal_cq[cq->instance] = NULL;
 		ocs_free(cq->eq->hal->os, cq, sizeof(*cq));
 	}
@@ -1079,9 +1089,6 @@ hal_del_wq(hal_wq_t *wq)
 {
 	if (wq != NULL) {
 		ocs_list_remove(&wq->cq->q_list, wq);
-		if (wq == wq->cq->eq->hal->hal_els_wq)
-			wq->cq->eq->hal->hal_els_wq = NULL;
-
 		wq->cq->eq->hal->hal_wq[wq->instance] = NULL;
 		ocs_free(wq->cq->eq->hal->os, wq, sizeof(*wq));
 	}
@@ -1102,6 +1109,8 @@ hal_del_rq(hal_rq_t *rq)
 	ocs_hal_t *hal = NULL;
 
 	if (rq != NULL) {
+		ocs_hal_assert(rq->cq);
+		ocs_hal_assert(rq->cq->eq);
 		hal = rq->cq->eq->hal;
 
 		/* Free RQ tracker */
@@ -1182,6 +1191,8 @@ hal_queue_teardown(ocs_hal_t *hal)
 			hal_del_eq(eq);
 		}
 	}
+	hal->hal_mrq_used = false;
+
 	for (i = 0; i < ARRAY_SIZE(hal->wq_cpu_array); i++) {
 		ocs_varray_free(hal->wq_cpu_array[i]);
 		hal->wq_cpu_array[i] = NULL;
@@ -1216,17 +1227,23 @@ ocs_hal_queue_next_wq(ocs_hal_t *hal, ocs_hal_io_t *io)
 {
 	hal_eq_t *eq;
 	hal_wq_t *wq = NULL;
+	uint8_t i;
 
 	switch(io->wq_steering) {
-	case OCS_HAL_WQ_STEERING_CLASS:
-		if (likely(io->wq_class < ARRAY_SIZE(hal->wq_class_array))) {
-			wq = ocs_varray_iter_next(hal->wq_class_array[io->wq_class]);
-		}
-		break;
 	case OCS_HAL_WQ_STEERING_REQUEST:
 		eq = io->eq;
 		if (likely(eq != NULL)) {
 			wq = ocs_varray_iter_next(eq->wq_array);
+			if (wq)
+				break;
+		}
+		/* If no wq is associated with this eq, default to class 
+ 		 * based steering
+ 		 */
+ 		FALL_THROUGH; /* fall through */
+	case OCS_HAL_WQ_STEERING_CLASS:
+		if (likely(io->wq_class < ARRAY_SIZE(hal->wq_class_array))) {
+			wq = ocs_varray_iter_next(hal->wq_class_array[io->wq_class]);
 		}
 		break;
 	case OCS_HAL_WQ_STEERING_CPU: {
@@ -1240,7 +1257,12 @@ ocs_hal_queue_next_wq(ocs_hal_t *hal, ocs_hal_io_t *io)
 	}
 
 	if (unlikely(wq == NULL)) {
-		wq = hal->hal_wq[0];
+		/* Look for a wq tied to a non-nvme eq */
+		for (i = 0; i < hal->wq_count; i++) {
+			wq = hal->hal_wq[i];
+			if (!wq->cq->eq->nvmeq)
+				break;
+		}
 	}
 
 	return wq;
@@ -1259,6 +1281,12 @@ uint32_t
 ocs_hal_qtop_eq_count(ocs_hal_t *hal)
 {
 	return hal->qtop->entry_counts[QTOP_EQ];
+}
+
+bool
+ocs_hal_qtop_is_eq_nvme(ocs_hal_t *hal, int eq_index)
+{
+	return hal->qtop->eq_nvmes[eq_index];
 }
 
 #define TOKEN_LEN		32
@@ -1851,10 +1879,9 @@ ocs_hal_qtop_parse(ocs_hal_t *hal, const char *qtop_string)
 	ocs_hal_qtop_t *qtop;
 	tokarray_t tokarray;
 	const char *s;
-#if HAL_QTOP_DEBUG
 	uint32_t i;
 	ocs_hal_qtop_entry_t *qt;
-#endif
+	uint32_t eq_index;
 
 	ocs_log_debug(hal->os, "queue topology: %s\n", qtop_string);
 
@@ -1908,6 +1935,15 @@ ocs_hal_qtop_parse(ocs_hal_t *hal, const char *qtop_string)
 		       qt->class, qt->ulp);
 	}
 #endif
+
+	for (i = 0, eq_index = 0, qt = qtop->entries;
+		i < qtop->inuse_count && eq_index < qtop->entry_counts[QTOP_EQ];
+		i++, qt++) {
+		if (qt->entry != QTOP_EQ)
+			continue;
+		qtop->eq_nvmes[eq_index] = qt->nvmeq;
+		++eq_index;
+	}
 
 	/* Free the tokens array */
 	ocs_free(hal->os, tokarray.tokens, MAX_TOKENS * sizeof(*tokarray.tokens));

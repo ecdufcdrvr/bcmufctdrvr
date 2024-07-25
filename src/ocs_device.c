@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,130 +52,169 @@
 static void *__ocs_d_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 static void *__ocs_d_wait_del_node(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 static void *__ocs_d_wait_del_ini_tgt(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
-static int32_t ocs_process_abts(ocs_io_t *tmfio, fc_header_t *hdr);
-
-/**
- * @ingroup device_sm
- * @brief Send response to PRLI.
- *
- * <h3 class="desc">Description</h3>
- * For device nodes, this function sends a PRLI response.
- *
- * @param io Pointer to a SCSI IO object.
- * @param ox_id OX_ID of PRLI
- *
- * @return Returns None.
- */
 
 void
-ocs_d_send_prli_rsp(ocs_io_t *io, uint16_t ox_id, uint8_t fc_type)
+ocs_adapter_set_hbs_bufsize(ocs_t *ocs, int32_t hbs_bufsize)
 {
-	ocs_t *ocs = io->ocs;
-	ocs_node_t *node = io->node;
+	ocs_t *other_ocs;
+	uint8_t bus, dev, func;
+	uint8_t other_bus, other_dev, other_func;
+	uint32_t index = 0;
+
+	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
+	for_each_active_ocs(index, other_ocs) {
+		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
+		if ((bus == other_bus) && (dev == other_dev)) {
+			other_ocs->hbs_bufsize = hbs_bufsize;
+		}
+	}
+}
+
+void
+ocs_set_hbs_bufsize(ocs_t *ocs, int32_t size)
+{
+	ocs->hbs_bufsize = size;
+}
+
+int32_t
+ocs_get_hbs_bufsize(ocs_t *ocs)
+{
+	return ocs->hbs_bufsize;
+}
+
+static void
+ocs_nvme_node_quiesce(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	ocs_node_hold_frames(node);
+
+	/* Unregister the session with the backend */
+	node_printf(node, "delete NVME (initiator) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
+	if (OCS_NVME_CALL_COMPLETE == ocs_nvme_del_initiator(node, cbdata))
+		ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, cbdata);
+}
+
+static void
+ocs_nvme_node_resume(ocs_node_t *node)
+{
+	ocs_node_accept_frames(node);
+}
+
+static void
+ocs_scsi_node_quiesce(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	ocs_node_hold_frames(node);
+	ocs_scsi_io_alloc_disable(node);
+	node->mark_for_deletion = TRUE;
+	node->fcp_enabled = FALSE;
+
+	/* Unregister the session with the backend */
+	node_printf(node, "delete SCSI (initiator) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
+	if (OCS_SCSI_CALL_COMPLETE == ocs_scsi_del_initiator(node, cbdata))
+		ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, cbdata);
+
+	/* Drain all the SCSI active IO's */
+	ocs_scsi_active_io_cancel(node);
+}
+
+static void
+ocs_scsi_node_resume(ocs_node_t *node)
+{
+	node->mark_for_deletion = FALSE;
+	ocs_scsi_io_alloc_enable(node);
+	ocs_node_accept_frames(node);
+}
+
+static void
+ocs_d_handle_sess_reg(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
 	int32_t rc = -1;
-	uint32_t reason_code = FC_REASON_UNABLE_TO_PERFORM,
-		 reason_code_expl = FC_EXPL_REQUEST_NOT_SUPPORTED;
 
-	switch(fc_type) {
-	case FC_TYPE_NVME:
+	switch (cbdata->prli_ctx.ls_rsp_type) {
+	case OCS_LS_RSP_TYPE_NVME_PRLI:
 		/* Make sure target supports NVME */
-		if (!ocs_tgt_nvme_enabled(ocs))
-			goto rjt;
+		if (!ocs_tgt_nvme_backend_enabled(node->ocs, node->sport)) {
+			/* Send an LS_ACC with the appropriate prli service params */
+			if (cbdata->io)
+				ocs_send_prli_acc(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						  FC_TYPE_NVME, NULL, NULL);
 
-		/* Duplicate PRLI, drop it and send a LOGO */
-		if (node->tgt_fct_prli_success & OCS_TARGET_TYPE_NVME) {
-			node_printf(node, "[%s] Dropping duplicate NVME PRLI\n", node->display_name);
-			ocs_els_io_free(io);
-
-			if (ocs_send_logo(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, 0, NULL, NULL) == NULL) {
-				/* Failed to send a LOGO, go ahead and cleanup the node anyway */
-				node_printf(node, "[%s] Failed to send LOGO\n", node->display_name);
-				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-			} else {
-				ocs_node_transition(node, __ocs_d_wait_logo_rsp, NULL);
-			}
-
+			ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, NULL);
 			break;
 		}
 
 		/* Make sure initiator is NVME capable from sparams */
 		if (!node->nvme_init) {
-			node_printf(node, "NVME: PRLI rejected due to invalid sparams\n");
-			reason_code	 = FC_REASON_PROTOCOL_ERROR;
-			reason_code_expl = FC_EXPL_SPARAM_OPTIONS;
-			goto rjt;
+			node_printf(node, "NVMe PRLI rejected due to invalid sparams\n");
+			cbdata->status = FC_REASON_PROTOCOL_ERROR;
+			cbdata->ext_status = FC_EXPL_SPARAM_OPTIONS;
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+			break;
 		}
 
 		/* Let the backend decide to accept or reject this initiator */
-		if (ocs_nvme_process_prli(io, ox_id)) {
-			node_printf(node, "NVME: PRLI rejected by target-server\n");
-			reason_code_expl = FC_EXPL_NO_RESOURCES_ASSIGNED;
-			goto rjt;
+		if (ocs_nvme_validate_initiator(node) == 0) {
+			node_printf(node, "NVMe PRLI rejected by target-server\n");
+			cbdata->ext_status = FC_EXPL_NO_RESOURCES_ASSIGNED;
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+			break;
 		}
 
-		ocs_log_info(ocs, "[%s] found (NVME initiator) WWPN %s WWNN %s\n", node->display_name,
-				node->wwpn, node->wwnn);
-		rc = ocs_nvme_new_initiator(node);
-		if (rc < 0)
-			goto rjt;
+		node_printf(node, "Found (NVMe initiator) WWPN %s WWNN %s suppress rsp: %d\n", node->wwpn, node->wwnn, node->suppress_rsp);
+		rc = ocs_nvme_new_initiator(node, cbdata);
+		if (rc < 0) {
+			node_printf(node, "NVMe new initiator failed\n");
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+			break;
+		}
 
 		/* Accepted */
 		node->tgt_fct_prli_success |= OCS_TARGET_TYPE_NVME;
 
-		ocs_send_prli_acc(io, ox_id, fc_type, NULL, NULL);
-		ocs_node_transition(node, __ocs_d_device_ready, NULL);
+		/*
+		 * If the backend call completes synchronously, post the 'NODE_SESS_REG_OK' here itself.
+		 * Else, post this event from backend thread once the session registration completes.
+		 */
+		if (OCS_NVME_CALL_COMPLETE == rc)
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_OK, cbdata);
+
 		break;
 
-	case FC_TYPE_FCP:
-		if (!FC_ADDR_IS_DOMAIN_CTRL(node->rnode.fc_id)) {
-			if (!ocs_tgt_scsi_enabled(ocs)) {
-				goto rjt;
-			}
-		}
+	case OCS_LS_RSP_TYPE_FCP_PRLI:
+		/* Make sure target backend supports SCSI */
+		if (!ocs_tgt_scsi_backend_enabled(node->ocs, NULL)) {
+			/* Send an LS_ACC with the appropriate prli service params */
+			if (cbdata->io)
+				ocs_send_prli_acc(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						  FC_TYPE_FCP, NULL, NULL);
 
-		/* Duplicate PRLI, drop it and send a LOGO */
-		if (node->tgt_fct_prli_success & OCS_TARGET_TYPE_FCP) {
-			node_printf(node, "[%s] Dropping duplicate SCSI PRLI\n", node->display_name);
-			ocs_els_io_free(io);
-
-			if (ocs_send_logo(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, 0, NULL, NULL) == NULL) {
-				/* Failed to send a LOGO, go ahead and cleanup the node anyway */
-				node_printf(node, "[%s] Failed to send LOGO\n", node->display_name);
-				ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-			} else {
-				ocs_node_transition(node, __ocs_d_wait_logo_rsp, NULL);
-			}
-
+			ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, NULL);
 			break;
 		}
 
 		/* Make sure initiator is SCSI capable from sparams */
 		if (!node->init) {
-			node_printf(node, "SCSI: PRLI rejected due to invalid sparams\n");
-			reason_code	 = FC_REASON_PROTOCOL_ERROR;
-			reason_code_expl = FC_EXPL_SPARAM_OPTIONS;
-			goto rjt;
+			node_printf(node, "SCSI PRLI rejected due to invalid sparams\n");
+			cbdata->status = FC_REASON_PROTOCOL_ERROR;
+			cbdata->ext_status = FC_EXPL_SPARAM_OPTIONS;
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+			break;
 		}
 
 		/* Let the backend decide to accept or reject this initiator */
 		if (ocs_scsi_validate_initiator(node) == 0) {
-			node_printf(node, "SCSI: PRLI rejected by target-server\n");
-			reason_code_expl = FC_EXPL_NO_RESOURCES_ASSIGNED;
-			goto rjt;
+			node_printf(node, "SCSI PRLI rejected by target-server\n");
+			cbdata->ext_status = FC_EXPL_NO_RESOURCES_ASSIGNED;
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+			break;
 		}
 
-		node->ls_rsp_io = io;
-		node->ls_rsp_oxid = ox_id;
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_PRLI;
-
-		/* Wait for backend session registration to complete before sending PRLI resp */
-		ocs_node_transition(node, __ocs_d_wait_scsi_backend_compl, NULL);
-
-		ocs_log_info(ocs, "[%s] found (SCSI initiator) WWPN %s WWNN %s\n", node->display_name,
-				node->wwpn, node->wwnn);
-		rc = ocs_scsi_new_initiator(node);
+		node_printf(node, "Found (SCSI initiator) WWPN %s WWNN %s suppress rsp: %d\n", node->wwpn, node->wwnn, node->suppress_rsp);
+		rc = ocs_scsi_new_initiator(node, cbdata);
 		if (rc < 0) {
-			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, NULL);
+			node_printf(node, "SCSI new initiator failed\n");
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
 			break;
 		}
 
@@ -185,19 +226,125 @@ ocs_d_send_prli_rsp(ocs_io_t *io, uint16_t ox_id, uint8_t fc_type)
 		 * Else, post this event from backend thread once the session registration completes.
 		 */
 		if (OCS_SCSI_CALL_COMPLETE == rc)
-			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_OK, NULL);
+			ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_OK, cbdata);
 
 		break;
 
 	default:
-		goto rjt;
+		ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, cbdata);
+		return;
+	}
+}
+
+static bool
+ocs_node_nsler_reg_rpi_update_needed(ocs_node_t *node, ocs_ls_rsp_type_e type)
+{
+	return (type == OCS_LS_RSP_TYPE_NVME_PRLI) &&
+		ocs_tgt_nvme_enabled(node->ocs) && ocs_node_nsler_negotiated(node);
+}
+
+static void
+ocs_d_handle_prli_reg_rpi_update(ocs_node_t *node, ocs_io_t *io)
+{
+	ocs_node_cb_t *node_cbdata = NULL;
+	int32_t ext_status = FC_EXPL_REQUEST_NOT_SUPPORTED;
+
+	node_cbdata = ocs_malloc(node->ocs, sizeof(*node_cbdata), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!node_cbdata) {
+		node_printf_err(node, "Failed to process PRLI due to node_cbdata alloc failure\n");
+		ext_status = FC_EXPL_INSUFFICIENT_RESOURCES;
+		goto err_exit;
+	}
+
+	node_cbdata->prli_ctx.ls_rsp_type = io->els_info->ls_rsp_type;
+	if (io->cmd_tgt)
+		node_cbdata->io = io;
+	else
+		node_cbdata->io = NULL;
+
+	/* Update REG_RPI with NSLER capability and then send PRLI resp */
+	if (ocs_hal_reg_rpi_update(&node->ocs->hal,
+			&node->rnode,
+			ocs_node_nsler_reg_rpi_update_needed(node, io->els_info->ls_rsp_type),
+			node_cbdata)) {
+		ext_status = FC_EXPL_NO_ADDITIONAL;
+		goto err_exit;
 	}
 
 	return;
 
-rjt:
-	node_printf(node, "PRLI rejected\n");
-	ocs_send_ls_rjt(io, ox_id, reason_code, reason_code_expl, 0, NULL, NULL);
+err_exit:
+	if (io->cmd_tgt) {
+		node_printf(node, "Sending LS reject on PRLI request\n");
+		ocs_send_ls_rjt(io, io->els_info->ls_rsp_oxid,
+				FC_REASON_UNABLE_TO_PERFORM, ext_status,
+				0, NULL, NULL);
+	}
+
+	if (node_cbdata)
+		ocs_free(node->ocs, node_cbdata, sizeof(*node_cbdata));
+
+	ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, NULL);
+
+	return;
+}
+
+static void
+ocs_d_handle_prli_backend_process(ocs_node_t *node, ocs_io_t *io, ocs_ls_rsp_type_e ls_rsp_type)
+{
+	ocs_node_cb_t *node_cbdata = NULL;
+	int32_t ext_status = FC_EXPL_REQUEST_NOT_SUPPORTED;
+
+	if ((ls_rsp_type != OCS_LS_RSP_TYPE_NVME_PRLI) &&
+		(ls_rsp_type != OCS_LS_RSP_TYPE_FCP_PRLI)) {
+		node_printf_err(node, "Failed to process PRLI due to unsupported type %d\n",
+				ls_rsp_type);
+		goto err_exit;
+	}
+
+	node_cbdata = ocs_malloc(node->ocs, sizeof(*node_cbdata), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!node_cbdata) {
+		node_printf_err(node, "Failed to process PRLI due to node_cbdata alloc failure\n");
+		ext_status = FC_EXPL_INSUFFICIENT_RESOURCES;
+		goto err_exit;
+	}
+
+	node_cbdata->prli_ctx.ls_rsp_type = ls_rsp_type;
+
+	if (io && io->cmd_tgt)
+		node_cbdata->io = io;
+	else
+		node_cbdata->io = NULL;
+
+	node_cbdata->status = FC_REASON_UNABLE_TO_PERFORM;
+	node_cbdata->ext_status = ext_status;
+
+	/* Check for duplicate PRLI request */
+	if ((ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI) &&
+			(node->tgt_fct_prli_success & OCS_TARGET_TYPE_NVME)) {
+		node_printf(node, "Processing duplicate NVMe PRLI\n");
+		ocs_nvme_node_quiesce(node, node_cbdata);
+	} else if ((ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLI) &&
+			(node->tgt_fct_prli_success & OCS_TARGET_TYPE_FCP)) {
+		node_printf(node, "Processing duplicate SCSI PRLI\n");
+		ocs_scsi_node_quiesce(node, node_cbdata);
+	} else {
+		/* If this is not a duplicate request, proceed to register a session with the backend */
+		ocs_d_handle_sess_reg(node, node_cbdata);
+	}
+
+	return;
+
+err_exit:
+	if (io && io->cmd_tgt) {
+		node_printf(node, "Sending LS reject on PRLI request\n");
+		ocs_send_ls_rjt(io, io->els_info->ls_rsp_oxid,
+				FC_REASON_UNABLE_TO_PERFORM, ext_status,
+				0, NULL, NULL);
+	}
+
+	ocs_node_post_event(node, OCS_EVT_NODE_SESS_REG_FAIL, NULL);
+
 	return;
 }
 
@@ -214,40 +361,38 @@ __ocs_d_initiate_scsi_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		bool node_scsi_tgt = node->ini_fct_prli_success & OCS_INITIATOR_TYPE_FCP;
 		bool node_scsi_ini = node->tgt_fct_prli_success & OCS_TARGET_TYPE_FCP;
 
+		/* Add node to shutdown list to track timeout */
+		ocs_node_add_shutdown_list(node);
+
 		if (node_scsi_ini && node_scsi_tgt) {
-			ocs_log_info(node->ocs, "[%s] delete SCSI (initiator+target) WWPN %s WWNN %s\n",
-					node->display_name, node->wwpn, node->wwnn);
+			node_printf(node, "delete SCSI (initiator+target) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 			ocs_node_transition(node, __ocs_d_wait_del_ini_tgt, NULL);
 
-			rc = ocs_scsi_del_initiator(node, OCS_SCSI_INITIATOR_DELETED);
-			if (rc == OCS_SCSI_CALL_COMPLETE) {
+			rc = ocs_scsi_del_initiator(node, NULL);
+			if (rc == OCS_SCSI_CALL_COMPLETE)
 				ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, NULL);
-			}
 
-			rc = ocs_scsi_del_target(node, OCS_SCSI_TARGET_DELETED);
-			if (rc == OCS_SCSI_CALL_COMPLETE) {
+			rc = ocs_scsi_del_target(node);
+			if (rc == OCS_SCSI_CALL_COMPLETE)
 				ocs_node_post_event(node, OCS_EVT_NODE_DEL_TGT_COMPLETE, NULL);
-			}
 		} else if (node_scsi_ini) {
-			ocs_log_info(node->ocs, "[%s] delete SCSI (initiator) WWPN %s WWNN %s\n", node->display_name,
-					node->wwpn, node->wwnn);
+			node_printf(node, "delete SCSI (initiator) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 			ocs_node_transition(node, __ocs_d_wait_del_node, NULL);
-			rc = ocs_scsi_del_initiator(node, OCS_SCSI_INITIATOR_DELETED);
-			if (rc == OCS_SCSI_CALL_COMPLETE) {
+
+			rc = ocs_scsi_del_initiator(node, NULL);
+			if (rc == OCS_SCSI_CALL_COMPLETE)
 				ocs_node_post_event(node, OCS_EVT_NODE_DEL_INI_COMPLETE, NULL);
-			}
 		} else if (node_scsi_tgt) {
-			ocs_log_info(node->ocs, "[%s] delete SCSI (target) WWPN %s WWNN %s\n", node->display_name,
-					node->wwpn, node->wwnn);
+			node_printf(node, "delete SCSI (target) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 			ocs_node_transition(node, __ocs_d_wait_del_node, NULL);
-			rc = ocs_scsi_del_target(node, OCS_SCSI_TARGET_DELETED);
-			if (rc == OCS_SCSI_CALL_COMPLETE) {
+
+			rc = ocs_scsi_del_target(node);
+			if (rc == OCS_SCSI_CALL_COMPLETE)
 				ocs_node_post_event(node, OCS_EVT_NODE_DEL_TGT_COMPLETE, NULL);
-			}
 		}
 
 		/* Drain the node-specific IO's from 'io_pending_list' */
-		ocs_scsi_io_cancel(node);
+		ocs_scsi_pending_io_cancel(node);
 
 		/* we've initiated the upcalls as needed, now kick off the node
 		 * detach to precipitate the aborting of outstanding exchanges
@@ -268,12 +413,17 @@ __ocs_d_initiate_scsi_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 				node->node_group = NULL;
 				node->rnode.free_group = FALSE;
 			}
+
 			if (rc != OCS_HAL_RTN_SUCCESS && rc != OCS_HAL_RTN_SUCCESS_SYNC) {
 				node_printf(node, "Failed freeing HAL node, rc=%d\n", rc);
+			} else if (node->detach_notify_pending) {
+				node->detach_notify_pending = false;
+				node_printf(node, "Notify node detached event\n");
+				ocs_node_post_event(node, OCS_EVT_NODE_FREE_OK, NULL);
 			}
 		}
 
-		/* if neither SCSI initiator nor target, proceed to cleanup */
+		/* If neither SCSI initiator nor target, proceed to cleanup */
 		if (!node_scsi_ini && !node_scsi_tgt) {
 			/*
 			 * node has either been detached or is in the process of being detached,
@@ -313,24 +463,20 @@ __ocs_d_initiate_nvme_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		bool node_nvme_ini = node->tgt_fct_prli_success & OCS_TARGET_TYPE_NVME;
 
 		if (node_nvme_ini) {
-			ocs_log_info(node->ocs, "[%s] delete NVME (initiator) WWPN %s WWNN %s\n", node->display_name,
-					node->wwpn, node->wwnn);
-			rc1 = ocs_nvme_del_initiator(node);
-			if (rc1 == OCS_NVME_CALL_COMPLETE) {
+			node_printf(node, "delete NVME (initiator) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
+			rc1 = ocs_nvme_del_initiator(node, NULL);
+			if (rc1 == OCS_NVME_CALL_COMPLETE)
 				node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_NVME;
-			}
 		}
 
 		if (node_nvme_tgt) {
-			ocs_log_info(node->ocs, "[%s] delete NVME (target) WWPN %s WWNN %s\n", node->display_name,
-					node->wwpn, node->wwnn);
+			node_printf(node, "delete NVME (target) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 			rc2 = ocs_nvme_del_target(node);
-			if (rc2 == OCS_NVME_CALL_COMPLETE) {
+			if (rc2 == OCS_NVME_CALL_COMPLETE)
 				node->ini_fct_prli_success &= ~OCS_INITIATOR_TYPE_NVME;
-			}
 		}
 
-		/* Async response will take care of moving the SM */	
+		/* Async response will take care of moving the SM */
 		if ((rc1 == OCS_NVME_CALL_ASYNC) || (rc2 == OCS_NVME_CALL_ASYNC))
 			return NULL;
 
@@ -345,6 +491,19 @@ __ocs_d_initiate_nvme_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		node->ini_fct_prli_success &= ~OCS_INITIATOR_TYPE_NVME;
 		break;
 
+	/* ignore shutdown events as we're already in shutdown path */
+	case OCS_EVT_SHUTDOWN:
+		/* have default shutdown event take precedence */
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
+		FALL_THROUGH; /* fall through */
+	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
+	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
+		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
+		return NULL;
+	case OCS_EVT_NODE_FREE_OK:
+		node_printf(node, "Detach notify is pending\n");
+		node->detach_notify_pending = true;
+		break;
 	default:
 		__ocs_d_common(__func__, ctx, evt, arg);
 		return NULL;
@@ -378,6 +537,12 @@ __ocs_d_initiate_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_ENTER: {
+		/* It is necessary to call prep_notify_it_nexus_loss() before
+		 * io alloc disable.
+		 */
+		if (node->prep_notify_it_nexus_loss)
+			node->prep_notify_it_nexus_loss(node->ocs, node);
+		ocs_node_hold_frames(node);
 		ocs_scsi_io_alloc_disable(node);
 		node->mark_for_deletion = TRUE;
 
@@ -434,13 +599,11 @@ __ocs_d_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 		ocs_log_debug(ocs, "[%s] %-20s %-20s\n", node->display_name, funcname, ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_EXPLICIT_LOGO;
-		ocs_node_hold_frames(node);
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
 		break;
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		ocs_log_debug(ocs, "[%s] %-20s %-20s\n", node->display_name, funcname, ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_IMPLICIT_LOGO;
-		ocs_node_hold_frames(node);
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
 		break;
 
@@ -495,9 +658,6 @@ __ocs_d_wait_loop(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
-
-
-
 /**
  * @ingroup device_sm
  * @brief state: wait for node resume event
@@ -522,7 +682,7 @@ __ocs_d_wait_del_ini_tgt(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		ocs_node_hold_frames(node);
-		/* Fall through */
+		FALL_THROUGH; /* fall through */
 
 	case OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY:
 	case OCS_EVT_ALL_CHILD_NODES_FREE:
@@ -540,15 +700,13 @@ __ocs_d_wait_del_ini_tgt(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:
 		/* Can happen as ELS IO IO's complete */
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		break;
 
 	/* ignore shutdown events as we're already in shutdown path */
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
@@ -589,7 +747,7 @@ __ocs_d_wait_del_node(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		ocs_node_hold_frames(node);
-		/* Fall through */
+		FALL_THROUGH; /* fall through */
 
 	case OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY:
 	case OCS_EVT_ALL_CHILD_NODES_FREE:
@@ -611,15 +769,13 @@ __ocs_d_wait_del_node(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:
 		/* Can happen as ELS IO IO's complete */
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		break;
 
 	/* ignore shutdown events as we're already in shutdown path */
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
@@ -635,37 +791,6 @@ __ocs_d_wait_del_node(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
-
-
-/**
- * @brief Save the OX_ID for sending LS_ACC/LS_RJT sometime later.
- *
- * <h3 class="desc">Description</h3>
- * When deferring the response to an ELS request, the OX_ID of the request
- * is saved using this function.
- *
- * @param io Pointer to a SCSI IO object.
- * @param hdr Pointer to the FC header.
- * @param ls Defines the type of ELS to send: LS_ACC/LS_RJT, LS_ACC/LS_RJT for PLOGI;
- * or LS_ACC/LS_RJT for PRLI.
- *
- * @return None.
- */
-
-void
-ocs_send_ls_rsp_after_attach(ocs_io_t *io, fc_header_t *hdr, ocs_node_send_ls_rsp_e ls)
-{
-	ocs_node_t *node = io->node;
-	uint16_t ox_id = ocs_be16toh(hdr->ox_id);
-
-	ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_NONE);
-
-	node->ls_rsp_oxid = ox_id;
-	node->send_ls_rsp = ls;
-	node->ls_rsp_io = io;
-	node->ls_rsp_did = fc_be24toh(hdr->d_id);
-}
-
 /**
  * @brief Determine if NVMe SLER is supported on this device
  *
@@ -673,7 +798,7 @@ ocs_send_ls_rsp_after_attach(ocs_io_t *io, fc_header_t *hdr, ocs_node_send_ls_rs
  *
  * @return TRUE if NVMe SLER is supported, otherwise FALSE
  */
-int32_t
+bool
 ocs_nsler_capable(ocs_t *ocs)
 {
 	ocs_hal_t *hal = &ocs->hal;
@@ -712,19 +837,37 @@ ocs_first_burst_enabled(ocs_t *ocs)
 void
 ocs_process_prli_payload(ocs_node_t *node, fc_prli_payload_t *prli)
 {
+	uint16_t sparams = ocs_be16toh(prli->service_params);
+
 	if (prli->type == FC_TYPE_NVME) {
-		node->nvme_init = ((ocs_be16toh(prli->service_params) & FC_PRLI_INITIATOR_FUNCTION) != 0);
-		node->nvme_tgt = ((ocs_be16toh(prli->service_params) & FC_PRLI_TARGET_FUNCTION) != 0);
-		node->nvme_sler = ((ocs_be16toh(prli->service_params) & FC_PRLI_RETRY) != 0);
-		node->nvme_conf = ((ocs_be16toh(prli->service_params) & FC_PRLI_CONFIRMED_COMPLETION) != 0);
+		node->nvme_init = (sparams & FC_PRLI_INITIATOR_FUNCTION) != 0;
+		node->nvme_tgt = (sparams & FC_PRLI_TARGET_FUNCTION) != 0;
+		node->nvme_sler = (sparams & FC_PRLI_RETRY) != 0;
+		node->nvme_conf = (sparams & FC_PRLI_CONFIRMED_COMPLETION) != 0;
 		node->nvme_prli_service_params = prli->service_params; /* BE format */
-	} else {
 		/*
-		 * Determine node first_burst capability based on the support at both sides.
+		 * Set the 'remote_nvme_prli_rcvd' flag to TRUE so that we don't need to handle
+		 * the backend session registration while processing the PRLI completion.
+		 *
+		 * For PRLI responses, command_code will be either ACC/RJT. If the command_code
+		 * is PRLI, then it is an incoming request from the remote node.
 		 */
-		node->first_burst = ((ocs_be16toh(prli->service_params) & FC_PRLI_WRITE_XRDY_DISABLED) != 0);
-		node->init = ((ocs_be16toh(prli->service_params) & FC_PRLI_INITIATOR_FUNCTION) != 0);
-		node->targ = ((ocs_be16toh(prli->service_params) & FC_PRLI_TARGET_FUNCTION) != 0);
+		if (prli->command_code == FC_ELS_CMD_PRLI)
+			node->remote_nvme_prli_rcvd = TRUE;
+	} else if (prli->type == FC_TYPE_FCP) {
+		node->init = (sparams & FC_PRLI_INITIATOR_FUNCTION) != 0;
+		node->targ = (sparams & FC_PRLI_TARGET_FUNCTION) != 0;
+		/* Determine node first_burst capability based on the support at both sides */
+		node->first_burst = (sparams & FC_PRLI_WRITE_XRDY_DISABLED) != 0;
+		/*
+		 * Set the 'remote_fcp_prli_rcvd' flag to TRUE so that we don't need to handle
+		 * the backend session registration while processing the PRLI completion.
+		 *
+		 * For PRLI responses, command_code will be either ACC/RJT. If the command_code
+		 * is PRLI, then it is an incoming request from the remote node.
+		 */
+		if (prli->command_code == FC_ELS_CMD_PRLI)
+			node->remote_fcp_prli_rcvd = TRUE;
 	}
 }
 
@@ -732,100 +875,73 @@ static void
 ocs_notify_new_target(ocs_node_t *node)
 {
 	if (node->targ && (node->ini_fct_prli_success & OCS_INITIATOR_TYPE_FCP)) {
-		ocs_log_info(node->ocs, "[%s] found (SCSI target) WWPN %s WWNN %s\n", node->display_name,
-				node->wwpn, node->wwnn);
+		node_printf(node, "Found (SCSI target) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 		ocs_scsi_new_target(node);
 	} else {
 		node->ini_fct_prli_success &= ~OCS_INITIATOR_TYPE_FCP;
 	}
 
 	if (node->nvme_tgt && (node->ini_fct_prli_success & OCS_INITIATOR_TYPE_NVME)) {
-		ocs_log_info(node->ocs, "[%s] found (NVME target) WWPN %s WWNN %s\n", node->display_name,
-				node->wwpn, node->wwnn);
+		node_printf(node, "Found (NVMe target) WWPN %s WWNN %s\n", node->wwpn, node->wwnn);
 		ocs_nvme_new_target(node);
 	} else {
 		node->ini_fct_prli_success &= ~OCS_INITIATOR_TYPE_NVME;
 	}
 }
 
-/**
- * @brief Process the ABTS.
- *
- * <h3 class="desc">Description</h3>
- * Common code to process a received ABTS. If an active IO can be found
- * that matches the OX_ID of the ABTS request, a call is made to the
- * backend. Otherwise, a BA_RJT is returned to the initiator.
- *
- * @param tmfio Pointer to a SCSI IO object.
- * @param hdr Pointer to the FC header.
- *
- * @return Returns 0 on success, or a negative error value on failure.
- */
-
-static int32_t
-ocs_process_abts(ocs_io_t *tmfio, fc_header_t *hdr)
+int32_t
+ocs_scsi_process_abts(ocs_node_t *node, ocs_io_t *tmfio, ocs_io_t *io_to_abort,
+		      uint16_t ox_id, uint16_t rx_id)
 {
-	ocs_node_t *node = tmfio->node;
-	uint16_t ox_id = ocs_be16toh(hdr->ox_id);
-	uint16_t rx_id = ocs_be16toh(hdr->rx_id);
-	ocs_io_t *io_to_abort;
+	/* Got a reference on the IO; hold it until backend is notified below */
+	node_printf(node, "Abort request: [%016" PRIX64".%016" PRIX64"] ox_id [%04x] rx_id [%04x]\n",
+		    node->sport->wwpn, ocs_node_get_wwpn(node), ox_id, rx_id);
 
-	/* If an IO was found, attempt to take a reference on it */
-	io_to_abort = ocs_io_find_tgt_io_to_abort(tmfio, ox_id, rx_id);
-	if (io_to_abort) {
-		/* Got a reference on the IO; hold it until backend is notified below */
-		node_printf(node, "Abort request: ox_id [%04x] rx_id [%04x]\n", ox_id, rx_id);
+	/* Call target server command abort */
+	tmfio->display_name = "abts";
 
-		/* Call target server command abort */
-		tmfio->display_name = "abts";
+	/*
+	 * Save the rx_id from the ABTS as it is needed for the BLS response,
+	 * regardless of the IO context's rx_id
+	 */
+	tmfio->abort_rx_id = rx_id;
 
-		/*
-		 * Save the rx_id from the ABTS as it is needed for the BLS response,
-		 * regardless of the IO context's rx_id
-		 */
-		tmfio->abort_rx_id = rx_id;
+	/* Mark the IO to indicate ABTS in progress */
+	io_to_abort->abts_received = TRUE;
 
-		/*
-		 * If this SCSI IO doesn't have an associated HAL IO, scan the 'xport->io_pending_list'.
-		 * If found, remove the IO entry, invoke the IO cb and return.
-		 * Else, if there is a pending WQE for this HAL IO, post an abort WQE immediately.
-		 */
-		ocs_scsi_io_dispatch_abort(io_to_abort, NULL, FALSE);
+	/*
+	 * If this SCSI IO doesn't have an associated HAL IO, scan the 'xport->io_pending_list'.
+	 * If found, remove the IO entry, invoke the IO cb and return.
+	 * Else, if there is a pending WQE for this HAL IO, post an abort WQE immediately.
+	 */
+	ocs_scsi_io_dispatch_abort(io_to_abort, NULL, FALSE);
 
-		/* Notify the backend */
-		ocs_scsi_recv_tmf(tmfio, io_to_abort->scsi_info->tgt_io.lun, tmfio->scsi_info->tmf_cmd, io_to_abort, 0);
+	/* Notify the backend */
+	ocs_scsi_recv_tmf(tmfio, io_to_abort->scsi_info->tgt_io.lun, tmfio->scsi_info->tmf_cmd, io_to_abort, 0);
 
-		/*
-		 * Backend will have taken an additional reference on the IO if needed;
-		 * done with current reference.
-		 */
-		ocs_ref_put(&io_to_abort->ref); /* ocs_ref_get(): same function */
-	} else {
-		/* IO was not found */
-		node_printf_ratelimited(node, "Abort request: ox_id [%04x], IO not found\n", ox_id);
-
-		if (ocs_tgt_nvme_enabled(node->ocs)) {
-			ocs_nvme_process_abts(node, ox_id, rx_id);
-			ocs_scsi_io_free(tmfio);
-		} else {
-			/* Send BA_RJT */
-			ocs_bls_send_rjt_hdr(tmfio, hdr);
-		}
-	}
+	/*
+	 * Backend will have taken an additional reference on the IO if needed;
+	 * done with current reference.
+	 */
+	ocs_ref_put(&io_to_abort->ref); /* ocs_ref_get(): same function */
 
 	return 0;
 }
 
-static int32_t
+int32_t
 ocs_process_flush_bls(ocs_node_cb_t *cbdata)
 {
-	ocs_io_t *io = cbdata->io;
-	ocs_node_t *node = io->node;
+	ocs_node_t *node = cbdata->node;
 	fc_header_t *hdr = cbdata->header;
 	fc_bls_flush_payload_t *flush_pl;
 	uint16_t ox_id = ocs_be16toh(hdr->ox_id);
 	uint16_t rx_id = ocs_be16toh(hdr->rx_id);
 	uint16_t flush_count;
+
+	if (!ocs_node_nsler_negotiated(node)) {
+		node_printf_err(node, "NVMe SLER is not negotiated successfully, drop FLUSH BLS\n");
+		goto exit;
+	}
 
 	flush_pl = (fc_bls_flush_payload_t *)cbdata->payload;
 	flush_count = ocs_be16toh(flush_pl->count);
@@ -836,62 +952,41 @@ ocs_process_flush_bls(ocs_node_cb_t *cbdata)
 					   flush_pl->ht, flush_count);
 	}
 
-	ocs_scsi_io_free(io);
+exit:
 	return 0;
 }
 
-/**
- * @brief Process the SRRS ELS
- *
- * <h3 class="desc">Description</h3>
- * Common code to process a received SRRS. Can be invoked when 
- * node SM is in device_ready state or waiting for backend to complete
- * session registration.
- *
- * @param node Pointer to remote node
- * @param evt Event to process
- * @param arg Per event optional argument
- *
- * @return Returns NULL.
- */
-
-static void * 
-ocs_process_srrs_els(ocs_node_t *node, ocs_sm_event_t evt, void *arg)
+void *
+__ocs_d_node_attached_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
-	fc_els_gen_t *els_gen = NULL;
-	ocs_node_cb_t *cbdata = arg;
-	fc_prli_payload_t *prli;
+	std_node_state_decl();
 
-	els_gen = (fc_els_gen_t *)cbdata->els->els_info->els_req.virt;
+	node_sm_trace();
 
-	switch (els_gen->command_code) {
-		case FC_ELS_CMD_PRLI:
-			prli = cbdata->els->els_info->els_rsp.virt;
+	switch(evt) {
+	case OCS_EVT_ENTER:
+		ocs_node_hold_frames(node);
+		break;
 
-			if (evt == OCS_EVT_SRRS_ELS_REQ_OK) {
-				if (prli->type == FC_TYPE_NVME) {
-					node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_NVME;
-				} else if (prli->type == FC_TYPE_FCP) {
-					node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_FCP;
-				}
-			}
+	case OCS_EVT_EXIT:
+		ocs_node_accept_frames(node);
+		break;
 
-			node->prli_rsp_pend--;
+	case OCS_EVT_SRRS_ELS_REQ_OK:   /* PLOGI response received */
+	case OCS_EVT_SRRS_ELS_REQ_FAIL:
+	case OCS_EVT_SRRS_ELS_REQ_RJT:
+		/* We dont care for PLOGI status as we already received the other side plogi. */
+		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
+			return NULL;
+		}
+		ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
+		break;
 
-			if (!node->prli_rsp_pend) {
-				ocs_notify_new_target(node);
-			}
-
-			break;
-
-		default:
-			node_printf(node, "%s received, cmd code: %d\n", 
-					  ocs_sm_event_name(evt), els_gen->command_code);
-			break; 
+	default:
+		__ocs_d_common(__func__, ctx, evt, arg);
+		return NULL;
 	}
 
-	ocs_assert(node->els_req_cnt, NULL);
-	node->els_req_cnt--;
 	return NULL;
 }
 
@@ -923,16 +1018,18 @@ __ocs_d_wait_plogi_acc_cmpl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 
 	case OCS_EVT_SRRS_ELS_CMPL_FAIL:
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
 		break;
 
 	case OCS_EVT_SRRS_ELS_CMPL_OK:	/* PLOGI ACC completions */
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
-		ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
+		if (node->plogi_els_io) {
+			/* There is an outstanding plogi sent out, Wait for its completion. */
+			ocs_node_transition(node, __ocs_d_node_attached_wait_plogi_rsp, NULL);
+		} else {
+			ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
+		}
+
 		break;
 
 	default:
@@ -958,8 +1055,6 @@ void *
 __ocs_d_wait_logo_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	ocs_node_t *node = ctx->app;
-	ocs_t *ocs = node->ocs;
-	ocs_sport_t *sport = node->sport;
 
 	node_sm_prologue();
 	node_sm_trace();
@@ -981,21 +1076,10 @@ __ocs_d_wait_logo_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_LOGO, __ocs_d_common, __func__))
 			return NULL;
 
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		node_printf(node, "LOGO sent (evt=%s), shutdown node\n", ocs_sm_event_name(evt));
 
 		/* Post explicit logout */
 		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-
-		/*
-		 * For NPIV, now that the vport LOGO is done, issue unreg_rpi_all
-		 * (on behalf of all nodes of the vport) if needed
-		 */
-		if (sport->is_vport && node->rnode.fc_id == FC_ADDR_FABRIC) {
-			if (sport->unreg_rpi_all)
-				ocs_hal_unreg_rpi_all(&ocs->hal, sport);
-		}
 		break;
 
 	// TODO: PLOGI: abort LOGO and process PLOGI? (SHUTDOWN_EXPLICIT/IMPLICIT_LOGO?)
@@ -1005,52 +1089,6 @@ __ocs_d_wait_logo_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	}
 
-	return NULL;
-}
-
-/**
- * @ingroup device_sm
- * @brief Device node state machine: Wait for the PRLO response.
- *
- * @param ctx Remote node state machine context.
- * @param evt Event to process.
- * @param arg Per event optional argument.
- *
- * @return Returns NULL.
- */
-
-void *
-__ocs_d_wait_prlo_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
-{
-	std_node_state_decl();
-
-	node_sm_trace();
-
-	switch(evt) {
-		case OCS_EVT_ENTER:
-			ocs_node_hold_frames(node);
-			break;
-
-		case OCS_EVT_EXIT:
-			ocs_node_accept_frames(node);
-			break;
-
-		case OCS_EVT_SRRS_ELS_REQ_OK:
-		case OCS_EVT_SRRS_ELS_REQ_RJT:
-		case OCS_EVT_SRRS_ELS_REQ_FAIL:
-			if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PRLO, __ocs_d_common, __func__)) {
-				return NULL;
-			}
-			ocs_assert(node->els_req_cnt, NULL);
-			node->els_req_cnt--;
-			node_printf(node, "PRLO sent (evt=%s)\n", ocs_sm_event_name(evt));
-			ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
-			break;
-
-		default:
-			__ocs_node_common(__func__, ctx, evt, arg);
-			return NULL;
-	}
 	return NULL;
 }
 
@@ -1076,6 +1114,12 @@ ocs_node_init_device(ocs_node_t *node, int send_plogi)
 	} else {
 		ocs_node_transition(node, __ocs_d_init, NULL);
 	}
+}
+
+void
+ocs_node_plogi_cmpl_done(ocs_node_t *node, ocs_node_cb_t *cbdata, void *arg)
+{
+	node->plogi_els_io = NULL;
 }
 
 /**
@@ -1111,12 +1155,12 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (node->send_plogi) {
 			/* only send if we have initiator capability, and domain is attached */
 			if (node->sport->enable_ini && node->sport->domain->attached) {
-				if (ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-							OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
+				node->plogi_els_io = ocs_send_plogi(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+						OCS_FC_ELS_DEFAULT_RETRIES, ocs_node_plogi_cmpl_done, NULL);
+				if (node->plogi_els_io) {
 					ocs_node_transition(node, __ocs_d_wait_plogi_rsp, NULL);
 				} else {
-					node_printf(node, "[%s] Failed to send PLOGI req. Shutting down the node\n",
-							node->display_name);
+					node_printf(node, "Failed to send PLOGI req, shutting down node\n");
 					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 				}
 			} else {
@@ -1131,7 +1175,7 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		uint32_t d_id = fc_be24toh(hdr->d_id);
 
 		ocs_node_save_sparms(node, cbdata->payload);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PLOGI);
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = cbdata->io;
 
 		/* domain already attached */
 		if (node->sport->domain->attached) {
@@ -1139,6 +1183,8 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 			if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 				ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+			} else if (rc != OCS_HAL_RTN_SUCCESS) {
+				ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 			}
 			break;
 		}
@@ -1147,8 +1193,7 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		switch (node->sport->topology) {
 		case OCS_SPORT_TOPOLOGY_P2P:
 			/* we're not attached and sport is p2p, need to attach */
-			ocs_domain_attach(node->sport->domain, d_id);
-			ocs_node_transition(node, __ocs_d_wait_domain_attach, NULL);
+			ocs_domain_attach_async(node->sport->domain, d_id, __ocs_d_wait_domain_attach, node);
 			break;
 		case OCS_SPORT_TOPOLOGY_FABRIC:
 			/* we're not attached and sport is fabric, domain attach should have
@@ -1238,29 +1283,9 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 			break;
 		}
+
 		ocs_send_logo_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		ocs_node_transition(node, __ocs_d_wait_logo_acc_cmpl, NULL);
-		break;
-	}
-
-	case OCS_EVT_PRLI_RCVD:
-	case OCS_EVT_PRLO_RCVD:
-	case OCS_EVT_PDISC_RCVD:
-	case OCS_EVT_ADISC_RCVD:
-	case OCS_EVT_RSCN_RCVD: {
-		fc_header_t *hdr = cbdata->header;
-		if (!node->sport->domain->attached) {
-			 /* most likely a frame left over from before a link down; drop and
-			  * shut node down w/ "explicit logout" so pending frames are processed */
-			node_printf(node, "%s domain not attached, dropping\n", ocs_sm_event_name(evt));
-			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-			break;
-		}
-		node_printf(node, "%s received, sending reject\n", ocs_sm_event_name(evt));
-		ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
-			FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NPORT_LOGIN_REQUIRED, 0,
-			NULL, NULL);
-
+		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 		break;
 	}
 
@@ -1293,6 +1318,21 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	}
 
+	case OCS_EVT_PRLI_RCVD:
+	case OCS_EVT_PRLO_RCVD:
+	case OCS_EVT_PDISC_RCVD:
+	case OCS_EVT_ADISC_RCVD:
+	case OCS_EVT_RSCN_RCVD:
+	case OCS_EVT_ABTS_RCVD: {
+		fc_header_t *hdr = cbdata->header;
+
+		node_printf(node, "%s received, sending LOGO\n", ocs_sm_event_name(evt));
+		ocs_sframe_send_logo(node, fc_be24toh(hdr->d_id), fc_be24toh(hdr->s_id), 0xFFFF, 0xFFFF);
+		if (cbdata->io)
+			ocs_scsi_io_free(cbdata->io);
+		break;
+	}
+
 	case OCS_EVT_DOMAIN_ATTACH_OK:
 		/* don't care about domain_attach_ok */
 		break;
@@ -1308,8 +1348,7 @@ __ocs_d_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 				break;
 			}
 		}
-		/* fall through */
-		FALL_THROUGH;
+		FALL_THROUGH; /* fall through */
 #endif
 
 	default:
@@ -1339,7 +1378,6 @@ void *
 __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	int32_t rc;
-	ocs_node_cb_t *cbdata = arg;
 	std_node_state_decl();
 
 	node_sm_trace();
@@ -1350,16 +1388,23 @@ __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		/* received PLOGI with svc parms, go ahead and attach node
 		 * when PLOGI that was sent ultimately completes, it'll be a no-op
 		 */
+		ocs_node_cb_t *cbdata = arg;
 
-		// TODO: there is an outstanding PLOGI sent, can we set a flag
-		// to indicate that we don't want to retry it if it times out?
+		// there is an outstanding PLOGI sent, Let ELS sm know
+		// that we don't want to retry it if it times out.
+		ocs_assert(node->plogi_els_io, NULL);
+		ocs_els_post_event(node->plogi_els_io, OCS_EVT_ELS_DONT_RETRY, false, NULL);
+
 		ocs_node_save_sparms(node, cbdata->payload);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PLOGI);
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = cbdata->io;
+
 		//sm: domain->attached / ocs_node_attach
 		rc = ocs_node_attach(node);
 		ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 		}
 		break;
 	}
@@ -1372,11 +1417,14 @@ __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		 * Save OXID so PRLI can be sent after the attach and continue
 		 * to wait for PLOGI response
 		 */
+		ocs_node_cb_t *cbdata = arg;
 		fc_prli_payload_t *prli = cbdata->payload;
 
 		ocs_process_prli_payload(node, prli);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->payload, OCS_NODE_SEND_LS_RSP_PRLI);
-		node->ls_rsp_fctype = prli->type;
+		if (prli->type == FC_TYPE_NVME)
+			node->ls_rsp_io[OCS_LS_RSP_TYPE_NVME_PRLI] = cbdata->io;
+		else if (prli->type == FC_TYPE_FCP)
+			node->ls_rsp_io[OCS_LS_RSP_TYPE_FCP_PRLI] = cbdata->io;
 
 		ocs_node_transition(node, __ocs_d_wait_plogi_rsp_recvd_prli, NULL);
 		break;
@@ -1390,6 +1438,8 @@ __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_ADISC_RCVD:
 	case OCS_EVT_RSCN_RCVD:
 	case OCS_EVT_SCR_RCVD: {
+		ocs_node_cb_t *cbdata = arg;
+
 		fc_header_t *hdr = cbdata->header;
 		node_printf(node, "%s received, sending reject\n", ocs_sm_event_name(evt));
 		ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
@@ -1406,13 +1456,13 @@ __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	}
 
-	case OCS_EVT_SRRS_ELS_REQ_OK:	/* PLOGI response received */
+	case OCS_EVT_SRRS_ELS_REQ_OK: {	/* PLOGI response received */
+		ocs_node_cb_t *cbdata = arg;
+
 		/* Completion from PLOGI sent */
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
 			return NULL;
 		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		//sm: / save sparams, ocs_node_attach
 		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
 		ocs_display_sparams(node->display_name, "plogi rcvd resp", 0, NULL,
@@ -1421,25 +1471,19 @@ __ocs_d_wait_plogi_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 		}
 		break;
+	}
 
+	case OCS_EVT_SRRS_ELS_REQ_RJT:
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:	/* PLOGI response received */
 		/* PLOGI failed, shutdown the node */
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
 			return NULL;
 		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
-		break;
-
-	case OCS_EVT_SRRS_ELS_REQ_RJT:	/* Our PLOGI was rejected, this is ok in some cases */
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
-			return NULL;
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		break;
 
 	case OCS_EVT_NVME_CMD_RCVD:
@@ -1510,8 +1554,6 @@ __ocs_d_wait_plogi_rsp_recvd_prli(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *a
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
 			return NULL;
 		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		//sm: / save sparams, ocs_node_attach
 		ocs_node_save_sparms(node, cbdata->els->els_info->els_rsp.virt);
 		ocs_display_sparams(node->display_name, "plogi rcvd resp", 0, NULL,
@@ -1520,6 +1562,8 @@ __ocs_d_wait_plogi_rsp_recvd_prli(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *a
 		ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 		}
 		break;
 
@@ -1529,8 +1573,6 @@ __ocs_d_wait_plogi_rsp_recvd_prli(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *a
 		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PLOGI, __ocs_d_common, __func__)) {
 			return NULL;
 		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
 		break;
 
@@ -1580,6 +1622,8 @@ __ocs_d_wait_domain_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 		}
 		break;
 
@@ -1625,8 +1669,10 @@ __ocs_d_wait_topology_notify(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_SPORT_TOPOLOGY_NOTIFY: {
 		ocs_sport_topology_e topology = (ocs_sport_topology_e)arg;
+		ocs_io_t *ls_rsp_io = node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI];
+
 		ocs_assert(!node->sport->domain->attached, NULL);
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PLOGI, NULL);
+		ocs_assert(ls_rsp_io, NULL);
 		node_printf(node, "topology notification, topology=%d\n", topology);
 
 		/* At the time the PLOGI was received, the topology was unknown,
@@ -1638,16 +1684,18 @@ __ocs_d_wait_topology_notify(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			/* if this is p2p, need to attach to the domain using the
 			 * d_id from the PLOGI received
 			 */
-			ocs_domain_attach(node->sport->domain, node->ls_rsp_did);
+			ocs_domain_attach_async(node->sport->domain, ls_rsp_io->els_info->ls_rsp_did, __ocs_d_wait_domain_attach, node);
+		} else {
+			/* else, if this is fabric, the domain attach should be performed
+			 * by the fabric node (node sending FLOGI); just wait for attach
+			 * to complete
+			 */
+			ocs_node_transition(node, __ocs_d_wait_domain_attach, NULL);
 		}
-		/* else, if this is fabric, the domain attach should be performed
-		 * by the fabric node (node sending FLOGI); just wait for attach
-		 * to complete
-		 */
 
-		ocs_node_transition(node, __ocs_d_wait_domain_attach, NULL);
 		break;
 	}
+
 	case OCS_EVT_DOMAIN_ATTACH_OK:
 		ocs_assert(node->sport->domain->attached, NULL);
 		node_printf(node, "domain attach ok\n");
@@ -1656,6 +1704,8 @@ __ocs_d_wait_topology_notify(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 		if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 		}
 		break;
 
@@ -1663,6 +1713,7 @@ __ocs_d_wait_topology_notify(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		__ocs_d_common(__func__, ctx, evt, arg);
 		return NULL;
 	}
+
 	return NULL;
 }
 
@@ -1696,44 +1747,35 @@ __ocs_d_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_NODE_ATTACH_OK:
 		node->attached = TRUE;
-		switch (node->send_ls_rsp) {
-		case OCS_NODE_SEND_LS_RSP_PLOGI: {
-			//sm: send_plogi_acc is set / send PLOGI acc
+
+		ls_rsp_io = node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI];
+		if (ls_rsp_io) {
 			/* Normal case for T, or I+T */
-			ocs_send_plogi_acc(node->ls_rsp_io, node->ls_rsp_oxid, NULL, NULL);
+			node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = NULL;
+			ocs_send_plogi_acc(ls_rsp_io, ls_rsp_io->els_info->ls_rsp_oxid, NULL, NULL);
 			ocs_node_transition(node, __ocs_d_wait_plogi_acc_cmpl, NULL);
-			node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-			node->ls_rsp_io = NULL;
-			break;
-		}
-		case OCS_NODE_SEND_LS_RSP_PRLI: {
-			ls_rsp_io = node->ls_rsp_io;
-			node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-			node->ls_rsp_io = NULL;
-			ocs_d_send_prli_rsp(ls_rsp_io, node->ls_rsp_oxid, node->ls_rsp_fctype);
-			break;
-		}
-		case OCS_NODE_SEND_LS_RSP_NONE:
-		default:
-			/* Normal case for I */
-			//sm: send_plogi_acc is not set / send PLOGI acc
+		} else {
+			/* Handle all the remaining cases, including PRLI, in port_logged_in state */
 			ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
-			break;
 		}
+
 		break;
 
 	case OCS_EVT_NODE_ATTACH_FAIL:
 		/* node attach failed, shutdown the node */
 		node->attached = FALSE;
 		node_printf(node, "node attach failed\n");
-		if (node->ls_rsp_io) {
-			ocs_send_ls_rjt(node->ls_rsp_io, node->ls_rsp_oxid, node->ls_rjt_reason_code,
-					node->ls_rjt_reason_expl_code, 0, NULL, NULL);
-			node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
+
+		ls_rsp_io = node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI];
+		if (ls_rsp_io) {
+			node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = NULL;
+			ocs_send_ls_rjt(ls_rsp_io, ls_rsp_io->els_info->ls_rsp_oxid,
+					node->ls_rjt_reason_code, node->ls_rjt_reason_expl_code,
+					0, NULL, NULL);
 			node->ls_rjt_reason_code = 0;
 			node->ls_rjt_reason_expl_code = 0;
-			node->ls_rsp_io = NULL;
 		}
+
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
 		break;
@@ -1742,17 +1784,17 @@ __ocs_d_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_SHUTDOWN:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		ocs_node_transition(node, __ocs_d_wait_attach_evt_shutdown, NULL);
+		ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
 		break;
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_EXPLICIT_LOGO;
-		ocs_node_transition(node, __ocs_d_wait_attach_evt_shutdown, NULL);
+		ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
 		break;
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_IMPLICIT_LOGO;
-		ocs_node_transition(node, __ocs_d_wait_attach_evt_shutdown, NULL);
+		ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
 		break;
 	default:
 		__ocs_d_common(__func__, ctx, evt, arg);
@@ -1764,8 +1806,7 @@ __ocs_d_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 /**
  * @ingroup device_sm
- * @brief Device node state machine: Wait for a node/domain
- * attach then shutdown node.
+ * @brief Device node state machine: Wait for async event completion, then shutdown node.
  *
  * @param ctx Remote node state machine context.
  * @param evt Event to process.
@@ -1775,8 +1816,9 @@ __ocs_d_wait_node_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
  */
 
 void *
-__ocs_d_wait_attach_evt_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+__ocs_d_wait_async_evt_cmpl_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
+	ocs_node_cb_t *cbdata = arg;
 	std_node_state_decl();
 
 	node_sm_trace();
@@ -1804,11 +1846,29 @@ __ocs_d_wait_attach_evt_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *ar
 		ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
 		break;
 
+	case OCS_EVT_NODE_RPI_UPDATE_OK:
+	case OCS_EVT_NODE_RPI_UPDATE_FAIL:
+	case OCS_EVT_NODE_DEL_INI_COMPLETE:
+	case OCS_EVT_NODE_SESS_REG_OK:
+	case OCS_EVT_NODE_SESS_REG_FAIL:
+		if (cbdata) {
+			if (cbdata->io && cbdata->io->cmd_tgt)
+				ocs_els_io_free(cbdata->io);
+
+			ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+		}
+
+		node->sess_attach_pend--;
+		if (!node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
 	/* ignore shutdown events as we're already in shutdown path */
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
@@ -1820,6 +1880,324 @@ __ocs_d_wait_attach_evt_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *ar
 	}
 
 	return NULL;
+}
+
+static void
+ocs_d_handle_prli_req(ocs_node_t *node, ocs_io_t *io)
+{
+	/* Track the session attach requests */
+	node->sess_attach_pend++;
+
+	if (ocs_node_nsler_reg_rpi_update_needed(node,
+				io->els_info->ls_rsp_type)) {
+		ocs_d_handle_prli_reg_rpi_update(node, io);
+	} else {
+		ocs_d_handle_prli_backend_process(node, io, io->els_info->ls_rsp_type);
+	}
+}
+
+static void
+ocs_process_prli_pending_req(ocs_node_t *node)
+{
+	uint8_t i;
+	ocs_io_t *ls_rsp_io = NULL;
+
+	/* Since we are past the port_logged_in state, ls_rsp_io for PLOGI must be NULL */
+	ocs_assert(!node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI]);
+
+	/* Process any pending PRLI's received */
+	for (i = 0; i < OCS_LS_RSP_TYPE_MAX; i++) {
+		if (!node->ls_rsp_io[i])
+			continue;
+
+		ls_rsp_io = node->ls_rsp_io[i];
+		node->ls_rsp_io[i] = NULL;
+
+		ocs_d_handle_prli_req(node, ls_rsp_io);
+
+		/*
+		 * Since we processed a PRLI req, the node state machine will be moved
+		 * appropriately. Handle any remaining PRLI requests over there.
+		 */
+		break;
+	}
+}
+
+static void
+ocs_d_handle_rpi_update(ocs_node_t *node, ocs_sm_event_t evt, ocs_node_cb_t *cbdata)
+{
+	switch (evt) {
+	case OCS_EVT_NODE_RPI_UPDATE_OK:
+		ocs_assert(cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI);
+
+		node_printf(node, "REG_RPI update done, processing backend session registration\n");
+		ocs_d_handle_prli_backend_process(node, cbdata->io, cbdata->prli_ctx.ls_rsp_type);
+
+		ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+		break;
+
+	case OCS_EVT_NODE_RPI_UPDATE_FAIL:
+		if (cbdata) {
+			ocs_assert(cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI);
+
+			node_printf(node, "REG_RPI update failed\n");
+			if (cbdata->io) {
+				node_printf(node, "Sending LS reject on PRLI request\n");
+				ocs_send_ls_rjt(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL,
+						0, NULL, NULL);
+			}
+
+			ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+		}
+
+		node->sess_attach_pend--;
+		break;
+
+	default:
+		/* Just a placeholder; this shall never be invoked */
+		ocs_assert(FALSE);
+	}
+}
+
+static void
+ocs_d_handle_sess_rsp(ocs_node_t *node, ocs_sm_event_t evt, ocs_node_cb_t *cbdata)
+{
+	switch (evt) {
+	case OCS_EVT_NODE_SESS_REG_OK:
+		ocs_assert(cbdata != NULL);
+
+		/* Send PRLI acc */
+		if (cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI) {
+			if (cbdata->io)
+				ocs_send_prli_acc(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						  FC_TYPE_NVME, NULL, NULL);
+		} else if (cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLI) {
+			node->fcp_enabled = TRUE;
+			if (cbdata->io)
+				ocs_send_prli_acc(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						  FC_TYPE_FCP, NULL, NULL);
+		}
+
+		ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+
+		node->sess_attach_pend--;
+		break;
+
+	case OCS_EVT_NODE_SESS_REG_FAIL:
+		if (cbdata) {
+			if (cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI)
+				node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_NVME;
+			else if (cbdata->prli_ctx.ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLI)
+				node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_FCP;
+
+			/* Send PRLI reject */
+			node_printf(node, "Backend session registration failed\n");
+			if (cbdata->io) {
+				node_printf(node, "Sending LS reject on PRLI request\n");
+				ocs_send_ls_rjt(cbdata->io, cbdata->io->els_info->ls_rsp_oxid,
+						cbdata->status, cbdata->ext_status,
+						0, NULL, NULL);
+			}
+
+			ocs_free(node->ocs, cbdata, sizeof(*cbdata));
+		}
+
+		node->sess_attach_pend--;
+		break;
+
+	default:
+		/* Just a placeholder; this shall never be invoked */
+		ocs_assert(FALSE);
+	}
+}
+
+static void
+ocs_d_handle_prli_cmpl(ocs_node_t *node, ocs_sm_event_t evt, ocs_node_cb_t *cbdata, const char *funcname)
+{
+	/* PRLI accepted/rejected by remote; normal case for I or I+T */
+	if (node_check_els_req(&node->sm, evt, cbdata, FC_ELS_CMD_PRLI, __ocs_d_common, funcname))
+		return;
+
+	if (evt == OCS_EVT_SRRS_ELS_REQ_OK) {
+		fc_prli_payload_t *prli = cbdata->els->els_info->els_rsp.virt;
+
+		/*
+		 * Process this PRLI successful completion only if the remote node has target capability.
+		 * Else, wait for the other side to trigger a PRLI request before proceeding further. If
+		 * the remote node has both I+T capabilities and we have target functionality, then we may
+		 * need to register a session with the backend because the remote node might not send an
+		 * addl. PRLI. However, after processing this PRLI completion, if we still receive a PRLI
+		 * from the other side, we will treat it as a duplicate request and handle it accordingly.
+		 */
+		ocs_process_prli_payload(node, prli);
+		if (prli->type == FC_TYPE_NVME && node->nvme_tgt) {
+			if (!node->remote_nvme_prli_rcvd) {
+				cbdata->els->els_info->ls_rsp_oxid = OCS_INVALID_FC_TASK_TAG;
+				cbdata->els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_NVME_PRLI;
+				ocs_d_handle_prli_req(node, cbdata->els);
+			}
+
+			node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_NVME;
+		} else if (prli->type == FC_TYPE_FCP && node->targ) {
+			if (!node->remote_fcp_prli_rcvd) {
+				cbdata->els->els_info->ls_rsp_oxid = OCS_INVALID_FC_TASK_TAG;
+				cbdata->els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_FCP_PRLI;
+				ocs_d_handle_prli_req(node, cbdata->els);
+			}
+
+			node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_FCP;
+		}
+	}
+
+	/* Proceed if atleast one of the PRLI's (NVMe/FCP) went through successfully */
+	node->prli_rsp_pend--;
+	if (!node->prli_rsp_pend && node->ini_fct_prli_success) {
+		ocs_notify_new_target(node);
+		ocs_node_transition(node, __ocs_d_device_ready, NULL);
+	}
+}
+
+/**
+ * @brief Callback handler when a async flush for abts completes
+ *
+ * @param arg Pointer to node callback data
+ *
+ * @return Returns NULL.
+ */
+static void ocs_abts_flush_callback(void *arg)
+{
+	ocs_node_cb_t *cbdata = arg;
+	ocs_sport_t *sport;
+
+	ocs_assert(cbdata->io);
+	ocs_assert(cbdata->io->node);
+	ocs_assert(cbdata->io->node->sport);
+
+	sport = cbdata->io->node->sport;
+
+	ocs_ref_get(&sport->ref);
+	ocs_sport_lock(sport);
+
+	ocs_node_post_event(cbdata->io->node, OCS_EVT_ABTS_FLUSH_COMPLETE, cbdata);
+	ocs_free(sport->ocs, cbdata->header, sizeof(fc_header_t));
+	ocs_free(sport->ocs, cbdata->payload, cbdata->payload_len);
+	ocs_free(sport->ocs, cbdata, sizeof(ocs_node_cb_t));
+
+	ocs_sport_unlock(sport);
+	ocs_ref_put(&sport->ref);
+
+}
+
+/**
+ * @brief Generate a rq flush request in response to an ABTS
+ *
+ * @param node - remote node state machine context
+ *        cbdata - callback data associated with abts
+ *
+ * @return Returns NULL.
+ */
+static void ocs_abts_flush_rqs(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	ocs_node_cb_t *post_cbdata = NULL;
+	ocs_t *ocs = node->ocs;
+
+	post_cbdata = ocs_malloc(node->ocs, sizeof(ocs_node_cb_t), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (post_cbdata) {
+		post_cbdata->header = ocs_malloc(node->ocs, sizeof(fc_header_t), OCS_M_ZERO | OCS_M_NOWAIT);
+		if (!post_cbdata->header) {
+			node_printf_err(node, "Header buff alloc is failed\n");
+			goto alloc_fail;
+		}
+		post_cbdata->payload = ocs_malloc(node->ocs, cbdata->payload_len, OCS_M_ZERO | OCS_M_NOWAIT);
+		if (!post_cbdata->payload) {
+			node_printf_err(node, "Payload buff alloc failed\n");
+			goto alloc_fail;
+		}
+	} else {
+		node_printf_err(node, "Unable to handle ABTS due to insufficient resources\n");
+		goto alloc_fail;
+	}
+
+	/* Fill entire cbdata into to local buffer individually*/
+	post_cbdata->io = cbdata->io;
+	post_cbdata->els = cbdata->els;
+	post_cbdata->status = cbdata->status;
+	post_cbdata->ext_status = cbdata->ext_status;
+	post_cbdata->payload_len = cbdata->payload_len;
+	post_cbdata->flush_rqs_completed = cbdata->flush_rqs_completed;
+	post_cbdata->node = cbdata->node;
+
+	ocs_memcpy(&post_cbdata->prli_ctx, &cbdata->prli_ctx, sizeof(cbdata->prli_ctx));
+	ocs_memcpy(post_cbdata->header, cbdata->header, sizeof(fc_header_t));
+	ocs_memcpy(post_cbdata->payload, cbdata->payload, cbdata->payload_len);
+
+	node_printf_ratelimited(node, "ABTS received, Flushing rqs. Marker category %d\n",
+				ocs->hal.scsi_mrq_marker_category);
+
+	if (ocs_hal_rq_marker_gen_req(&node->ocs->hal, ocs->hal.scsi_mrq_marker_category,
+				ocs_abts_flush_callback,
+				(void *) post_cbdata) != 0) {
+		node_printf_ratelimited(node, "ABTS rq flush failed \n");
+		/* Could not trigger flush, since hardware is unresponsive,
+		 * post the flush complete event here to complete abts
+		 * handling  */
+		ocs_node_post_event(node, OCS_EVT_ABTS_FLUSH_COMPLETE,
+				post_cbdata);
+		goto fail;
+	}
+
+	return;
+
+alloc_fail:
+	ocs_scsi_io_free(cbdata->io);
+fail:
+	if (post_cbdata) {
+		if (post_cbdata->header)
+			ocs_free(node->ocs, post_cbdata->header, sizeof(fc_header_t));
+		if (post_cbdata->payload)
+			ocs_free(node->ocs, post_cbdata->payload, post_cbdata->payload_len);
+		ocs_free(node->ocs, post_cbdata, sizeof(ocs_node_cb_t));
+	}
+}
+
+void
+ocs_process_abts(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	ocs_t *ocs = node->ocs;
+	fc_header_t *hdr = cbdata->header;
+	ocs_io_t *tmfio = cbdata->io;
+	ocs_io_t *io_to_abort;
+	uint16_t ox_id = ocs_be16toh(hdr->ox_id);
+	uint16_t rx_id = ocs_be16toh(hdr->rx_id);
+
+	io_to_abort = ocs_scsi_io_find_and_ref_get(tmfio, ox_id, rx_id);
+	if (io_to_abort) {
+		ocs_scsi_process_abts(node, tmfio, io_to_abort, ox_id, rx_id);
+
+		return;
+	}
+
+	/* IO was not found */
+	node_printf_ratelimited(node, "Abort request: IO not found, " \
+				"[%016" PRIX64".%016" PRIX64"] " \
+				"ox_id [%04x] rx_id [%04x]\n", node->sport->wwpn,
+				ocs_node_get_wwpn(node), ox_id, rx_id);
+
+	if (ocs->hal.scsi_rq_pair_count > 1 && ocs->hal.scsi_mrq_marker_category &&
+	    !cbdata->flush_rqs_completed) {
+		ocs_abts_flush_rqs(node, cbdata);
+
+		return;
+	} else {
+		if (ocs_tgt_nvme_enabled(node->ocs) &&
+		    !ocs_nvme_process_abts(node, ox_id, rx_id)) {
+			ocs_scsi_io_free(tmfio);
+		} else {
+			/* Send BA_RJT */
+			ocs_bls_send_rjt_hdr(tmfio, hdr);
+		}
+	}
 }
 
 /**
@@ -1839,28 +2217,22 @@ void *
 __ocs_d_port_logged_in(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	ocs_node_cb_t *cbdata = arg;
-	int32_t rc;
+
 	std_node_state_decl();
 
 	node_sm_trace();
-
-	//TODO: I+T: what if PLOGI response not yet received ?
 
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		/* Normal case for I or I+T */
 		if (node->sport->enable_ini && !FC_ADDR_IS_DOMAIN_CTRL(node->rnode.fc_id) && !node->prli_rsp_pend) {
-			if (!node->sport->ini_fc_types) {
-				ocs_log_err(ocs, "[%s] Invalid FC TYPE for initiator mode\n", node->display_name);
-				break;
-			}
+			ocs_assert(node->sport->ini_fc_types, NULL);
 
 			//sm: if enable_ini / send PRLI
 			if (ocs_ini_scsi_enabled(node->ocs)) {
 				if (ocs_send_prli(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES,
-					      NULL, NULL, FC_TYPE_FCP) == NULL) {
-					node_printf(node, "[%s] Failed to send SCSI PRLI req. Shutting down the node\n",
-							node->display_name);
+						  NULL, NULL, FC_TYPE_FCP) == NULL) {
+					node_printf(node, "Failed to send SCSI PRLI req, shutting down node\n");
 					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 				} else {
 					node->prli_rsp_pend++;
@@ -1869,190 +2241,188 @@ __ocs_d_port_logged_in(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 			if (ocs_ini_nvme_enabled(node->ocs)) {
 				if (ocs_send_prli(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, OCS_FC_ELS_DEFAULT_RETRIES,
-					      NULL, NULL, FC_TYPE_NVME) == NULL) {
-					node_printf(node, "[%s] Failed to send NVMe PRLI req. Shutting down the node\n",
-							node->display_name);
+						  NULL, NULL, FC_TYPE_NVME) == NULL) {
+					node_printf(node, "Failed to send NVMe PRLI req, shutting down node\n");
 					ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-
 				} else {
 					node->prli_rsp_pend++;
 				}
 			}
 			/* can now expect ELS_REQ_OK/FAIL/RJT */
 		}
+
+		/* Check if we need to process any pending PRLI requests */
+		ocs_process_prli_pending_req(node);
 		break;
 
-	case OCS_EVT_NVME_CMD_RCVD: {
-		/* For target functionality send PRLO and drop the CMD frame. */
+	case OCS_EVT_NVME_CMD_RCVD:
+		/* For target functionality, send PRLO and drop the CMD frame */
 		if (node->sport->enable_tgt) {
 			if (ocs_send_prlo(node, FC_TYPE_NVME, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
-				ocs_node_transition(node, __ocs_d_wait_prlo_rsp, NULL);
-			}
+					  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL))
+				node_printf(node, "%s received, PRLO sent\n", ocs_sm_event_name(evt));
 		}
-		break;
-	}
 
-	case OCS_EVT_FCP_CMD_RCVD: {
-		/* For target functionality send PRLO and drop the CMD frame. */
+		break;
+
+	case OCS_EVT_FCP_CMD_RCVD:
+		/* For target functionality, send PRLO and drop the CMD frame */
 		if (node->sport->enable_tgt) {
 			if (ocs_send_prlo(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
-				ocs_node_transition(node, __ocs_d_wait_prlo_rsp, NULL);
-			}
+					  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL))
+				node_printf(node, "%s received, PRLO sent\n", ocs_sm_event_name(evt));
 		}
+
 		break;
-	}
 
-	case OCS_EVT_PRLI_RCVD: {
-		fc_header_t *hdr = cbdata->header;
-		fc_prli_payload_t *prli = cbdata->payload;
-		int32_t nsler;
-
+	case OCS_EVT_PRLI_RCVD:
 		/* Normal for T or I+T */
 		ocs_process_prli_payload(node, cbdata->payload);
-		nsler = ocs_node_nsler_capable(node) && ocs_nsler_capable(node->ocs);
-		if (ocs_tgt_nvme_enabled(ocs) && (prli->type == FC_TYPE_NVME) && nsler) {
-			/* Update REG_RPI with NSLER capabiity and then send PRLI resp */
-			ocs_send_ls_rsp_after_attach(cbdata->io, hdr, OCS_NODE_SEND_LS_RSP_PRLI);
-			node->ls_rsp_fctype = prli->type;
-			rc = ocs_hal_reg_rpi_update(&node->ocs->hal, &node->rnode, nsler);
-			if (rc != OCS_HAL_RTN_SUCCESS) {
-				ocs_log_err(ocs, "[%s] %s sending ELS_RJT\n",
-					    node->display_name, ocs_sm_event_name(evt));
-				node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-				node->ls_rsp_io = NULL;
-				ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
-						FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
-						NULL, NULL);
-			}
-		} else {
-			ocs_d_send_prli_rsp(cbdata->io, ocs_be16toh(hdr->ox_id), prli->type);
+		ocs_d_handle_prli_req(node, cbdata->io);
+		break;
+
+	case OCS_EVT_NODE_RPI_UPDATE_OK:
+		ocs_d_handle_rpi_update(node, evt, cbdata);
+		break;
+
+	case OCS_EVT_NODE_RPI_UPDATE_FAIL:
+		ocs_d_handle_rpi_update(node, evt, cbdata);
+
+		/* Check if we need to process any pending PRLI requests */
+		ocs_process_prli_pending_req(node);
+		break;
+
+	case OCS_EVT_NODE_DEL_INI_COMPLETE:
+		if (cbdata->io->els_info->ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI) {
+			node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_NVME;
+			ocs_nvme_node_resume(node);
+		} else if (cbdata->io->els_info->ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLI) {
+			node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_FCP;
+			ocs_scsi_node_resume(node);
 		}
 
+		/* If we are here, then we must be processing a duplicate PRLI request */
+		ocs_d_handle_sess_reg(node, cbdata);
+		break;
+
+	case OCS_EVT_NODE_SESS_REG_OK:
+		ocs_d_handle_sess_rsp(node, evt, cbdata);
+
+		/* Now move the node state machine to device_ready state */
+		ocs_node_transition(node, __ocs_d_device_ready, NULL);
+		break;
+
+	case OCS_EVT_NODE_SESS_REG_FAIL:
+		ocs_d_handle_sess_rsp(node, evt, cbdata);
+
+		/* Check if we need to process any pending PRLI requests */
+		ocs_process_prli_pending_req(node);
+		break;
+
+	case OCS_EVT_SRRS_ELS_REQ_OK:
+	case OCS_EVT_SRRS_ELS_REQ_RJT: {
+		fc_els_gen_t *els_gen = (fc_els_gen_t *)cbdata->els->els_info->els_req.virt;
+
+		/* We can get PRLO completion due to OCS_EVT_NVME_CMD_RCVD/OCS_EVT_FCP_CMD_RCVD */
+		if (FC_ELS_CMD_PRLO == els_gen->command_code)
+			break;
+
+		ocs_d_handle_prli_cmpl(node, evt, cbdata, __func__);
 		break;
 	}
 
-	case OCS_EVT_NODE_RPI_UPDATE_OK: {
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
+	case OCS_EVT_SRRS_ELS_REQ_FAIL: {
+		fc_els_gen_t *els_gen = (fc_els_gen_t *)cbdata->els->els_info->els_req.virt;
 
-		node_printf(node, "REG_RPI update done! Send PRLI resp\n");
-		ocs_d_send_prli_rsp(node->ls_rsp_io, node->ls_rsp_oxid, node->ls_rsp_fctype);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
+		/* We can get PRLO completion due to OCS_EVT_NVME_CMD_RCVD/OCS_EVT_FCP_CMD_RCVD */
+		if (FC_ELS_CMD_PRLO == els_gen->command_code)
+			break;
 
-		break;
-	}
-
-	case OCS_EVT_NODE_RPI_UPDATE_FAIL: {
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
-
-		ocs_log_err(node->ocs, "Send LS reject on PRLI request\n");
-		ocs_send_ls_rjt(node->ls_rsp_io, node->ls_rsp_oxid,
-				FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
-				NULL, NULL);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
-
-		break;
-	}
-
-	case OCS_EVT_SRRS_ELS_REQ_OK: {	/* PRLI response */
-		fc_prli_payload_t *prli;
-
-		/* Normal case for I or I+T */
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PRLI, __ocs_d_common, __func__)) {
+		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PRLI, __ocs_d_common, __func__))
 			return NULL;
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 
-		ocs_process_prli_payload(node, cbdata->els->els_info->els_rsp.virt);
-		prli = cbdata->els->els_info->els_rsp.virt;
-		if (prli->type == FC_TYPE_NVME) {
-			node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_NVME;
-		} else if (prli->type == FC_TYPE_FCP) {
-			node->ini_fct_prli_success |= OCS_INITIATOR_TYPE_FCP;
-		}
-
+		/* For I only, shutdown node */
 		node->prli_rsp_pend--;
-		/* Atleast one PRLI (of NVME and FCP) request succeeded */
-		if (!node->prli_rsp_pend) {
-			ocs_node_transition(node, __ocs_d_device_ready, NULL);
-		}
+		if (!node->prli_rsp_pend && !node->sport->enable_tgt)
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
+
 		break;
 	}
 
-	case OCS_EVT_SRRS_ELS_REQ_FAIL: {	/* PRLI response failed */
-		/* I, I+T, assume some link failure, shutdown node */
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PRLI, __ocs_d_common, __func__)) {
-			return NULL;
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
-		ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
-		break;
-	}
-
-	case OCS_EVT_SRRS_ELS_REQ_RJT: {/* PRLI rejected by remote */
-		/* Normal for I, I+T (connected to an I) */
-		/* Node doesn't want to be a target, stay here and wait for a PRLI from the remote node
-		 * if it really wants to connect to us as target */
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_PRLI, __ocs_d_common, __func__)) {
-			return NULL;
-		}
-		node->prli_rsp_pend--;
-		if (!node->prli_rsp_pend && node->ini_fct_prli_success) {
-			/* One of NVME/FCP PRLI went through succesfully */
-			ocs_node_transition(node, __ocs_d_device_ready, NULL);
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
-		break;
-	}
-
-	case OCS_EVT_SRRS_ELS_CMPL_OK: {
+	case OCS_EVT_SRRS_ELS_CMPL_OK:
 		/* Normal T, I+T, target-server rejected the process login */
-		/* This would be received only in the case where we sent LS_RJT for the PRLI, so
-		 * do nothing.   (note: as T only we could shutdown the node)
+		/* This would be received only in the case where we sent LS_RJT for the PRLI,
+		 * so do nothing. (note: as T only we could shutdown the node)
 		 */
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		break;
-	}
 
-	case OCS_EVT_PLOGI_RCVD: {
+	case OCS_EVT_PLOGI_RCVD:
 		//sm: / save sparams, set send_plogi_acc, post implicit logout
 		/* Save plogi parameters */
 		ocs_node_save_sparms(node, cbdata->payload);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PLOGI);
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = cbdata->io;
 
 		/* Restart node attach with new service paramters, and send ACC */
 		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_IMPLICIT_LOGO, NULL);
 		break;
-	}
 
 	case OCS_EVT_LOGO_RCVD: {
 		/* I, T, I+T */
-		fc_header_t *hdr = cbdata->header;
 		node_printf(node, "%s received attached=%d\n", ocs_sm_event_name(evt), node->attached);
-		//sm: / send LOGO acc
-		ocs_send_logo_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		ocs_node_transition(node, __ocs_d_wait_logo_acc_cmpl, NULL);
+
+		//sm: save logo and send acc after the all the ios are completed.
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_LOGO] = cbdata->io;
+
+		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 		break;
 	}
 
-	case OCS_EVT_ABTS_RCVD: {
-		ocs_process_abts(cbdata->io, cbdata->header);
+	case OCS_EVT_ADISC_RCVD: {
+		fc_header_t *hdr = cbdata->header;
+
+		ocs_send_adisc_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
 		break;
 	}
 
-	case OCS_EVT_FLUSH_BLS_RCVD: {
-		ocs_process_flush_bls(cbdata);
+	case OCS_EVT_ABTS_RCVD:
+		ocs_process_abts(node, cbdata);
 		break;
-	}
+
+	/* Handle shutdown events */
+	case OCS_EVT_SHUTDOWN:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
+	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_EXPLICIT_LOGO;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
+	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_IMPLICIT_LOGO;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
+	case OCS_EVT_NODE_MISSING:
+		node_printf_ratelimited(node, "%s received attached=%d\n",
+					ocs_sm_event_name(evt), node->attached);
+		if (node->sport->enable_rscn)
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
+
+		break;
 
 #if defined(ENABLE_FABRIC_EMULATION)
 	/*
@@ -2088,9 +2458,10 @@ __ocs_d_port_logged_in(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_femul_process_fc_gs(__func__, cbdata->io, evt, hdr, payload, payload_len);
 			break;
 		}
-		/* fall through */
-		FALL_THROUGH;
+
+		FALL_THROUGH; /* fall through */
 #endif
+
 	default:
 		__ocs_d_common(__func__, ctx, evt, arg);
 		return NULL;
@@ -2099,50 +2470,6 @@ __ocs_d_port_logged_in(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	return NULL;
 }
 
-/**
- * @ingroup device_sm
- * @brief Device node state machine: Wait for a LOGO accept.
- *
- * <h3 class="desc">Description</h3>
- * Waits for a LOGO accept completion.
- *
- * @param ctx Remote node state machine context.
- * @param evt Event to process
- * @param arg Per event optional argument
- *
- * @return Returns NULL.
- */
-
-void *
-__ocs_d_wait_logo_acc_cmpl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
-{
-	std_node_state_decl();
-
-	node_sm_trace();
-
-	switch(evt) {
-	case OCS_EVT_ENTER:
-		ocs_node_hold_frames(node);
-		break;
-
-	case OCS_EVT_EXIT:
-		ocs_node_accept_frames(node);
-		break;
-
-	case OCS_EVT_SRRS_ELS_CMPL_OK:
-	case OCS_EVT_SRRS_ELS_CMPL_FAIL:
-		//sm: / post explicit logout
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
-		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-		break;
-	default:
-		__ocs_d_common(__func__, ctx, evt, arg);
-		return NULL;
-	}
-
-	return NULL;
-}
 
 /**
  * @ingroup device_sm
@@ -2159,127 +2486,102 @@ void *
 __ocs_d_device_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 {
 	ocs_node_cb_t *cbdata = arg;
-	int32_t rc;
+
 	std_node_state_decl();
 
-	if (evt != OCS_EVT_FCP_CMD_RCVD && evt != OCS_EVT_NVME_CMD_RCVD) {
+	if (evt != OCS_EVT_FCP_CMD_RCVD && evt != OCS_EVT_NVME_CMD_RCVD &&
+	    evt != OCS_EVT_NODE_LAST_ACTIVE_IO) {
 		node_sm_trace();
 	}
 
 	switch(evt) {
 	case OCS_EVT_ENTER:
-		/* Add initiators to backend only when all PRLI responses have been received */
-		if (node->sport->enable_ini && !node->prli_rsp_pend) {
-			ocs_notify_new_target(node);
-		}
-
+		/* Check if we need to process any pending PRLI requests */
+		ocs_process_prli_pending_req(node);
 		break;
 
 	case OCS_EVT_EXIT:
 		node->fcp_enabled = FALSE;
 		break;
 
-	case OCS_EVT_PLOGI_RCVD: {
+	case OCS_EVT_PLOGI_RCVD:
 		//sm: / save sparams, set send_plogi_acc, post implicit logout
 		/* Save plogi parameters */
 		ocs_node_save_sparms(node, cbdata->payload);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PLOGI);
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = cbdata->io;
 
 		/* Restart node attach with new service paramters, and send ACC */
 		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_IMPLICIT_LOGO, NULL);
 		break;
-	}
 
-	case OCS_EVT_PDISC_RCVD: {
-		fc_header_t *hdr = cbdata->header;
-
-		ocs_send_plogi_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		break;
-	}
-
-	case OCS_EVT_PRLI_RCVD: {
-		/* T, I+T: remote initiator is slow to get started */
-		fc_header_t *hdr = cbdata->header;
-		fc_prli_payload_t *prli = cbdata->payload;
-		int32_t nsler;
-
-		ocs_process_prli_payload(node, cbdata->payload);
-		nsler = ocs_node_nsler_capable(node) && ocs_nsler_capable(node->ocs);
-
-		if (ocs_tgt_nvme_enabled(ocs) && (prli->type == FC_TYPE_NVME) && nsler) {
-			/* Update REG_RPI with NSLER capabiity and then send PRLI resp */
-			ocs_send_ls_rsp_after_attach(cbdata->io, hdr, OCS_NODE_SEND_LS_RSP_PRLI);
-			node->ls_rsp_fctype = prli->type;
-			rc = ocs_hal_reg_rpi_update(&node->ocs->hal, &node->rnode, nsler);
-			if (rc != OCS_HAL_RTN_SUCCESS) {
-				ocs_log_err(ocs, "[%s] %s sending ELS_RJT\n",
-						node->display_name, ocs_sm_event_name(evt));
-				node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-				node->ls_rsp_io = NULL;
-				ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
-						FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
-						NULL, NULL);
-			}
+	case OCS_EVT_PDISC_RCVD:
+		if (pdisc_clear_nexus_state(node->ocs)) {
+			/* Service parameters contained in the PDISC shall be ignored */
+			node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = cbdata->io;
+			/* Restart node attach with old service paramters, and send ACC */
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_IMPLICIT_LOGO, NULL);
 		} else {
-			ocs_d_send_prli_rsp(cbdata->io, ocs_be16toh(hdr->ox_id), prli->type);
+			fc_header_t *hdr = cbdata->header;
+
+			ocs_send_plogi_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
 		}
 
 		break;
-	}
 
-	case OCS_EVT_NODE_RPI_UPDATE_OK: {
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
-
-		node_printf(node, "REG_RPI update done! Send PRLI resp\n");
-		ocs_d_send_prli_rsp(node->ls_rsp_io, node->ls_rsp_oxid, node->ls_rsp_fctype);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
-
+	case OCS_EVT_PRLI_RCVD:
+		/* T, I+T: remote initiator is slow to get started */
+		ocs_process_prli_payload(node, cbdata->payload);
+		ocs_d_handle_prli_req(node, cbdata->io);
 		break;
-	}
 
-	case OCS_EVT_NODE_RPI_UPDATE_FAIL: {
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
-
-		ocs_log_err(node->ocs, "Send LS reject on PRLI request\n");
-		ocs_send_ls_rjt(node->ls_rsp_io, node->ls_rsp_oxid,
-				FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
-				NULL, NULL);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
-
+	case OCS_EVT_NODE_RPI_UPDATE_OK:
+	case OCS_EVT_NODE_RPI_UPDATE_FAIL:
+		ocs_d_handle_rpi_update(node, evt, cbdata);
 		break;
-	}
+
+	case OCS_EVT_NODE_DEL_INI_COMPLETE:
+		if (cbdata->io->els_info->ls_rsp_type == OCS_LS_RSP_TYPE_NVME_PRLI) {
+			node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_NVME;
+			ocs_nvme_node_resume(node);
+		} else if (cbdata->io->els_info->ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLI) {
+			node->tgt_fct_prli_success &= ~OCS_TARGET_TYPE_FCP;
+			ocs_scsi_node_resume(node);
+		}
+
+		/* If we are here, then we must be processing a duplicate PRLI request */
+		ocs_d_handle_sess_reg(node, cbdata);
+		break;
+
+	case OCS_EVT_NODE_SESS_REG_OK:
+	case OCS_EVT_NODE_SESS_REG_FAIL:
+		ocs_d_handle_sess_rsp(node, evt, cbdata);
+		break;
 
 	case OCS_EVT_PRLO_RCVD: {
-		/* PRLO received, drop it and send a LOGO */
-		node_printf(node, "[%s] Dropping PRLO\n", node->display_name);
-		ocs_els_io_free(cbdata->io);
+		fc_prlo_payload_t *prlo = cbdata->payload;
 
-		if (ocs_send_logo(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, 0, NULL, NULL) == NULL) {
-			/* Failed to send a LOGO, go ahead and cleanup the node anyway */
-			node_printf(node, "[%s] Failed to send LOGO\n", node->display_name);
-			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-		} else {
-			ocs_node_transition(node, __ocs_d_wait_logo_rsp, NULL);
-		}
+		ocs_assert(prlo->type == FC_TYPE_NVME || prlo->type == FC_TYPE_FCP, NULL);
 
+		//sm: save PRLO and send acc after the all the ios are completed.
+		node->ls_rsp_io[cbdata->io->els_info->ls_rsp_type] = cbdata->io;
+
+		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 		break;
 	}
 
 	case OCS_EVT_LOGO_RCVD: {
-		fc_header_t *hdr = cbdata->header;
 		node_printf(node, "%s received attached=%d\n", ocs_sm_event_name(evt), node->attached);
-		//sm: / send LOGO acc
-		ocs_send_logo_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		ocs_node_transition(node, __ocs_d_wait_logo_acc_cmpl, NULL);
+
+		//sm: save logo and send acc after the all the ios are completed.
+		node->ls_rsp_io[OCS_LS_RSP_TYPE_LOGO] = cbdata->io;
+
+		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
 		break;
 	}
 
 	case OCS_EVT_ADISC_RCVD: {
 		fc_header_t *hdr = cbdata->header;
+
 		//sm: / send ADISC acc
 		ocs_send_adisc_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
 		break;
@@ -2293,15 +2595,17 @@ __ocs_d_device_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	}
 
-	case OCS_EVT_RDP_RCVD: {
+	case OCS_EVT_RDP_RCVD:
 		node_printf(node, "%s received, processing payload\n", ocs_sm_event_name(evt));
 		ocs_send_rdp_resp(node, arg, 0);
 		break;
-	}
+
+	case OCS_EVT_LCB_RCVD:
+		ocs_els_process_lcb_rcvd(node, arg);
+		break;
 
 	case OCS_EVT_ABTS_RCVD:
-		//sm: / process ABTS
-		ocs_process_abts(cbdata->io, cbdata->header);
+		ocs_process_abts(node, cbdata);
 		break;
 
 	case OCS_EVT_FLUSH_BLS_RCVD:
@@ -2309,293 +2613,86 @@ __ocs_d_device_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 
 	case OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY:
-		break;
-
 	case OCS_EVT_NODE_REFOUND:
 		break;
 
 	case OCS_EVT_NODE_MISSING:
-		if (node->sport->enable_rscn) {
-			ocs_node_transition(node, __ocs_d_device_gone, NULL);
-		}
+		if (node->sport->enable_rscn)
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
+
 		break;
 
 	case OCS_EVT_SRRS_ELS_REQ_OK:
-	case OCS_EVT_SRRS_ELS_REQ_RJT:  /* PRLI accepted/rejected by remote */
-		ocs_process_srrs_els(node, evt, arg);
+	case OCS_EVT_SRRS_ELS_REQ_RJT: {
+		fc_els_gen_t *els_gen = (fc_els_gen_t *)cbdata->els->els_info->els_req.virt;
+
+		/* We can get PRLO completion due to OCS_EVT_NVME_CMD_RCVD/OCS_EVT_FCP_CMD_RCVD */
+		if (FC_ELS_CMD_PRLO == els_gen->command_code)
+			break;
+
+		ocs_d_handle_prli_cmpl(node, evt, cbdata, __func__);
 		break;
+	}
 
 	case OCS_EVT_SRRS_ELS_CMPL_OK:
 		/* T, or I+T, PRLI accept completed ok */
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		break;
 
 	case OCS_EVT_SRRS_ELS_CMPL_FAIL:
 		/* T, or I+T, PRLI accept failed to complete */
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		node_printf(node, "Failed to send PRLI LS_ACC\n");
 		break;
 
 	case OCS_EVT_FCP_CMD_RCVD:
-		ocs_assert(node->fcp_enabled, NULL);
+		if (node->fcp_enabled)
+			node_printf_err(node, "FCP command received before sending PRLI ACC\n");
 
-		/* Spec expects us to send prlo and drop FCP command. */
-		ocs_send_prlo(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
+		/* Spec expects us to send prlo and drop the FCP command */
+		if (ocs_send_prlo(node, FC_TYPE_FCP, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+				  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL))
+			node_printf(node, "%s received, PRLO sent\n", ocs_sm_event_name(evt));
+
 		break;
 
 	case OCS_EVT_NVME_CMD_RCVD:
-		/* Spec expects us to send prlo and drop NVME command. */
-		ocs_send_prlo(node, FC_TYPE_NVME, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-				OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL);
+		/* Spec expects us to send prlo and drop the NVME command */
+		if (ocs_send_prlo(node, FC_TYPE_NVME, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
+				  OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL))
+			node_printf(node, "%s received, PRLO sent\n", ocs_sm_event_name(evt));
+
+		break;
+
+	/* Handle shutdown events */
+	case OCS_EVT_SHUTDOWN:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
+	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_EXPLICIT_LOGO;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
+		break;
+
+	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
+		node->shutdown_reason = OCS_NODE_SHUTDOWN_IMPLICIT_LOGO;
+		if (node->sess_attach_pend)
+			ocs_node_transition(node, __ocs_d_wait_async_evt_cmpl_shutdown, NULL);
+		else
+			ocs_node_transition(node, __ocs_d_initiate_shutdown, NULL);
+
 		break;
 
 	default:
 		__ocs_d_common(__func__, ctx, evt, arg);
 		return NULL;
-	}
-
-	return NULL;
-}
-
-/**
- * @ingroup device_sm
- * @brief Device node state machine: Node is gone (absent from GID_PT).
- *
- * <h3 class="desc">Description</h3>
- * State entered when a node is detected as being gone (absent from GID_PT).
- *
- * @param ctx Remote node state machine context.
- * @param evt Event to process
- * @param arg Per event optional argument
- *
- * @return Returns NULL.
- */
-
-void *
-__ocs_d_device_gone(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
-{
-	int32_t rc = OCS_SCSI_CALL_COMPLETE;
-	int32_t rc_2 = OCS_SCSI_CALL_COMPLETE;
-	ocs_node_cb_t *cbdata = arg;
-	std_node_state_decl();
-
-	node_sm_trace();
-
-	switch(evt) {
-	case OCS_EVT_ENTER: {
-		const char *labels[] = {"none", "initiator", "target", "initiator+target"};
-
-		if (node->init || node->targ) {
-			ocs_log_info(ocs, "[%s] missing SCSI %s WWPN %s WWNN %s\n", node->display_name,
-					labels[(node->targ << 1) | (node->init)], node->wwpn, node->wwnn);
-		}
-
-		if (node->nvme_init || node->nvme_tgt) {
-			ocs_log_info(ocs, "[%s] missing NVME %s WWPN %s WWNN %s\n", node->display_name,
-					labels[(node->nvme_tgt << 1) | (node->nvme_init)], node->wwpn, node->wwnn);
-		}
-
-		if (node->tgt_fct_prli_success & OCS_TARGET_TYPE_FCP) {
-			rc = ocs_scsi_del_initiator(node, OCS_SCSI_INITIATOR_MISSING);
-		}
-
-		if (node->ini_fct_prli_success & OCS_INITIATOR_TYPE_FCP) {
-			rc_2 = ocs_scsi_del_target(node, OCS_SCSI_TARGET_MISSING);
-		}
-
-		/* No missing noification required for NVME */
-		if ((rc == OCS_SCSI_CALL_COMPLETE) && (rc_2 == OCS_SCSI_CALL_COMPLETE)) {
-			ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
-		}
-
-		break;
-	}
-
-	case OCS_EVT_NODE_REFOUND:
-		/* two approaches, reauthenticate with PLOGI/PRLI, or ADISC */
-
-		/* reauthenticate with PLOGI/PRLI */
-		/* ocs_node_transition(node, __ocs_d_discovered, NULL); */
-
-		/* reauthenticate with ADISC */
-		//sm: / send ADISC
-		if (ocs_send_adisc(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-					OCS_FC_ELS_DEFAULT_RETRIES, NULL, NULL)) {
-			ocs_node_transition(node, __ocs_d_wait_adisc_rsp, NULL);
-		} else {
-			node_printf(node, "[%s] Failed to send ADISC req. Shutting down the node\n",
-					node->display_name);
-			ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-		}
-		break;
-
-	case OCS_EVT_PLOGI_RCVD: {
-		//sm: / save sparams, set send_plogi_acc, post implicit logout
-		/* Save plogi parameters */
-		ocs_node_save_sparms(node, cbdata->payload);
-		ocs_send_ls_rsp_after_attach(cbdata->io, cbdata->header, OCS_NODE_SEND_LS_RSP_PLOGI);
-
-		/* Restart node attach with new service paramters, and send ACC */
-		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_IMPLICIT_LOGO, NULL);
-		break;
-	}
-
-	case OCS_EVT_NVME_CMD_RCVD:
-	case OCS_EVT_FCP_CMD_RCVD: {
-		/* most likely a stale frame (received prior to link down), if attempt
-		 * to send LOGO, will probably timeout and eat up 20s; thus, drop FCP_CMND
-		 */
-		node_printf(node, "FCP_CMND received, drop\n");
-		break;
-	}
-
-	case OCS_EVT_LOGO_RCVD: {
-		/* I, T, I+T */
-		fc_header_t *hdr = cbdata->header;
-		node_printf(node, "%s received attached=%d\n", ocs_sm_event_name(evt), node->attached);
-		//sm: / send LOGO acc
-		ocs_send_logo_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		ocs_node_transition(node, __ocs_d_wait_logo_acc_cmpl, NULL);
-		break;
-	}
-
-	default:
-		__ocs_d_common(__func__, ctx, evt, arg);
-		return NULL;
-	}
-
-	return NULL;
-}
-
-/**
- * @ingroup device_sm
- * @brief Device node state machine: Wait for the ADISC response.
- *
- * <h3 class="desc">Description</h3>
- * Waits for the ADISC response from the remote node.
- *
- * @param ctx Remote node state machine context.
- * @param evt Event to process.
- * @param arg Per event optional argument.
- *
- * @return Returns NULL.
- */
-
-void *
-__ocs_d_wait_adisc_rsp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
-{
-	ocs_node_cb_t *cbdata = arg;
-	std_node_state_decl();
-
-	node_sm_trace();
-
-	switch(evt) {
-	case OCS_EVT_SRRS_ELS_REQ_OK:
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_ADISC, __ocs_d_common, __func__)) {
-			return NULL;
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
-		ocs_node_transition(node, __ocs_d_device_ready, NULL);
-		break;
-
-	case OCS_EVT_SRRS_ELS_REQ_RJT:
-		/* received an LS_RJT, in this case, send shutdown (explicit logo)
-		 * event which will unregister the node, and start over with PLOGI
-		 */
-		if (node_check_els_req(ctx, evt, arg, FC_ELS_CMD_ADISC, __ocs_d_common, __func__)) {
-			return NULL;
-		}
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
-		//sm: / post explicit logout
-		ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-		break;
-
-	case OCS_EVT_LOGO_RCVD: {
-		/* In this case, we have the equivalent of an LS_RJT for the ADISC,
-		 * so we need to abort the ADISC, and re-login with PLOGI
-		 */
-		//sm: / request abort, send LOGO acc
-		fc_header_t *hdr = cbdata->header;
-		node_printf(node, "%s received attached=%d\n", ocs_sm_event_name(evt), node->attached);
-		ocs_send_logo_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
-		ocs_node_transition(node, __ocs_d_wait_logo_acc_cmpl, NULL);
-		break;
-	}
-	default:
-		__ocs_d_common(__func__, ctx, evt, arg);
-		return NULL;
-	}
-
-	return NULL;
-}
-
-/**
- * @ingroup device_sm
- * @brief Device node state machine: wait for SCSI backend session
- * 	  registration completion
- *
- * @param ctx Remote node state machine context.
- * @param evt Event to process.
- * @param arg Per event optional argument.
- *
- * @return Returns NULL.
- */
-
-void *
-__ocs_d_wait_scsi_backend_compl(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
-{
-	std_node_state_decl();
-
-	node_sm_trace();
-
-	switch(evt) {
-	case OCS_EVT_ENTER:
-		ocs_node_hold_frames(node);
-		break;
-	case OCS_EVT_EXIT:
-		ocs_node_accept_frames(node);
-		break;
-	case OCS_EVT_NODE_SESS_REG_OK:
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
-
-		/* Send PRLI acc */
-		ocs_send_prli_acc(node->ls_rsp_io, node->ls_rsp_oxid, node->ls_rsp_fctype, NULL, NULL);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
-		node->fcp_enabled = TRUE;
-
-		/* Now move the node state to ready */
-		ocs_node_transition(node, __ocs_d_device_ready, NULL);
-		break;
-	case OCS_EVT_NODE_SESS_REG_FAIL:
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PRLI, NULL);
-		ocs_assert(node->ls_rsp_io != NULL, NULL);
-
-		/* Send PRLI reject */
-		node_printf(node, "Sending LS reject on PRLI request\n");
-		ocs_send_ls_rjt(node->ls_rsp_io, node->ls_rsp_oxid,
-				FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL,
-				0, NULL, NULL);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
-		node->fcp_enabled = FALSE;
-
-		/* Move the node state back to logged in state */
-		ocs_node_transition(node, __ocs_d_port_logged_in, NULL);
-		break;
-	case OCS_EVT_SRRS_ELS_REQ_OK:
-	case OCS_EVT_SRRS_ELS_REQ_RJT: /* PRLI accept/rejected by remote */
-		ocs_process_srrs_els(node, evt, arg);
-		break;
-
-	default:
-		__ocs_d_common(__func__, ctx, evt, arg);
 	}
 
 	return NULL;

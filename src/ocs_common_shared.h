@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,8 +50,11 @@
 #define OCS_CTRLMASK_ENABLE_FABRIC_EMULATION		(1U << 8)
 #define OCS_CTRLMASK_INHIBIT_INITIATOR			(1U << 9)
 #define OCS_CTRLMASK_CRASH_RESET			(1U << 10)
+#define OCS_CTRLMASK_NODE_PDISC_CLEAR_NEXUS		(1U << 11)
 
 #define enable_target_rscn(ocs)	((ocs->ctrlmask & OCS_CTRLMASK_XPORT_ENABLE_TARGET_RSCN) != 0)
+#define pdisc_clear_nexus_state(ocs)		\
+		(ocs->ctrlmask & OCS_CTRLMASK_NODE_PDISC_CLEAR_NEXUS)
 
 /* Used for error injection testing. */
 typedef enum {

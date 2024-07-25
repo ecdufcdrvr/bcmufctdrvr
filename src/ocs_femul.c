@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -622,7 +624,7 @@ ocs_femul_process_rsnn_nn(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_
 		return -1;
 	}
 
-	nsrec->sym_node_name = ocs_malloc(ocs, rsnnnn->name_len + 1, OCS_M_ZERO);
+	nsrec->sym_node_name = ocs_malloc(ocs, rsnnnn->name_len + 1, OCS_M_ZERO | OCS_M_NOWAIT);
 	if (nsrec->sym_node_name == NULL) {
 		ocs_log_err(io->ocs, "ocs_malloc sym_node_name failed\n");
 		ocs_send_ct_rsp(io, hdr->ox_id, payload, FCCT_HDR_CMDRSP_REJECT, FCCT_UNABLE_TO_PERFORM,
@@ -816,7 +818,7 @@ ocs_femul_process_gff_id(ocs_io_t *io, fc_header_t *hdr, void *payload, uint32_t
 	/* Find the record for the port */
 	nsrec = ocs_ns_find_port_id(io->node->sport->domain->ocs_ns, port_id);
 	if (nsrec != NULL) {
-		acc->fc4_feature_bits = nsrec->fc4_features;
+		acc->fc4_feature_bits[0] = nsrec->fc4_features;
 		io->wire_len += sizeof(acc->fc4_feature_bits);
 	} else {
 		ocs_log_test(io->ocs, "port_id 0x%x not found\n", port_id);
@@ -1113,21 +1115,21 @@ ocs_ns_attach(ocs_domain_t *domain, uint32_t max_ports)
 	ocs_ns_t *ns;
 	ocs_t *ocs = domain->ocs;
 
-	ns = ocs_malloc(ocs, sizeof(*ns), OCS_M_ZERO);
+	ns = ocs_malloc(ocs, sizeof(*ns), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (ns == NULL) {
 		ocs_log_err(ocs, "ocs_malloc ns failed\n");
 		return NULL;
 	}
-	ns->ns_records = ocs_malloc(ocs, sizeof(*ns->ns_records)*max_ports, OCS_M_ZERO);
+	ns->ns_records = ocs_malloc(ocs, sizeof(*ns->ns_records)*max_ports, OCS_M_ZERO  | OCS_M_NOWAIT);
 	ns->ns_record_count = max_ports;
 	if (ns->ns_records == NULL) {
 		ocs_log_err(ocs, "ocs_malloc ns records failed\n");
 		ocs_free(ocs, ns, sizeof(*ns));
 		return NULL;
 	}
-	ocs_lock_init(ocs, &ns->ns_event_lock, "ns_event_list lock[%d]", domain->instance_index);
+	ocs_lock_init(ocs, &ns->ns_event_lock, OCS_LOCK_ORDER_IGNORE, "ns_event_list lock[%d]", domain->instance_index);
 	ns->ns_event_list_len = sizeof(*ns->ns_event_list)*max_ports;
-	ns->ns_event_list = ocs_malloc(ocs, sizeof(*ns->ns_event_list)*max_ports, OCS_M_ZERO);
+	ns->ns_event_list = ocs_malloc(ocs, sizeof(*ns->ns_event_list)*max_ports, OCS_M_ZERO  | OCS_M_NOWAIT);
 	if (ns->ns_event_list == NULL) {
 		ocs_log_err(ocs, "ocs_malloc ns_event_list failed\n");
 		ocs_free(ocs, ns->ns_records, sizeof(*ns->ns_records)*max_ports);
@@ -1153,7 +1155,7 @@ ocs_ns_attach(ocs_domain_t *domain, uint32_t max_ports)
 void
 ocs_ns_detach(ocs_ns_t *ns)
 {
-	ocs_t *ocs = NULL; 
+	ocs_t *ocs = NULL;
 	ocs_ns_record_t *nsrec = NULL;
 
 	if (!ns) {
@@ -1376,7 +1378,7 @@ ocs_ns_rscn_timeout(void *arg)
 
 		/* Build the payload */
 		port_ids_buf_len = sizeof(*port_ids_buf) * ns->ns_event_list_count;
-		port_ids_buf = ocs_malloc(ocs, port_ids_buf_len, OCS_M_ZERO);
+		port_ids_buf = ocs_malloc(ocs, port_ids_buf_len, OCS_M_ZERO | OCS_M_NOWAIT);
 		if (port_ids_buf == NULL) {
 			ocs_log_err(ocs, "ocs_malloc port_ids failed\n");
 			ocs_unlock(&ns->ns_event_lock);

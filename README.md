@@ -1,10 +1,11 @@
-## Broadcom - User mode FC target driver for SPDK FC NVMe.
+### Broadcom - User mode FC target driver for SPDK FC NVMe.
 
-Driver provides FC LLD module to be included with Storage Performance Development Kit (SPDK).
+This user-mode driver
 
-User mode driver supports Emulex LPe31000-series and LPe32000-series HBAs.
+1. provides FC LLD module to be included with Storage Performance Development Kit (SPDK).
+2. based on the configuration options may support G6, Prism and Prism+ HBAs.
 
-### Instructions to include driver module with SPDK NVMF Target:
+### Instructions to include the driver module with SPDK NVMF Target:
 
 ~~~{.sh}
 git clone https://github.com/spdk/spdk spdk
@@ -12,24 +13,22 @@ git clone https://github.com/ecdufcdrvr/bcmufctdrvr fc
 cd spdk
 git submodule update --init
 ./configure --without-fc
-make
+make -j$(nproc)
 cd ../fc
-make DPDK_DIR=../spdk/dpdk/build SPDK_DIR=../spdk
+make -j$(nproc) DPDK_DIR=../spdk/dpdk/build SPDK_DIR=../spdk
 cd ../spdk
 ./configure --with-fc=../fc/build
-make
+make -j$(nproc)
 ~~~
 
-### SPDK Releases compatibility
+### Instructions to run the nvmf_tgt app:
 
-Broadcom FC LLD git master is always compatible with the spdk.io master.
-Repository also includes compatible LLD's for various SPDK releases.
-FC driver branch code that is compatible with various SPDK releases is
-documented below.
+1. Boot the kernel with Intel io_mmu. Set grub boot option "intel_iommu=on" and reboot.
+# grubby --args=intel_iommu=on --update-kernel /boot/<vmlinux-bootable-image>
 
-    SPDK release            Broadcom LLD branch name
-    ============           ==========================
-       19.07              remotes/origin/bcm_lld_rel_v19.07.x
-       20.01              remotes/origin/bcm_lld_rel_v20.01.x
-       20.04              remotes/origin/bcm_lld_rel_v20.04.x
-       20.07              remotes/origin/bcm_lld_rel_v20.07.x
+2. From the fc folder, run start_spdk_tgt.sh to start the SPDK target.
+# sh start_spdk_tgt.sh
+
+3. From a different terminal, run create_spdk_cfg.sh after editing the file appropriately to load the nvmf_tgt app.
+# sh create_spdk_cfg.sh
+

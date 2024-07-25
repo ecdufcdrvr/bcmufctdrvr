@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,7 +43,6 @@
 
 #include "ocs_os.h"
 #include "sli4_fc.h"
-
 #if defined(OCS_INCLUDE_DEBUG)
 #include "ocs_debug.h"
 #endif
@@ -231,8 +232,7 @@ sli_cmd_fcoe_wq_destroy(sli4_t *sli4, void *buf, size_t size, uint16_t wq_id)
  * @param size Buffer size, in bytes.
  * @param xri starting XRI
  * @param xri_count XRI
- * @param page0 First SGL memory page.
- * @param page1 Second SGL memory page (optional).
+ * @param SGL memory.
  * @param dma DMA buffer for non-embedded mailbox command (options)
  *
  * if non-embedded mbx command is used, dma buffer must be at least (32 + xri_count*16) in length
@@ -241,7 +241,7 @@ sli_cmd_fcoe_wq_destroy(sli4_t *sli4, void *buf, size_t size, uint16_t wq_id)
  */
 int32_t
 sli_cmd_fcoe_post_sgl_pages(sli4_t *sli4, void *buf, size_t size,
-		uint16_t xri, uint32_t xri_count, ocs_dma_t *page0[], ocs_dma_t *page1[], ocs_dma_t *dma)
+		uint16_t xri, uint32_t xri_count, ocs_dma_t *sgl[], ocs_dma_t *dma)
 {
 	sli4_req_fcoe_post_sgl_pages_t	*post = NULL;
 	uint32_t	sli_config_off = 0;
@@ -278,14 +278,12 @@ sli_cmd_fcoe_post_sgl_pages(sli4_t *sli4, void *buf, size_t size,
 	post->xri_count = xri_count;
 
 	for (i = 0; i < xri_count; i++) {
-		post->page_desc[i].page0_low  = ocs_addr32_lo(page0[i]->phys);
-		post->page_desc[i].page0_high = ocs_addr32_hi(page0[i]->phys);
-	}
+		post->page_desc[i].page0_low  = ocs_addr32_lo(sgl[i]->phys);
+		post->page_desc[i].page0_high = ocs_addr32_hi(sgl[i]->phys);
 
-	if (page1) {
-		for (i = 0; i < xri_count; i++) {
-			post->page_desc[i].page1_low  = ocs_addr32_lo(page1[i]->phys);
-			post->page_desc[i].page1_high = ocs_addr32_hi(page1[i]->phys);
+		if (sgl[i]->size > SLI_PAGE_SIZE) {
+			post->page_desc[i].page1_low  = ocs_addr32_lo(sgl[i]->phys + SLI_PAGE_SIZE);
+			post->page_desc[i].page1_high = ocs_addr32_hi(sgl[i]->phys + SLI_PAGE_SIZE);
 		}
 	}
 
@@ -397,6 +395,7 @@ sli_cmd_fcoe_rq_create_v1(sli4_t *sli4, void *buf, size_t size,
 	uint32_t	p, sli_config_off = 0;
 	size_t		qmem_size = sli_get_qmem_size(qmem);
 	uint32_t	qpage_size = sli_get_qpage_size(qmem_size);
+	uint32_t	total_rq_entries;
 
 	if (SLI4_PORT_TYPE_FC == sli4->port_type) {
 		uint32_t payload_size;
@@ -414,6 +413,7 @@ sli_cmd_fcoe_rq_create_v1(sli4_t *sli4, void *buf, size_t size,
 	rq->hdr.request_length = sizeof(sli4_req_fcoe_rq_create_v1_t) - sizeof(sli4_req_hdr_t);
 	rq->hdr.version = 1;
 
+	rq->dnb = sli4->config.rq_dnb;
 	/* valid values for number of pages: 1-8 (sec 4.5.6) */
 	rq->num_pages = sli_page_count(qmem_size, qpage_size);
 	if (!rq->num_pages || (rq->num_pages > SLI4_FCOE_RQ_CREATE_V1_MAX_PAGES)) {
@@ -425,7 +425,14 @@ sli_cmd_fcoe_rq_create_v1(sli4_t *sli4, void *buf, size_t size,
 	/*
 	 * RQE count is the total number of entries (note not lg2(# entries))
 	 */
-	rq->rqe_count = (qmem_size / SLI4_FCOE_RQE_SIZE);
+	total_rq_entries = (qmem_size / SLI4_FCOE_RQE_SIZE);
+	if (sli4->asic_type == SLI4_ASIC_TYPE_LANCERG7PLUS) {
+		/* Prism+ device with larger queues */
+		rq->rqe_count = total_rq_entries & 0xFFFF;
+		rq->rqe_count_hi = (total_rq_entries >> 16) & 0xF;	/* MSB 4 bits */
+	} else {
+		rq->rqe_count = total_rq_entries;
+	}
 
 	rq->rqe_size = SLI4_FCOE_RQE_SIZE_8;
 
@@ -564,7 +571,7 @@ sli_cmd_fcoe_post_hdr_templates(sli4_t *sli4, void *buf, size_t size,
 	if (page_count > 16) {
 		/* We can't fit more than 16 descriptors into an embedded mailbox
 		   command, it has to be non-embedded */
-		if (ocs_dma_alloc(sli4->os, payload_dma, payload_size, 4)) {
+		if (ocs_dma_alloc(sli4->os, payload_dma, payload_size, 4, OCS_M_FLAGS_NONE)) {
 			ocs_log_err(sli4->os, "mailbox payload memory allocation fail\n");
 			return 0;
 		}
@@ -707,11 +714,12 @@ sli_abort_wqe(sli4_t *sli4, void *buf, size_t size, sli4_abort_type_e type, uint
 int32_t
 sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint8_t req_type,
 		      uint32_t req_len, uint32_t max_rsp_len, uint8_t timeout,
-		      uint16_t xri, uint16_t tag, uint16_t cq_id, ocs_remote_node_t *rnode)
+		      uint16_t xri, uint16_t tag, uint16_t cq_id, ocs_remote_node_t *rnode, ocs_sport_t *sport)
 {
 	sli4_els_request64_wqe_t	*els = buf;
 	sli4_sge_t	*sge = sgl->virt;
 	uint8_t		is_fabric = FALSE;
+	uint32_t rnode_indicator, sport_indicator, rnode_fc_id, sport_fc_id;
 
 	ocs_memset(buf, 0, size);
 
@@ -745,11 +753,24 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 
 	els->request_tag = tag;
 
-	if (rnode->node_group) {
-		els->hlm = TRUE;
-		els->remote_id = rnode->fc_id & 0x00ffffff;
+	if (rnode) {
+		rnode_fc_id = rnode->fc_id; 
+		rnode_indicator = rnode->indicator;
+		sport_fc_id = rnode->sport->fc_id; 
+		sport_indicator = rnode->sport->indicator;
+		if (rnode->node_group) {
+			els->hlm = TRUE;
+			els->remote_id = rnode->fc_id & 0x00ffffff;
+		}
+	} else if (sport) {
+		rnode_fc_id = FC_ADDR_FABRIC;
+		rnode_indicator = sport->fabric_rpi;
+		sport_fc_id = sport->indicator;
+		sport_indicator = sport->indicator;
+	} else {
+		ocs_log_err(sli4->os, "invalid input received\n");
+		return -1;
 	}
-
 	els->iod = SLI4_ELS_REQUEST64_DIR_READ;
 
 	els->qosd = TRUE;
@@ -759,29 +780,29 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 	switch (req_type) {
 	case FC_ELS_CMD_LOGO:
 		els->els_id = SLI4_ELS_REQUEST64_LOGO;
-		if (rnode->attached) {
+		if (rnode && rnode->attached) {
 			els->ct = SLI4_ELS_REQUEST64_CONTEXT_RPI;
-			els->context_tag = rnode->indicator;
+			els->context_tag = rnode_indicator;
 		} else {
 			els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-			els->context_tag = rnode->sport->indicator;
+			els->context_tag = sport_indicator;
 		}
-		if (FC_ADDR_FABRIC == rnode->fc_id) {
+		if (FC_ADDR_FABRIC == rnode_fc_id) {
 			is_fabric = TRUE;
 		}
 		break;
 	case FC_ELS_CMD_FDISC:
-		if (FC_ADDR_FABRIC == rnode->fc_id) {
+		if (FC_ADDR_FABRIC == rnode_fc_id) {
 			is_fabric = TRUE;
 		}
-		if (0 == rnode->sport->fc_id) {
+		if (0 == sport_fc_id) {
 			els->els_id = SLI4_ELS_REQUEST64_FDISC;
 			is_fabric = TRUE;
 		} else {
 			els->els_id = SLI4_ELS_REQUEST64_OTHER;
 		}
 		els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-		els->context_tag = rnode->sport->indicator;
+		els->context_tag = sport_indicator;
 		els->sp = TRUE;
 		break;
 	case FC_ELS_CMD_FLOGI:
@@ -812,26 +833,26 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 			 * use an S_ID of zero.
 			 */
 			els->sp = TRUE;
-			if (rnode->sport->fc_id != UINT32_MAX) {
-				els->sid = rnode->sport->fc_id;
+			if (sport_fc_id != UINT32_MAX) {
+				els->sid = sport_fc_id;
 			}
 		}
 		break;
 	case FC_ELS_CMD_PLOGI:
 		els->els_id = SLI4_ELS_REQUEST64_PLOGI;
 		els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-		els->context_tag = rnode->sport->indicator;
+		els->context_tag = sport_indicator;
 		break;
 	case FC_ELS_CMD_SCR:
 		els->els_id = SLI4_ELS_REQUEST64_OTHER;
 		els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-		els->context_tag = rnode->sport->indicator;
+		els->context_tag = sport_indicator;
 		break;
 	case FC_ELS_CMD_AUTH:
 		els->els_id = SLI4_ELS_REQUEST64_OTHER;
 		if (rnode->fc_id == FC_ADDR_FABRIC) {
 			els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-			els->context_tag = rnode->sport->indicator;
+			els->context_tag = sport_indicator;
 			is_fabric = TRUE;
 		} else {
 			/* TODO RPI: not used yet */
@@ -841,10 +862,10 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 		els->els_id = SLI4_ELS_REQUEST64_OTHER;
 		if (rnode->attached) {
 			els->ct = SLI4_ELS_REQUEST64_CONTEXT_RPI;
-			els->context_tag = rnode->indicator;
+			els->context_tag = rnode_indicator;
 		} else {
 			els->ct = SLI4_ELS_REQUEST64_CONTEXT_VPI;
-			els->context_tag = rnode->sport->indicator;
+			els->context_tag = sport_indicator;
 		}
 		break;
 	}
@@ -858,10 +879,10 @@ sli_els_request64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *sgl, uint
 	els->cq_id = cq_id;
 
 	if (SLI4_ELS_REQUEST64_CONTEXT_RPI != els->ct) {
-		els->remote_id = rnode->fc_id;
+		els->remote_id = rnode_fc_id;
 	}
 	if (SLI4_ELS_REQUEST64_CONTEXT_VPI == els->ct) {
-		els->temporary_rpi = rnode->indicator;
+		els->temporary_rpi = rnode_indicator;
 	}
 
 	return 0;
@@ -1697,10 +1718,13 @@ sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eo
 
 	ocs_memset(buf, 0, size);
 
-	sf->dbde = TRUE;
-	sf->bde.buffer_length = req_len;
-	sf->bde.u.data.buffer_address_low = ocs_addr32_lo(payload->phys);
-	sf->bde.u.data.buffer_address_high = ocs_addr32_hi(payload->phys);
+	if (req_len) {
+		sf->dbde = TRUE;
+		sf->bde.buffer_length = req_len;
+		sf->bde.u.data.buffer_address_low = ocs_addr32_lo(payload->phys);
+		sf->bde.u.data.buffer_address_high = ocs_addr32_hi(payload->phys);
+		sf->frame_length = req_len;
+	}
 
 	/* Copy FC header */
 	sf->fc_header_0_1[0] = hdr[0];
@@ -1710,7 +1734,6 @@ sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eo
 	sf->fc_header_2_5[2] = hdr[4];
 	sf->fc_header_2_5[3] = hdr[5];
 
-	sf->frame_length = req_len;
 
 	sf->xri_tag = xri;
 	sf->pu = 0;
@@ -1719,7 +1742,7 @@ sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eo
 
 	sf->ct = 0;
 	sf->command = SLI4_WQE_SEND_FRAME;
-	sf->class = SLI4_ELS_REQUEST64_CLASS_3;
+	sf->class = 0;
 	sf->timer = timeout;
 
 	sf->request_tag = req_tag;
@@ -2092,6 +2115,38 @@ sli_xmit_els_rsp64_wqe(sli4_t *sli4, void *buf, size_t size, ocs_dma_t *rsp,
 	return 0;
 }
 
+
+/*
+ * @ingroup sli_fc
+ * @brief Write a XMIT_ELS_RSP64_WQE work queue entry.
+ *
+ * @param sli4 SLI context.
+ * @param buf Destination buffer for the WQE.
+ * @param ctx_tag context tag in marker request which will be filled in cqe
+ * @param req_tag to associate compl with wqe
+ * @param category Marker request category
+ *
+ * @return Returns 0 on success, or a non-zero value on failure.
+ */
+void
+sli4_fcoe_marker_request_wqe(sli4_t *sli4, void *buf, uint32_t ctx_tag,
+			     uint16_t req_tag, uint8_t category)
+{
+	sli4_fcoe_marker_request_wqe_t	*req = buf;
+
+	req->marker_category = category;
+	req->command = SLI4_WQE_RQ_MARKER_REQUEST;
+	req->cmd_type = SLI4_CMD_RQ_MARKER_REQ_WQE;
+	req->qosd = 1;
+	req->cq_id = 0xffff;
+	req->req_tag = req_tag;
+
+	req->tag_higher = SLI4_RQ_MARKER_TYPE_SCSI;
+	req->tag_lower = ctx_tag;
+
+	return;
+}
+
 /**
  * @ingroup sli_fc
  * @brief Process an asynchronous Link State event entry.
@@ -2274,12 +2329,19 @@ sli_fc_process_sli_port_event(sli4_t *sli4, void *acqe)
 		case SLI4_ACQE_PORT_EVENT_TYPE_MISCONF_PHYPORTS:
 			sli_fc_report_link_state(sli4, pe_acqe);
 			break;
+		case SLI4_ACQE_PORT_EVENT_TYPE_PORT_INOPERABLE: {
+			ocs_log_err(sli4->os, "Port inoperable event detected.\n");
+			event.status = SLI_LINK_STATUS_INOPERABLE;
+			break;
+		}
 		default:
 			ocs_log_err(sli4->os, "Unhandled async event type %d\n", pe_acqe->event_type);
 			break;
 	}
 
-	event.status = SLI_LINK_STATUS_CHANGED;
+	if (event.status != SLI_LINK_STATUS_INOPERABLE)
+		event.status = SLI_LINK_STATUS_CHANGED;
+
 	sli4->link(sli4->link_arg, (void *)&event);
 	return 0;
 }
@@ -2524,11 +2586,14 @@ sli_fc_cqe_parse(sli4_t *sli4, sli4_queue_t *cq, uint8_t *cqe, sli4_qentry_e *et
 
 		// Flag errors except for FCP_RSP_FAILURE
 		if (rc && (rc != SLI4_FC_WCQE_STATUS_FCP_RSP_FAILURE)) {
-			ocs_log_err(sli4->os, "WCQE: status=%#x hw_status=%#x tag=%#x w1=%#x w2=%#x xb=%d\n",
-				wcqe->status, wcqe->hw_status, wcqe->request_tag,
-				wcqe->wqe_specific_1, wcqe->wqe_specific_2, wcqe->xb);
-			ocs_log_err(sli4->os, "      %08X %08X %08X %08X\n", ((uint32_t *)cqe)[0],
-				((uint32_t *)cqe)[1], ((uint32_t *)cqe)[2], ((uint32_t *)cqe)[3]);
+			ocs_log_err(sli4->os, "WCQE: [ %08X %08X %08X %08X ]"
+				    " status=%#x hw_status=%#x"
+				    " tag=%#x w1=%#x w2=%#x xb=%d\n",
+				    ((uint32_t *)cqe)[0], ((uint32_t *)cqe)[1],
+				    ((uint32_t *)cqe)[2], ((uint32_t *)cqe)[3],
+				    wcqe->status, wcqe->hw_status,
+				    wcqe->request_tag, wcqe->wqe_specific_1,
+				    wcqe->wqe_specific_2, wcqe->xb);
 		}
 
 //TODO: need to pass additional status back out of here as well as status (could overload rc as status/addlstatus
@@ -2807,7 +2872,7 @@ sli_fc_rqe_rqid_and_index(sli4_t *sli4, uint8_t *cqe, uint16_t *rq_id, uint32_t 
 		} else {
 			*index = UINT32_MAX;
 			rc = rcqe->status;
-			ocs_log_test(sli4->os, "marker rcqe failed, status=%d\n", rc);
+			ocs_log_test_ratelimited(sli4->os, "marker rcqe failed, status=%d\n", rc);
 		}
 	} else {
 		*index = UINT32_MAX;
@@ -3003,7 +3068,7 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 	cmd_size = (sizeof(sli4_req_fcoe_rq_create_v2_t) + (8 * total_page_count));
 	payload_size = OCS_MAX((size_t)cmd_size, sizeof(sli4_res_common_create_queue_set_t));
 
-	if (ocs_dma_alloc(sli4->os, &dma, payload_size, SLI_PAGE_SIZE)) {
+	if (ocs_dma_alloc(sli4->os, &dma, payload_size, SLI_PAGE_SIZE, OCS_M_FLAGS_NONE)) {
 		ocs_log_err(sli4->os, "DMA allocation failed\n");
 		goto error;
 	}
@@ -3021,6 +3086,7 @@ sli_fc_rq_set_alloc(sli4_t *sli4, uint32_t num_rq_pairs,
 	req->hdr.request_length = cmd_size - sizeof(sli4_req_hdr_t);
 
 	/* Fill Payload fields */
+	req->dnb 	   = sli4->config.rq_dnb;
 	req->num_pages     = sli_page_count(qmem_size, qpage_size);
 	req->rqe_count     = (qmem_size / SLI4_FCOE_RQE_SIZE);
 	req->rqe_size      = SLI4_FCOE_RQE_SIZE_8;

@@ -1,34 +1,35 @@
 /*
- *  BSD LICENSE
+ * BSD LICENSE
  *
- *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #ifndef __ocs_IMPL_H__
@@ -46,7 +47,6 @@
 #include <stdbool.h>
 
 #include "spdk/env.h"
-#include "ocs_pci.h"
 #include "env_internal.h"
 
 /**
@@ -128,68 +128,8 @@ ocs_spdk_zmalloc(const char *tag, size_t size, unsigned align, uint64_t *phys_ad
 	return buf_ptr;
 }
 
-/**
- *
- */
 #define ocs_pcicfg_read32(handle, var, offset)  spdk_pci_device_cfg_read32(handle, var, offset)
 #define ocs_pcicfg_write32(handle, var, offset) spdk_pci_device_cfg_write32(handle, var, offset)
-
-#define SPDK_OCS_PCI_DEVICE(DEVICE_ID) RTE_PCI_DEVICE(SPDK_PCI_VID_OCS, DEVICE_ID)
-#define OCSU_DRIVER_NAME_UIO_GENERIC		"uio_pci_generic"
-#define OCSU_DRIVER_NAME_VFIO			"vfio_pci"
-
-struct ocs_pci_enum_ctx {
-	int (*user_enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev);
-	void *user_enum_ctx;
-};
-
-static inline bool
-ocs_pci_device_match_id(uint16_t vendor_id, uint16_t device_id)
-{
-	if (vendor_id != SPDK_PCI_VID_OCS) {
-		return false;
-	}
-
-	switch (device_id) {
-	case PCI_DEVICE_ID_OCS_LANCERG5:
-	case PCI_DEVICE_ID_OCS_LANCERG6:
-	case PCI_DEVICE_ID_OCS_LANCERG7:
-		return true;
-	}
-
-	return false;
-}
-
-static int
-ocs_pci_enum_cb(void *enum_ctx, struct spdk_pci_device *pci_dev)
-{
-	struct ocs_pci_enum_ctx *ctx = enum_ctx;
-	uint16_t vendor_id = spdk_pci_device_get_vendor_id(pci_dev);
-	uint16_t device_id = spdk_pci_device_get_device_id(pci_dev);
-
-	if (!ocs_pci_device_match_id(vendor_id, device_id)) {
-		return 0;
-	}
-
-	return ctx->user_enum_cb(ctx->user_enum_ctx, pci_dev);
-}
-
-static inline int
-ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev), void *enum_ctx)
-{
-	struct ocs_pci_enum_ctx ocs_enum_ctx;
-	struct spdk_pci_driver *pci_driver;
-
-	ocs_enum_ctx.user_enum_cb = enum_cb;
-	ocs_enum_ctx.user_enum_ctx = enum_ctx;
-
-	pci_driver = spdk_pci_get_driver(OCSU_DRIVER_NAME_VFIO);
-	if (pci_driver)
-		spdk_pci_enumerate(pci_driver, ocs_pci_enum_cb, &ocs_enum_ctx);
-
-	return 0;
-}
-
 
 typedef pthread_mutex_t ocs_mutex_t;
 

@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,6 +40,9 @@
 #if !defined(__OCS_XPORT_H__)
 #define __OCS_XPORT_H__
 
+#define OCS_WRAP_INCR ((uint64_t)1 << 32)
+extern const char *OCS_HOST_STAT_NAME[];
+
 /**
  * @brief FCFI lookup/pending frames
  */
@@ -66,6 +71,7 @@ typedef enum {
 	OCS_XPORT_SHUTDOWN,
 	OCS_XPORT_POST_NODE_EVENT,
 	OCS_XPORT_POST_NODE_SHUTDOWN,
+	OCS_XPORT_POST_VPORT_SHUTDOWN,
 	OCS_XPORT_WWNN_SET,
 	OCS_XPORT_WWPN_SET,
 } ocs_xport_ctrl_e;
@@ -136,10 +142,11 @@ typedef struct ocs_xport_link_stats_s {
 typedef struct ocs_xport_host_stats_s {
 	uint32_t	cc:1,
 			:31;
-	uint32_t	transmit_kbyte_count;
-	uint32_t	receive_kbyte_count;
-	uint32_t	transmit_frame_count;
-	uint32_t	receive_frame_count;
+	uint32_t	rsvd2;
+	uint64_t	transmit_kbyte_count;
+	uint64_t	receive_kbyte_count;
+	uint64_t	transmit_frame_count;
+	uint64_t	receive_frame_count;
 	uint32_t	transmit_sequence_count;
 	uint32_t	receive_sequence_count;
 	uint32_t	total_exchanges_originator;
@@ -153,7 +160,7 @@ typedef struct ocs_xport_host_stats_s {
 } ocs_xport_host_stats_t;
 
 typedef struct ocs_xport_fcp_statistics_s {
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 	struct percpu_counter	input_bytes;
 	struct percpu_counter	output_bytes;
 	struct percpu_counter	input_requests;
@@ -207,15 +214,10 @@ struct ocs_xport_s {
 						 **  lock: xport->io_pending_lock
 						 **  link: ocs_io_t->io_pending_link
 						 */
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-	struct percpu_counter io_total_alloc;	/**< count of totals IOS allocated */
-	struct percpu_counter io_total_free;	/**< count of totals IOS free'd */
-	struct percpu_counter io_active_count;	/**< count of active IOS */
-#else
+
 	ocs_atomic_t io_total_alloc;		/**< count of totals IOS allocated */
 	ocs_atomic_t io_total_free;		/**< count of totals IOS free'd */
 	ocs_atomic_t io_active_count;		/**< count of active IOS */
-#endif
 	ocs_atomic_t io_total_pending;		/**< count of totals IOS that were pended */
 	ocs_atomic_t io_pending_count;		/**< count of pending IOS */
 	ocs_atomic_t io_pending_recursing;	/**< non-zero if ocs_scsi_check_pending is executing */
@@ -231,13 +233,19 @@ struct ocs_xport_s {
 	ocs_xport_rq_thread_info_t *rq_thread_info;
 
 	uint8_t forced_link_down;
-	bool fc_stats_timer_shutdown;		/* TRUE if stats timer is to be shutdown */
 	ocs_timer_t fc_stats_timer;		/**< Timer for Statistics */
 	ocs_xport_stats_t fc_stats;
 	ocs_xport_stats_t fc_stats_sysfs;
 	ocs_lock_t fc_stats_lock;
 	uint32_t lip_count;
 };
+
+typedef struct ocs_vport_args_s {
+	uint64_t wwpn;
+	uint64_t wwnn;
+	uint32_t domain_index;
+	int delete_vport;
+} ocs_vport_args_t;
 
 extern ocs_xport_t *ocs_xport_alloc(ocs_t *ocs);
 extern int32_t ocs_xport_attach(ocs_xport_t *xport);
@@ -246,9 +254,13 @@ extern int32_t ocs_xport_detach(ocs_xport_t *xport);
 extern int32_t ocs_xport_control(ocs_xport_t *xport, ocs_xport_ctrl_e cmd, ...);
 extern int32_t ocs_xport_status(ocs_xport_t *xport, ocs_xport_status_e cmd, ocs_xport_stats_t *result);
 extern void ocs_xport_free(ocs_xport_t *xport);
-extern void ocs_xport_config_stats_timer(void *arg);
-extern void ocs_device_stop_stats_timers(ocs_t *ocs);
+extern void ocs_xport_setup_stats_timer(ocs_t *ocs);
+extern void ocs_xport_stats_timer_fn(void *arg);
 extern void ocs_xport_get_linkup_stats(ocs_t *ocs);
 extern int32_t ocs_xport_cb(void *arg, ocs_hal_xport_event_e event);
+extern int32_t ocs_xport_init_backends(ocs_t *ocs);
+extern void ocs_xport_cleanup_backends(ocs_t *ocs);
+extern int32_t ocs_xport_rq_threads_create(ocs_xport_t *xport, uint32_t num_rq_threads);
+extern void ocs_xport_rq_threads_teardown(ocs_xport_t *xport);
 
 #endif // __OCS_XPORT_H__

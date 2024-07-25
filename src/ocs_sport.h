@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,7 +45,6 @@ extern int32_t ocs_port_cb(void *arg, ocs_hal_port_event_e event, void *data);
 extern ocs_sport_t *ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_id,
 	uint8_t enable_ini, uint8_t ini_fc_types, uint8_t enable_tgt, uint8_t tgt_fc_types);
 extern void ocs_sport_free(ocs_sport_t *sport);
-extern void ocs_sport_force_free(ocs_sport_t *sport);
 
 static inline void
 ocs_sport_lock_init(ocs_sport_t *sport)
@@ -76,6 +77,22 @@ ocs_sport_unlock(ocs_sport_t *sport)
 	ocs_device_unlock(sport->ocs);
 }
 
+static inline uint32_t
+ocs_sport_get_max_frame_size(ocs_sport_t *sport)
+{
+	fc_plogi_payload_t *sp = (fc_plogi_payload_t *)sport->service_params;
+
+	return (ocs_be32toh(sp->common_service_parameters[1]) & FC_PLOGI_CSP_W1_MAXFRAME_SIZE_MASK);
+}
+
+static inline uint64_t
+ocs_sport_get_fabric_name(ocs_sport_t *sport)
+{
+	fc_plogi_payload_t *sp = (fc_plogi_payload_t *)sport->domain->flogi_service_params;
+
+	return (((uint64_t)ocs_be32toh(sp->node_name_hi) << 32ll) | (ocs_be32toh(sp->node_name_lo)));
+}
+
 extern ocs_sport_t *ocs_sport_find(ocs_domain_t *domain, uint32_t d_id);
 extern ocs_sport_t *ocs_sport_find_wwn(ocs_domain_t *domain, uint64_t wwnn, uint64_t wwpn);
 extern int32_t ocs_sport_attach(ocs_sport_t *sport, uint32_t fc_id);
@@ -105,5 +122,32 @@ extern ocs_remote_node_group_t *ocs_remote_node_group_alloc(ocs_node_group_dir_t
 extern void ocs_remote_node_group_free(ocs_remote_node_group_t *node_group);
 extern int ocs_node_group_init(ocs_node_t *node);
 extern void ocs_node_group_free(ocs_node_t *node);
+extern void ocs_tdz_issue_fabric_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data);
+extern void ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data);
+extern void ocs_ganxt_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data);
+extern void * __ocs_sport_wait_port_logo(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
+
+typedef struct ocs_tdz_rsp_info_s {
+	int32_t status;
+	uint16_t cmd_code;
+	void *rsp_buf;
+	size_t rsp_buf_size;
+	ocs_sport_exec_arg_t *sport_exec_args;
+} ocs_tdz_rsp_info_t;
+
+typedef struct ocs_fdmi_get_cmd_results_s {
+	int32_t status;
+	uint16_t fdmi_cmd_code;
+	void *fdmi_get_cmd_rsp_buf;
+	size_t fdmi_get_cmd_rsp_buf_len;
+	ocs_sport_exec_arg_t *sport_exec_args;
+} ocs_fdmi_get_cmd_results_t;
+
+typedef struct ocs_ganxt_get_cmd_results_s {
+	int32_t status;
+	void *ganxt_get_cmd_rsp_buf;
+	size_t ganxt_get_cmd_rsp_buf_len;
+	ocs_sport_exec_arg_t *sport_exec_args;
+} ocs_ganxt_get_cmd_results_t;
 
 #endif // __OCS_SPORT_H__

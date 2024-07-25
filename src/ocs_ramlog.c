@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -96,7 +98,7 @@ ocs_ramlog_init(ocs_t *ocs, uint32_t buffer_len, uint32_t buffer_count)
 	ramlog->textbuf_base = 1;
 	ramlog->cur_textbuf = &ramlog->textbufs[0];
 	ramlog->initialized = TRUE;
-	ocs_lock_init(ocs, &ramlog->lock, "ramlog_lock[%d]", ocs_instance(ocs));
+	ocs_lock_init(ocs, &ramlog->lock, OCS_LOCK_ORDER_IGNORE, "ramlog_lock[%d]", ocs_instance(ocs));
 	return ramlog;
 }
 

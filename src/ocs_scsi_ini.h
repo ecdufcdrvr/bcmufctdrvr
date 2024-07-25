@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -36,7 +38,7 @@
 #define OCS_INCLUDE_INI_STUB
 
 typedef struct {
-} ocs_scsi_ini_t;
+} ocs_ini_t;
 
 typedef struct {
 } ocs_scsi_ini_domain_t;

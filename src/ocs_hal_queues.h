@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,7 +53,7 @@
 #define OCS_HAL_WQ_ENTRIES_MAX	2048
 
 #define OCS_HAL_RQ_ENTRIES_MIN	512
-#define OCS_HAL_RQ_ENTRIES_DEF	1024
+#define OCS_HAL_RQ_ENTRIES_DEF	2048
 #define OCS_HAL_RQ_ENTRIES_MAX	4096
 
 #define OCS_HAL_MQ_ENTRIES_MIN	16
@@ -60,6 +62,7 @@
 
 #define OCS_NVME_LS_FILTER	0x28ff30f0
 #define OCS_NVME_IO_FILTER	0x08ff06ff
+#define OCS_SCSI_IO_FILTER	0x08ff06ff
 
 #define OCS_HAL_WQ_SFQ_SCSI	0
 #define OCS_HAL_WQ_SFQ_NVME	1
@@ -77,9 +80,9 @@ typedef struct {
 	ocs_hal_qtop_entry_e entry;
 	uint8_t set_default;
 	uint32_t len;
+	uint32_t filter_mask;
 	uint8_t class;
 	uint8_t ulp;
-	uint8_t filter_mask;
 	uint8_t policy;
 	uint8_t nvmeq;
 	bool protocol_valid;
@@ -90,9 +93,9 @@ typedef struct {
 	struct rq_config {
 		hal_eq_t *eq;
 		uint32_t len;
+		uint32_t filter_mask;
 		uint8_t class;
 		uint8_t ulp;
-		uint8_t filter_mask;
 		uint8_t policy;
 		uint8_t nvmeq;
 		bool protocol_valid;
@@ -104,14 +107,14 @@ typedef struct {
 typedef struct {
 	uint32_t num_pairs;
 	uint32_t len;
+	uint32_t filter_mask;
 	uint8_t class;
 	uint8_t ulp;
-	uint8_t filter_mask;
 	uint8_t policy;
 	uint8_t nvmeq;
 	bool protocol_valid;
 	uint8_t protocol;
-	hal_eq_t *eqs[OCE_HAL_MAX_NUM_MRQ_PAIRS];
+	hal_eq_t *eqs[OCS_HAL_MAX_NUM_MRQ_PAIRS];
 } ocs_hal_mrq_info_t;
 
 #define MAX_TOKENS			256
@@ -125,6 +128,7 @@ typedef struct {
 	uint32_t entry_counts[QTOP_LAST];
 	uint32_t rptcount[10];
 	uint32_t rptcount_idx;
+	bool eq_nvmes[OCS_HAL_MAX_NUM_EQ];
 } ocs_hal_qtop_t;
 
 extern ocs_hal_rtn_e ocs_hal_init_send_frame_queue(ocs_hal_t *hal, int32_t scsi_nvme);
@@ -132,6 +136,7 @@ extern ocs_hal_qtop_t *ocs_hal_qtop_parse(ocs_hal_t *hal, const char *qtop_strin
 extern void ocs_hal_qtop_free(ocs_hal_qtop_t *qtop);
 extern const char *ocs_hal_qtop_entry_name(ocs_hal_qtop_entry_e entry);
 extern uint32_t ocs_hal_qtop_eq_count(ocs_hal_t *hal);
+extern bool ocs_hal_qtop_is_eq_nvme(ocs_hal_t *hal, int eq_index);
 
 extern hal_eq_t* ocs_hal_eq_for_send_frame(ocs_hal_t *hal, int32_t scsi_nvme);
 extern ocs_hal_rtn_e ocs_hal_init_queues(ocs_hal_t *hal, ocs_hal_qtop_t *qtop);

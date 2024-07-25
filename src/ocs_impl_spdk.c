@@ -1,34 +1,35 @@
 /*
- *  BSD LICENSE
+ * BSD LICENSE
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /**
@@ -38,17 +39,14 @@
  */
 
 #include "ocs.h"
-#include "ocs_spdk.h"
+#include "spdk_probe.h"
 #include "ocs_impl_spdk.h"
+
 #include "spdk/env.h"
 #include "spdk/event.h"
 
-/* @brief Select DMA buffer allocation method
- */
-#define ENABLE_DMABUF_SLAB		1
-#define ENABLE_DMABUF_USER		0
+#if defined(ENABLE_DMABUF_SLAB)
 
-#if ENABLE_DMABUF_SLAB
 typedef struct {
 	uint32_t tag;
 	char name[64];
@@ -69,37 +67,25 @@ static int
 ocsu_dslab_dmabuf_alloc(void *os, dslab_dmabuf_t *dma, uint32_t len)
 {
 	ocs_t *ocs = os;
-
-#ifndef OCS_USPACE_SPDK 
-	ocsu_mmoffset_t mmoffset;
-#endif
-	ocs_dslab_app_t *app;
+	uint8_t name[32];
 
 	ocs_memset(dma, 0, sizeof(*dma));
 
-	/* Allocate the app specific data */
-	app = calloc(1, sizeof(*app));
-	if (app == NULL) {
-		ocs_log_err(ocs, "malloc failed\n");
-		return -1;
-	}
-	snprintf(app->name, sizeof(app->name), "ocs%d-ocs_dma_buff-%d",
+	snprintf(name, sizeof(name), "ocs%d-ocs_dma_buff-%d",
 			ocs->instance_index, ocs->ocs_os.dmabuf_next_instance);
 	
 	/* Submit a driver request to allocate a buffer */
-	dma->vaddr = ocs_spdk_zmalloc(app->name, len, 64, &(dma->paddr));
+	dma->vaddr = ocs_spdk_zmalloc(name, len, 64, &(dma->paddr));
 	if (dma->vaddr == NULL) {
-		free(app);
-		ocs_log_err(ocs, "mmap failed\n");
+		ocs_log_err(ocs, "dmabuf alloc failed\n");
 		return -1;
 	}
 
 	/* Fill in the rest of the dlab dma buffer information */
-	dma->app  = app;
 	dma->size = len;
-	app->tag  = ocs->ocs_os.dmabuf_next_instance;
 
 	ocs->ocs_os.dmabuf_next_instance ++;
+
 	return 0;
 }
 
@@ -113,7 +99,6 @@ ocsu_dslab_dmabuf_free(void *os, dslab_dmabuf_t *dma)
 		/* Unmap the address range */
 		ocs_spdk_free(dma->vaddr);
 
-		free(dma->app);
 		memset(dma, 0, sizeof(*dma));
 	}
 
@@ -124,6 +109,7 @@ dslab_callbacks_t ocs_dslab_callbacks = {
 	ocsu_dslab_dmabuf_alloc,
 	ocsu_dslab_dmabuf_free
 };
+
 #endif
 
 /* Timer routines */
@@ -138,7 +124,7 @@ ocs_setup_timer_us(ocs_os_handle_t os, ocs_timer_t *timer,
 
         memset(&evt, 0, sizeof(evt));
         evt.sigev_notify = SIGEV_THREAD;
-        evt.sigev_notify_function = (void *)func;
+        evt.sigev_notify_function = (void(*)(union sigval)) func;
         evt.sigev_value.sival_ptr = data;
 
         if ((rc = timer_create(CLOCK_REALTIME, &evt, &timer->timer)) < 0) {
@@ -326,8 +312,8 @@ ocs_scsi_get_block_vaddr(ocs_io_t *io, uint64_t blocknumber, ocs_scsi_vaddr_len_
 }
 
 /**
- *  *  * @brief Cancel HAL IOs
- *   *   */
+ * @brief Cancel HAL IOs
+ */
 void ocs_scsi_tgt_cancel_io(ocs_t *ocs)
 {
         /* Flush the WCQE's before cleaning-up the io_inuse list */

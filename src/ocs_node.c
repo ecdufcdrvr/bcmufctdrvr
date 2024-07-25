@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -46,20 +48,13 @@
 #include "ocs_els.h"
 #include "ocs_device.h"
 
-#define SCSI_IOFMT " [%04x][i:%0*x t:%0*x h:%04x iotag:%04x] "
-#define SCSI_ITT_SIZE(ocs)	((ocs->ocs_xport == OCS_XPORT_FC) ? 4 : 8)
-
-#define SCSI_IOFMT_ARGS(io) io->instance_index, SCSI_ITT_SIZE(io->ocs), io->init_task_tag, SCSI_ITT_SIZE(io->ocs), io->tgt_task_tag, io->hw_tag io->tag
-
-#define scsi_io_printf(io, fmt, ...) ocs_log_debug(io->ocs, "[%s]" SCSI_IOFMT fmt, \
-	io->node->display_name, SCSI_IOFMT_ARGS(io), ##__VA_ARGS__)
-
 void ocs_mgmt_node_list(ocs_textbuf_t *textbuf, void *node);
 void ocs_mgmt_node_get_all(ocs_textbuf_t *textbuf, void *node);
 int ocs_mgmt_node_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *node);
 int ocs_mgmt_node_set(char *parent, char *name, char *value, void *node);
 int ocs_mgmt_node_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
-		void *arg_out, uint32_t arg_out_length, void *node);
+			void *arg_out, uint32_t arg_out_length, void *node);
+
 static ocs_mgmt_functions_t node_mgmt_functions = {
 	.get_list_handler	=	ocs_mgmt_node_list,
 	.get_handler		=	ocs_mgmt_node_get,
@@ -67,7 +62,6 @@ static ocs_mgmt_functions_t node_mgmt_functions = {
 	.set_handler		=	ocs_mgmt_node_set,
 	.exec_handler		=	ocs_mgmt_node_exec,
 };
-
 
 /**
  * @ingroup node_common
@@ -98,7 +92,7 @@ ocs_node_abort_all_els(ocs_node_t *node)
 				      node->display_name, els->display_name, els->init_task_tag, els->tgt_task_tag);
 			ocs_unlock(&node->active_ios_lock);
 			cbdata.els = els;
-			ocs_els_post_event(els, OCS_EVT_ABORT_ELS, &cbdata);
+			ocs_els_post_event(els, OCS_EVT_ABORT_ELS, false, &cbdata);
 			ocs_lock(&node->active_ios_lock);
 		}
 	ocs_unlock(&node->active_ios_lock);
@@ -211,6 +205,31 @@ ocs_node_find(ocs_sport_t *sport, uint32_t port_id)
 	return node;
 }
 
+
+/**
+ * @ingroup node_alloc
+ * @brief Find an FC node structure from sport lookup table
+ *
+ * @param sport the SPORT to search
+ * @param port_id FC port ID
+ *
+ * @return pointer to the object or NULL if not found
+ */
+ocs_node_t *
+ocs_node_lookup_get(ocs_sport_t *sport, uint32_t port_id)
+{
+	ocs_node_t *node;
+
+	node = spv_get(sport->lookup, port_id);
+
+	/* Lookup the node given the remote s_id */
+	if (node) {
+		/* Sanity check the node pointer */
+		ocs_assert(node->magic == NODE_MAGIC, NULL);
+	}
+
+	return node;
+}
 /**
  * @ingroup node_alloc
  * @brief Find an FC node structure given the WWPN
@@ -318,11 +337,7 @@ ocs_node_create_pool(ocs_t *ocs, uint32_t node_count)
 		node->max_wr_xfer_size = max_xfer_size;
 		node->rnode.indicator = UINT32_MAX;
 
-#if !defined(OCS_USPACE)
-		ocs_ratelimit_state_init(&node->ratelimit);
-#endif
-
-		rc = ocs_dma_alloc(ocs, &node->sparm_dma_buf, 256, 16);
+		rc = ocs_dma_alloc(ocs, &node->sparm_dma_buf, 256, 16, OCS_M_FLAGS_NONE);
 		if (rc) {
 			ocs_free(ocs, node, sizeof(ocs_node_t));
 			ocs_log_err(ocs, "ocs_dma_alloc failed: %d\n", rc);
@@ -418,7 +433,7 @@ ocs_node_t *
 ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ)
 {
 	int32_t rc;
-	ocs_node_t *node = NULL;
+	ocs_node_t *node = NULL, *node_lkup = NULL;
 	uint32_t instance_index;
 	uint64_t max_wr_xfer_size;
 	ocs_t *ocs = sport->ocs;
@@ -451,11 +466,23 @@ ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ)
 	node->sparm_dma_buf = sparm_dma_buf;
 	node->rnode.indicator = UINT32_MAX;
 
-	node->sport = sport;
 	ocs_sport_lock(sport);
-		node->ocs = ocs;
-		node->init = init;
-		node->targ = targ;
+
+		/* A race in domain dispatch path could cause this node to be
+ 		 * already added in cases of MRQ. Check here before attempting
+ 		 * to add to lookup table.
+ 		 */
+		node_lkup = spv_get(sport->lookup, port_id);
+		if (node_lkup) {
+			ocs_sport_unlock(sport);
+
+			/* Return back to pool. */
+			ocs_device_lock(ocs);
+			ocs_list_add_tail(&xport->nodes_free_list, node);
+			ocs_device_unlock(ocs);
+
+			return node_lkup;
+		}
 
 		rc = ocs_hal_node_alloc(&ocs->hal, &node->rnode, port_id, sport);
 		if (rc) {
@@ -469,12 +496,21 @@ ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ)
 
 			return NULL;
 		}
+
+		node->sport = sport;
+		node->ocs = ocs;
+		node->init = init;
+		node->targ = targ;
+		node->plogi_els_io = NULL;
+		node->shutdown_start_time = 0;
+
 		ocs_list_add_tail(&sport->node_list, node);
+		sport->num_disc_ports++;
 
 		ocs_node_lock_init(node);
-		ocs_lock_init(ocs, &node->pend_frames_lock, "pend_frames_lock[%d]", node->instance_index);
+		ocs_lock_init(ocs, &node->pend_frames_lock, OCS_LOCK_ORDER_IGNORE, "pend_frames_lock[%d]", node->instance_index);
 		ocs_list_init(&node->pend_frames, ocs_hal_sequence_t, link);
-		ocs_lock_init(ocs, &node->active_ios_lock, "active_ios[%d]", node->instance_index);
+		ocs_lock_init(ocs, &node->active_ios_lock, OCS_LOCK_ORDER_ACTIVE_IOS, "active_ios[%d]", node->instance_index);
 		ocs_list_init(&node->active_ios, ocs_io_t, link);
 		ocs_list_init(&node->els_io_pend_list, ocs_io_t, link);
 		ocs_list_init(&node->els_io_active_list, ocs_io_t, link);
@@ -489,11 +525,64 @@ ocs_node_alloc(ocs_sport_t *sport, uint32_t port_id, uint8_t init, uint8_t targ)
 
 		ocs_node_update_display_name(node);
 
+		/* Set a pattern to catch illegal node lookups */
+		node->magic = NODE_MAGIC;
+
 		spv_set(sport->lookup, port_id, node);
 	ocs_sport_unlock(sport);
 	node->mgmt_functions = &node_mgmt_functions;
 
 	return node;
+}
+
+static void
+ocs_node_remove_lookup(ocs_node_t *node)
+{
+	ocs_sport_t *sport = node->sport;
+
+	ocs_sport_lock(sport);
+
+	/* remove entry from sparse vector list */
+	if (sport->lookup == NULL) {
+		ocs_log_test(node->ocs, "sport lookup is NULL\n");
+		ocs_sport_unlock(sport);
+		return;
+	}
+
+	spv_set(sport->lookup, node->rnode.fc_id, NULL);
+	ocs_sport_unlock(sport);
+}
+
+/* @breif: Remove node from sport node shutdown list
+ *
+ * @arg: Node pointer
+ */
+
+void
+ocs_node_remove_shutdown_list(ocs_node_t *node)
+{
+	ocs_sport_t *sport = node->sport;
+
+	ocs_lock(&sport->node_shutdown_lock);
+	if (!ocs_list_empty(&sport->node_shutdown_list) &&
+	    ocs_list_on_list(&node->shutdown_link)) {
+		ocs_list_remove(&sport->node_shutdown_list, node);
+		node->shutdown_start_time = 0;
+	}
+	ocs_unlock(&sport->node_shutdown_lock);
+}
+
+void
+ocs_node_add_shutdown_list(ocs_node_t *node)
+{
+	ocs_sport_t *sport = node->sport;
+
+	ocs_lock(&sport->node_shutdown_lock);
+	if (!ocs_list_on_list(&node->shutdown_link)) {
+		node->shutdown_start_time = ocs_get_os_ticks();
+		ocs_list_add_tail(&sport->node_shutdown_list, node);
+	}
+	ocs_unlock(&sport->node_shutdown_lock);
 }
 
 /**
@@ -528,6 +617,9 @@ ocs_node_free(ocs_node_t *node)
 
 	node_printf(node, "Free'd\n");
 
+	/* Free any pending frames */
+	ocs_node_purge_pending(node);
+
 	if(node->refound) {
 		/*
 		 * Save the name server node. We will send fake RSCN event at
@@ -538,7 +630,9 @@ ocs_node_free(ocs_node_t *node)
 
 	/* Remove from node list */
 	ocs_sport_lock(sport);
+		sport->num_disc_ports--;
 		ocs_list_remove(&sport->node_list, node);
+		ocs_node_remove_shutdown_list(node);
 
 		/* Free HAL resources */
 		if (OCS_HAL_RTN_IS_ERROR((rc = ocs_hal_node_free_resources(&ocs->hal, &node->rnode)))) {
@@ -550,15 +644,6 @@ ocs_node_free(ocs_node_t *node)
 		if (ocs_timer_pending(&node->gidpt_delay_timer)) {
 			ocs_del_timer(&node->gidpt_delay_timer);
 		}
-
-		/* remove entry from sparse vector list */
-		if (sport->lookup == NULL) {
-			ocs_log_test(node->ocs, "sport lookup is NULL\n");
-			ocs_sport_unlock(sport);
-			return -1;
-		}
-
-		spv_set(sport->lookup, node->rnode.fc_id, NULL);
 
 		/*
 		 * If the node_list is empty, then post a ALL_CHILD_NODES_FREE event to the sport,
@@ -580,6 +665,8 @@ ocs_node_free(ocs_node_t *node)
 	ocs_node_lock_free(node);
 	ocs_lock_free(&node->pend_frames_lock);
 	ocs_lock_free(&node->active_ios_lock);
+
+	node->magic = 0;
 
 	/* return to free list */
 	ocs_device_lock(ocs);
@@ -603,83 +690,16 @@ ocs_node_free(ocs_node_t *node)
  *
  * @return None.
  */
-void ocs_notify_node_force_free(ocs_node_t *node)
+void ocs_scsi_notify_node_force_free(ocs_node_t *node)
 {
 	/* shutdown sm processing */
 	ocs_sm_disable(&node->sm);
 	ocs_strncpy(node->prev_state_name, node->current_state_name, sizeof(node->prev_state_name));
 	ocs_strncpy(node->current_state_name, "disabled", sizeof(node->current_state_name));
 
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 	ocs_scsi_tgt_notify_node_force_free(node);
 #endif
-}
-
-/**
- * @brief free memory resources of a node object
- *
- * The node object's child objects are freed after which the
- * node object is freed.
- *
- * @param node pointer to a node object
- *
- * @return none
- */
-
-void
-ocs_node_force_free(ocs_node_t *node)
-{
-	ocs_io_t *io;
-	ocs_io_t *next;
-	ocs_io_t *els;
-	ocs_io_t *els_next;
-
-	ocs_node_lock(node);
-
-	ocs_lock(&node->active_ios_lock);
-		ocs_list_foreach_safe(&node->active_ios, io, next) {
-			ocs_list_remove(&io->node->active_ios, io);
-			ocs_io_free(node->ocs, io);
-		}
-	ocs_unlock(&node->active_ios_lock);
-
-	/* free all pending ELS IOs */
-	ocs_lock(&node->active_ios_lock);
-		ocs_list_foreach_safe(&node->els_io_pend_list, els, els_next) {
-			/* can't call ocs_els_io_free() because lock is held; cleanup manually */
-			ocs_list_remove(&node->els_io_pend_list, els);
-
-			ocs_dma_free(els->ocs, &els->els_info->els_rsp);
-			ocs_dma_free(els->ocs, &els->els_info->els_req);
-
-			ocs_io_free(node->ocs, els);
-		}
-	ocs_unlock(&node->active_ios_lock);
-
-	/* free all active ELS IOs */
-	ocs_lock(&node->active_ios_lock);
-		ocs_list_foreach_safe(&node->els_io_active_list, els, els_next) {
-			/* Kill ocs_els_delay_timer_cb(); if scheduled */
-			if (ocs_timer_pending(&els->delay_timer)) {
-				ocs_del_timer(&els->delay_timer);
-			}
-
-			/* can't call ocs_els_io_free() because lock is held; cleanup manually */
-			ocs_list_remove(&node->els_io_active_list, els);
-
-			ocs_dma_free(els->ocs, &els->els_info->els_rsp);
-			ocs_dma_free(els->ocs, &els->els_info->els_req);
-
-			ocs_io_free(node->ocs, els);
-		}
-	ocs_unlock(&node->active_ios_lock);
-
-	ocs_node_unlock(node);
-
-	/* manually purge pending frames (if any) */
-	ocs_node_purge_pending(node);
-
-	ocs_node_free(node);
 }
 
 /**
@@ -716,8 +736,11 @@ ocs_node_attach(ocs_node_t *node)
 	/* take lock to protect node->rnode.attached */
 	ocs_node_lock(node);
 		rc = ocs_hal_node_attach(&ocs->hal, &node->rnode, &node->sparm_dma_buf);
-		if (OCS_HAL_RTN_IS_ERROR(rc))
+		if (OCS_HAL_RTN_IS_ERROR(rc)) {
 			ocs_log_test(ocs, "ocs_hal_node_attach failed: %d\n", rc);
+		} else {
+			node->wait_attached = TRUE;
+		}
 	ocs_node_unlock(node);
 
 	return rc;
@@ -798,29 +821,62 @@ ocs_node_update_display_name(ocs_node_t *node)
 }
 
 /**
- * @brief cleans up an XRI for the pending link services accept by aborting the
- *         XRI if required.
+ * @brief Cleanup the XRI for pending link services.
  *
  * <h3 class="desc">Description</h3>
  * This function is called when the LS accept is not sent.
  *
- * @param node Node for which should be cleaned up
+ * @param node pointer to the node object
+ *
+ * @return none
  */
 
 void
-ocs_node_send_ls_io_cleanup(ocs_node_t *node)
+ocs_node_ls_rsp_io_cleanup(ocs_node_t *node)
 {
-	ocs_t *ocs = node->ocs;
+	uint8_t i;
 
-	if (node->send_ls_rsp != OCS_NODE_SEND_LS_RSP_NONE) {
-		ocs_assert(node->ls_rsp_io);
-		ocs_log_debug(ocs, "[%s] cleaning up LS_ACC oxid=0x%x\n",
-			node->display_name, node->ls_rsp_oxid);
+	for (i = 0; i < OCS_LS_RSP_TYPE_MAX; i++) {
+		if (!node->ls_rsp_io[i])
+			continue;
 
-		node->ls_rsp_io->hio = NULL;
-		ocs_els_io_free(node->ls_rsp_io);
-		node->send_ls_rsp = OCS_NODE_SEND_LS_RSP_NONE;
-		node->ls_rsp_io = NULL;
+		node_printf(node, "Cleaning up LS_ACC oxid=0x%x\n", node->ls_rsp_io[i]->els_info->ls_rsp_oxid);
+		node->ls_rsp_io[i]->hio = NULL;
+		ocs_els_io_free(node->ls_rsp_io[i]);
+		node->ls_rsp_io[i] = NULL;
+	}
+}
+
+static void
+ocs_node_send_pending_logo_prlo_acc(ocs_node_t *node)
+{
+	uint32_t i;
+	ocs_io_t *ls_rsp_io;
+	ocs_ls_rsp_type_e types[] = {OCS_LS_RSP_TYPE_LOGO, OCS_LS_RSP_TYPE_NVME_PRLO,
+				     OCS_LS_RSP_TYPE_FCP_PRLO};
+
+	for (i = 0; i < sizeof(types)/sizeof(ocs_ls_rsp_type_e); i++) {
+		ls_rsp_io = node->ls_rsp_io[types[i]];
+		if (!ls_rsp_io)
+			continue;
+
+		if (types[i] == OCS_LS_RSP_TYPE_LOGO) {
+			node_printf(node, "Sending LS_ACC for LOGO\n");
+			ocs_sframe_send_ls_acc(node, node->rnode.fc_id, ls_rsp_io->els_info->ls_rsp_did,
+					ls_rsp_io->els_info->ls_rsp_oxid, 0xffff);
+		} else {
+			uint8_t fc4_type = (ls_rsp_io->els_info->ls_rsp_type == OCS_LS_RSP_TYPE_FCP_PRLO) ?
+				FC_TYPE_FCP : FC_TYPE_NVME;
+
+			node_printf(node, "Sending LS_ACC for PRLO\n");
+			ocs_sframe_send_prlo_acc(node, node->rnode.fc_id, ls_rsp_io->els_info->ls_rsp_did,
+					ls_rsp_io->els_info->ls_rsp_oxid, 0xffff, fc4_type);
+		}
+
+		ls_rsp_io->hio = NULL;
+		ocs_els_io_free(ls_rsp_io);
+
+		node->ls_rsp_io[types[i]] = NULL;
 	}
 }
 
@@ -841,19 +897,24 @@ ocs_node_process_plogi_frame(ocs_node_t *node)
 		buf = frame->payload.data;
 		if ((fc_be24toh(hdr->f_ctl) & FC_FCTL_END_SEQUENCE) && (hdr->r_ctl == FC_RCTL_ELS)) {
 			if (buf[0] == FC_ELS_CMD_PLOGI) {
-				int rc = 1;
+				int rc = 0;
 
 				ocs_scsi_io_alloc_enable(node);
 				io = ocs_els_io_alloc(node, sizeof(fc_plogi_payload_t), OCS_ELS_ROLE_RESPONDER);
 				if (io) {
 					/* Save plogi parameters */
 					ocs_node_save_sparms(node, buf);
-					ocs_send_ls_rsp_after_attach(io, hdr, OCS_NODE_SEND_LS_RSP_PLOGI);
-					rc = 0;
+					ocs_els_io_update_ls_rsp_params(io, hdr, buf);
+					node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI] = io;
+					rc = 1;
 				}
 				ocs_hal_sequence_free(&node->ocs->hal, frame);
 				return rc;
 			}
+		}
+		frame_printf(node->ocs, (fc_header_t*) frame->header.data, "Discarding held frame\n");
+		if (frame->hio != NULL) {
+			ocs_port_owned_abort(node->ocs, frame->hio);
 		}
 		ocs_hal_sequence_free(&node->ocs->hal, frame);
 	}
@@ -892,6 +953,8 @@ __ocs_node_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(ocs_node_active_ios_empty(node), NULL);
 		ocs_assert(ocs_els_io_list_empty(node, &node->els_io_active_list), NULL);
 
+		ocs_node_send_pending_logo_prlo_acc(node);	
+
 		/* by default, we will be freeing node after we unwind */
 		node->req_free = 1;
 
@@ -904,6 +967,7 @@ __ocs_node_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		switch (shutdown_reason) {
 		case OCS_NODE_SHUTDOWN_IMPLICIT_LOGO:
 restart_node_attach:
+			ocs_node_remove_shutdown_list(node);
 			//sm: if shutdown reason is implicit logout / ocs_node_attach
 			/* Node shutdown b/c of PLOGI received when node already
 			 * logged in. We have PLOGI service parameters, so submit
@@ -913,7 +977,7 @@ restart_node_attach:
 			/* currently, only case for implicit logo is PLOGI recvd. Thus,
 			 * node's ELS IO pending list won't be empty (PLOGI will be on it)
 			 */
-			ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PLOGI, NULL);
+			ocs_assert(node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI], NULL);
 			node_printf(node, "Shutdown reason: implicit logout, re-authenticate\n");
 
 			/* Check and allocate an RPI before re-attaching the node */
@@ -926,30 +990,35 @@ restart_node_attach:
 
 			ocs_scsi_io_alloc_enable(node);
 
+			/* Flush should not have been triggered on this node */
+			ocs_assert(!node->async_flush_state, NULL);
+
 			/* Re-attach node with the same HAL node resources */
 			node->req_free = 0;
 			node->unreg_rpi = FALSE;
 			node->mark_for_deletion = FALSE;
 
+			node->explicit_logout_retries = 0;
 			node->prli_rsp_pend = 0;
+			node->sess_attach_pend = 0;
 			node->ini_fct_prli_success = 0;
 			node->tgt_fct_prli_success = 0;
+			node->remote_nvme_prli_rcvd = FALSE;
+			node->remote_fcp_prli_rcvd = FALSE;
 
 			rc = ocs_node_attach(node);
 			ocs_node_transition(node, __ocs_d_wait_node_attach, NULL);
 			if (rc == OCS_HAL_RTN_SUCCESS_SYNC) {
 				ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_OK, NULL);
+			} else if (rc != OCS_HAL_RTN_SUCCESS) {
+				ocs_node_post_event(node, OCS_EVT_NODE_ATTACH_FAIL, NULL);
 			}
 			break;
 		case OCS_NODE_SHUTDOWN_EXPLICIT_LOGO: {
 			int8_t pend_frames_empty;
 
-			/* Notify target driver about vport LOGOUT */
-			if (node->sport->is_vport && (node->rnode.fc_id == FC_ADDR_FABRIC))
-				ocs_vport_logout_notify(node);
-
-			/* cleanup any pending LS_ACC ELSs */
-			ocs_node_send_ls_io_cleanup(node);
+			/* Cleanup any pending ls_rsp_io ELS requests */
+			ocs_node_ls_rsp_io_cleanup(node);
 			ocs_assert(ocs_els_io_list_empty(node, &node->els_io_pend_list), NULL);
 
 			ocs_lock(&node->pend_frames_lock);
@@ -964,10 +1033,16 @@ restart_node_attach:
 			node_printf(node, "Shutdown: explicit logo pend=%d sport.ini=%d node.tgt=%d node.nvme_tgt=%d\n",
 				    !pend_frames_empty, node->sport->enable_ini, node->targ, node->nvme_tgt);
 
-			if ((!pend_frames_empty) || (node->sport->enable_ini && (node->targ || node->nvme_tgt))) {
+			if (!pend_frames_empty ||
+			    ((node->explicit_logout_retries < OCS_NODE_MAX_EXPLICIT_LOGO_RETRIES) &&
+			     node->sport->enable_ini)) {
 				uint8_t send_plogi = FALSE;
-				if (node->sport->enable_ini && (node->targ || node->nvme_tgt)) {
-					/* we're an initiator and node shutting down is a target; we'll
+
+				ocs_node_remove_shutdown_list(node);
+				node->explicit_logout_retries++;
+
+				if (node->sport->enable_ini) {
+					/* we're an initiator and remote node is shutting down; we'll
 					 * need to re-authenticate in initial state
 					 */
 					send_plogi = TRUE;
@@ -981,6 +1056,9 @@ restart_node_attach:
 					}
 				}
 
+				/* Flush should not have been triggered on this node */
+				ocs_assert(!node->async_flush_state, NULL);
+
 				/* transition to __ocs_d_init (will retain HAL node resources) */
 				ocs_scsi_io_alloc_enable(node);
 				node->req_free = 0;
@@ -988,8 +1066,11 @@ restart_node_attach:
 				node->mark_for_deletion = FALSE;
 
 				node->prli_rsp_pend = 0;
+				node->sess_attach_pend = 0;
 				node->ini_fct_prli_success = 0;
 				node->tgt_fct_prli_success = 0;
+				node->remote_nvme_prli_rcvd = FALSE;
+				node->remote_fcp_prli_rcvd = FALSE;
 
 				/* either pending frames exist, or we're re-authenticating with PLOGI
 				 * (or both); in either case, return to initial state
@@ -1009,17 +1090,13 @@ restart_node_attach:
 			if (!node->sport->shutting_down && ocs_node_process_plogi_frame(node))
 				goto restart_node_attach;
 
-			/* Notify target driver about vport LOGOUT */
-			if (node->sport->is_vport && (node->rnode.fc_id == FC_ADDR_FABRIC))
-				ocs_vport_logout_notify(node);
-
 			/*
 			 * shutdown due to link down, node going away (xport event) or
 			 * sport shutdown, purge pending and proceed to cleanup node
 			 */
 
-			/* cleanup any pending LS_ACC ELSs */
-			ocs_node_send_ls_io_cleanup(node);
+			/* Cleanup any pending ls_rsp_io ELS requests */
+			ocs_node_ls_rsp_io_cleanup(node);
 			ocs_assert(ocs_els_io_list_empty(node, &node->els_io_pend_list), NULL);
 
 			node_printf(node, "Shutdown reason: default, purge pending\n");
@@ -1090,11 +1167,20 @@ ocs_node_check_els_quiesced(ocs_node_t *node)
 void
 ocs_node_initiate_cleanup(ocs_node_t *node)
 {
+	uint32_t i;
+	bool skip;
 	ocs_io_t *els;
 	ocs_io_t *els_next;
 	ocs_t *ocs;
+	ocs_io_t *ls_rsp_io;
+	ocs_list_t els_pend_list;
+	ocs_ls_rsp_type_e types[] = {OCS_LS_RSP_TYPE_PLOGI, OCS_LS_RSP_TYPE_LOGO,
+				     OCS_LS_RSP_TYPE_NVME_PRLO, OCS_LS_RSP_TYPE_FCP_PRLO};
+
 	ocs_assert(node);
 	ocs = node->ocs;
+
+	ocs_list_init(&els_pend_list, ocs_io_t, pend_link);
 
 	/* cleanup auth FSM of the node */
 	ocs_node_auth_stop(node);
@@ -1102,23 +1188,33 @@ ocs_node_initiate_cleanup(ocs_node_t *node)
 	/* first cleanup ELS's that are pending (not yet active) */
 	ocs_lock(&node->active_ios_lock);
 		ocs_list_foreach_safe(&node->els_io_pend_list, els, els_next) {
+			skip = false;
 
 			/* skip the ELS IO for which a response will be sent after shutdown */
-			if ((node->send_ls_rsp != OCS_NODE_SEND_LS_RSP_NONE) && (els == node->ls_rsp_io))
+			for (i = 0; i < sizeof(types)/sizeof(ocs_ls_rsp_type_e); i++) {
+				if (els == node->ls_rsp_io[types[i]]) {
+					skip = true;
+					break;
+				}
+			}
+
+			if (skip)
 				continue;
 
-			/* can't call ocs_els_io_free() because lock is held; cleanup manually */
-			node_printf(node, "Freeing pending els %s\n", els->display_name);
-			ocs_list_remove(&node->els_io_pend_list, els);
-
-			ocs_dma_free(els->ocs, &els->els_info->els_rsp);
-			ocs_dma_free(els->ocs, &els->els_info->els_req);
-
-			ocs_io_free(node->ocs, els);
+			ocs_list_add_tail(&els_pend_list, els);
 		}
 	ocs_unlock(&node->active_ios_lock);
 
-	if (node->ls_rsp_io && node->ls_rsp_io->hio != NULL) {
+	ocs_list_foreach_safe(&els_pend_list, els, els_next) {
+		ocs_list_remove(&els_pend_list, els);
+		node_printf(node, "Freeing pending els %s\n", els->display_name);
+
+		/* Now free the outstanding els IO */
+		ocs_els_io_free(els);
+	}
+
+	ls_rsp_io = node->ls_rsp_io[OCS_LS_RSP_TYPE_PLOGI];
+	if (ls_rsp_io && ls_rsp_io->hio) {
 		/*
 		 * if there's an IO that will result in an LS_ACC after
 		 * shutdown and its HAL IO is non-NULL, it better be an
@@ -1127,14 +1223,13 @@ ocs_node_initiate_cleanup(ocs_node_t *node)
 		 * since the previous will have been aborted by the UNREG_RPI
 		 */
 		ocs_assert(node->shutdown_reason == OCS_NODE_SHUTDOWN_IMPLICIT_LOGO);
-		ocs_assert(node->send_ls_rsp == OCS_NODE_SEND_LS_RSP_PLOGI);
-		node_printf(node, "invalidating ls_rsp_io due to implicit logo\n");
+		node_printf(node, "Invalidating ls_rsp_io due to implicit logo\n");
 
 		/* No need to abort because the unreg_rpi takes care of it, just free */
-		ocs_hal_io_free(&ocs->hal, node->ls_rsp_io->hio);
+		ocs_hal_io_free(&ocs->hal, ls_rsp_io->hio);
 
 		/* NULL out hio to force the LS_ACC to grab a new XRI */
-		node->ls_rsp_io->hio = NULL;
+		ls_rsp_io->hio = NULL;
 	}
 
 	/*
@@ -1192,15 +1287,11 @@ __ocs_node_wait_els_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:
 	case OCS_EVT_SRRS_ELS_REQ_RJT:
 	case OCS_EVT_ELS_REQ_ABORTED:
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		check_quiesce = TRUE;
 		break;
 
 	case OCS_EVT_SRRS_ELS_CMPL_OK:
 	case OCS_EVT_SRRS_ELS_CMPL_FAIL:
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		check_quiesce = TRUE;
 		break;
 
@@ -1222,7 +1313,7 @@ __ocs_node_wait_els_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
@@ -1291,7 +1382,7 @@ __ocs_node_wait_node_free(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* Fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		node_printf(node, "%s received\n", ocs_sm_event_name(evt));
@@ -1328,7 +1419,7 @@ __ocs_node_wait_ios_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_ENTER:
 		ocs_node_hold_frames(node);
-		/* Fall Through */
+		FALL_THROUGH; /* fall through */
 
 	case OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY:
 	case OCS_EVT_ALL_CHILD_NODES_FREE: {
@@ -1345,15 +1436,13 @@ __ocs_node_wait_ios_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:
 		/* Can happen as ELS IO IO's complete */
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		break;
 
 	/* ignore shutdown events as we're already in shutdown path */
 	case OCS_EVT_SHUTDOWN:
 		/* have default shutdown event take precedence */
 		node->shutdown_reason = OCS_NODE_SHUTDOWN_DEFAULT;
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	case OCS_EVT_SHUTDOWN_EXPLICIT_LOGO:
 	case OCS_EVT_SHUTDOWN_IMPLICIT_LOGO:
 		ocs_log_debug(ocs, "[%s] %-20s\n", node->display_name, ocs_sm_event_name(evt));
@@ -1425,8 +1514,6 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 	 */
 	case OCS_EVT_SRRS_ELS_CMPL_OK:
 	case OCS_EVT_SRRS_ELS_CMPL_FAIL:
-		ocs_assert(node->els_cmpl_cnt, NULL);
-		node->els_cmpl_cnt--;
 		break;
 
 	/* handle any ELS request completions that other states either didn't care about
@@ -1436,8 +1523,6 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 	case OCS_EVT_SRRS_ELS_REQ_FAIL:
 	case OCS_EVT_SRRS_ELS_REQ_RJT:
 	case OCS_EVT_ELS_REQ_ABORTED:
-		ocs_assert(node->els_req_cnt, NULL);
-		node->els_req_cnt--;
 		break;
 
 	case OCS_EVT_ELS_RCVD: {
@@ -1447,18 +1532,31 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 		ocs_log_debug(ocs, "[%s] (%s) ELS x%02x, LS_RJT not supported\n",
 			      node->display_name, funcname, ((uint8_t*)cbdata->payload)[0]);
 		ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
-			FC_REASON_COMMAND_NOT_SUPPORTED, FC_EXPL_NO_ADDITIONAL, 0,
-			NULL, NULL);
+				FC_REASON_COMMAND_NOT_SUPPORTED, FC_EXPL_NO_ADDITIONAL, 0,
+				NULL, NULL);
 		break;
 	}
 
+	case OCS_EVT_LCB_RCVD:
 	case OCS_EVT_AUTH_RCVD: {
 		fc_header_t *hdr = cbdata->header;
+
 		ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
 				FC_REASON_UNABLE_TO_PERFORM,
 				FC_EXPL_NPORT_LOGIN_REQUIRED, 0, NULL, NULL);
 		break;
 	}
+
+	case OCS_EVT_RRQ_RCVD: {
+		fc_header_t *hdr = cbdata->header;
+
+		/* Send LS_ACC */
+		ocs_log_debug(ocs, "[%s] (%s) %s sending ELS_ACC\n",
+			      node->display_name, funcname, ocs_sm_event_name(evt));
+		ocs_send_ls_acc(cbdata->io, ocs_be16toh(hdr->ox_id), NULL, NULL);
+		break;
+	}
+
 	case OCS_EVT_PLOGI_RCVD:
 	case OCS_EVT_FLOGI_RCVD:
 	case OCS_EVT_LOGO_RCVD:
@@ -1469,41 +1567,47 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 	case OCS_EVT_ADISC_RCVD:
 	case OCS_EVT_SCR_RCVD: {
 		fc_header_t *hdr = cbdata->header;
+
 		//sm: / send ELS_RJT
 		ocs_log_debug(ocs, "[%s] (%s) %s sending ELS_RJT\n",
 			      node->display_name, funcname, ocs_sm_event_name(evt));
 		/* if we didn't catch this in a state, send generic LS_RJT */
 		ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id),
-			FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
-			NULL, NULL);
-
+				FC_REASON_UNABLE_TO_PERFORM, FC_EXPL_NO_ADDITIONAL, 0,
+				NULL, NULL);
 		break;
 	}
 
-	case OCS_EVT_RDP_RCVD: {
+	case OCS_EVT_RDP_RCVD:
 		ocs_send_rdp_resp(node, arg, OCS_RDP_RJT);
 		break;
-	}
+
 	case OCS_EVT_GID_FT_RCVD:
 	case OCS_EVT_GID_PT_RCVD:
 	case OCS_EVT_RFT_ID_RCVD:
 	case OCS_EVT_RFF_ID_RCVD:
 	case OCS_EVT_CT_LOOPBACK_RCVD_NO_IO: {
 		fc_header_t *hdr = cbdata->header;
+
 		ocs_log_debug(ocs, "[%s] (%s) %s sending CT_REJECT\n",
 			      node->display_name, funcname, ocs_sm_event_name(evt));
-		ocs_send_ct_rsp(cbdata->io, hdr->ox_id, cbdata->payload, FCCT_HDR_CMDRSP_REJECT, FCCT_COMMAND_NOT_SUPPORTED, 0);
+		ocs_send_ct_rsp(cbdata->io, hdr->ox_id, cbdata->payload,
+				FCCT_HDR_CMDRSP_REJECT, FCCT_COMMAND_NOT_SUPPORTED, 0);
 		break;
 	}
+
 	case OCS_EVT_CT_LOOPBACK_RCVD: {
 		fc_header_t *hdr = cbdata->header;
+
 		ocs_log_debug(ocs, "[%s] (%s) %s sending CT_ACCEPT\n",
 			      node->display_name, funcname, ocs_sm_event_name(evt));
 		ocs_send_ct_rsp(cbdata->io, hdr->ox_id, cbdata->payload, FCCT_HDR_CMDRSP_ACCEPT, 0, 0);
 		break;
 	}
+
 	case OCS_EVT_ABTS_RCVD: {
 		fc_header_t *hdr = cbdata->header;
+
 		ocs_log_debug(ocs, "[%s] (%s) %s sending BA_ACC\n",
 			      node->display_name, funcname, ocs_sm_event_name(evt));
 
@@ -1511,6 +1615,14 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 		ocs_bls_send_acc_hdr(cbdata->io, hdr);
 		break;
 	}
+
+	case OCS_EVT_ABTS_FLUSH_COMPLETE: {
+		node_printf(node, "rq flush completed, processing ABTS\n");
+		cbdata->flush_rqs_completed = true;
+		ocs_process_abts(node, cbdata);
+		break;
+	}
+
 	case OCS_EVT_NODE_LAST_ACTIVE_IO: {
 		int send_empty_event;
 
@@ -1521,24 +1633,91 @@ __ocs_node_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, v
 
 		if (send_empty_event)
 			ocs_node_post_event(node, OCS_EVT_NODE_ACTIVE_IO_LIST_EMPTY, NULL);
+
 		break;
 	}
+
 	case OCS_EVT_TOW_DATA_RCVD: {
 		ocs_node_cb_t *cbdata = arg;
 		ocs_io_t *io = cbdata->io;
+
 		/*
 		 * Expected to get this event when node is being shutdown.
 		 * Free the corresponding TOW IO.
 		 */
 		ocs_scsi_io_free(io);
-
 		break;
 	}
+
+	case OCS_EVT_NODE_TDZ_CMD: {
+		ocs_tdz_cmd_args_t *cmd_args = arg;
+		ocs_tdz_rsp_info_t *rsp;
+
+		ocs_assert(cmd_args, NULL);
+		ocs_assert(cmd_args->cb_arg, NULL);
+
+		node_printf(node, "Received TDZ command; sending failure status\n");
+		rsp = cmd_args->cb_arg;
+		rsp->status = -1;
+		cmd_args->cb(node, NULL, cmd_args->cb_arg);
+		break;
+	}
+
+	case OCS_EVT_NODE_FDMI_GET_CMD: {
+		ocs_fdmi_get_cmd_args_t *cmd_args = arg;
+		ocs_fdmi_get_cmd_results_t *result;
+
+		ocs_assert(cmd_args, NULL);
+		ocs_assert(cmd_args->cb_arg, NULL);
+
+		node_printf(node, "Received FDMI command; sending failure status\n");
+		result = cmd_args->cb_arg;
+		result->status = -1;
+		cmd_args->cb(node, NULL, cmd_args->cb_arg);
+		break;
+	}
+
+	case OCS_EVT_SEND_FPIN: {
+		ocs_sport_exec_arg_t *sport_exec_args = arg;
+
+		ocs_assert(sport_exec_args, NULL);
+		node_printf_err(node, "can't send FPIN Link event\n");
+		sport_exec_args->retval = -1;
+		sport_exec_args->exec_cb(node->sport, arg);
+		break;
+	}
+
+	case OCS_EVT_NODE_FLUSH_COMPLETE: {
+		node_printf(node, "node async flush completed \n");
+		node->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+		break;
+	}
+
+	case OCS_EVT_FLUSH_BLS_RCVD: {
+		node_printf(node, "FLUSH BLS not handled\n");
+		break;
+	}
+
+	case OCS_EVT_NODE_GANXT_GET_CMD: {
+		ocs_ganxt_get_cmd_args_t *cmd_args = arg;
+		ocs_ganxt_get_cmd_results_t *result;
+
+		ocs_assert(cmd_args, NULL);
+		ocs_assert(cmd_args->cb_arg, NULL);
+
+		node_printf(node, "Received GANXT command; return failure status\n");
+		result = cmd_args->cb_arg;
+		result->status = -1;
+		cmd_args->cb(node, NULL, cmd_args->cb_arg);
+		break;
+	}
+
 	default:
 		ocs_log_test(node->ocs, "[%s] %-20s %-20s not handled\n", node->display_name, funcname,
-			ocs_sm_event_name(evt));
+			     ocs_sm_event_name(evt));
 		break;
 	}
+
 	return NULL;
 }
 
@@ -1569,6 +1748,24 @@ ocs_node_save_sparms(ocs_node_t *node, void *payload)
 		node->suppress_rsp = ocs_be32toh(plogi->vendor_version_level[1]);
 }
 
+static void ocs_node_flush_callback(void *arg)
+{
+	ocs_node_t *node = arg;
+	ocs_sport_t *sport = node->sport;
+
+	/* Take ref count on sport and release it after posting node event */
+	if (!ocs_ref_get_unless_zero(&sport->ref)) {
+		ocs_log_err(node->ocs, "Sport is not active\n");
+		ocs_assert(NULL);
+	}
+
+	ocs_sport_lock(sport);
+	ocs_node_post_event(node, OCS_EVT_NODE_FLUSH_COMPLETE, NULL);
+	ocs_sport_unlock(sport);
+
+	ocs_ref_put(&sport->ref);
+}
+
 /**
  * @ingroup node_common
  * @brief Post event to node state machine context
@@ -1587,7 +1784,7 @@ ocs_node_save_sparms(ocs_node_t *node, void *payload)
 void
 ocs_node_post_event(ocs_node_t *node, ocs_sm_event_t evt, void *arg)
 {
-	int free_node = FALSE;
+	bool remove_lookup = FALSE, flush_completed = FALSE;
 	ocs_assert(node);
 
 	ocs_node_lock(node);
@@ -1605,16 +1802,35 @@ ocs_node_post_event(ocs_node_t *node, ocs_sm_event_t evt, void *arg)
 		node->evtdepth --;
 
 		/* Free the node object if so requested, and we're at an event
-		 * call depth of zero
+		 * call depth of zero.
 		 */
-		if ((node->evtdepth == 0) && node->req_free) {
-			free_node = TRUE;
+		if (node->evtdepth == 0 && node->req_free && !node->async_flush_state) {
+			/* Start the node flushing outside node lock and remove lookup */
+			node->async_flush_state = OCS_ASYNC_FLUSH_START;
+			remove_lookup = TRUE;
+		} else if (node->evtdepth == 0 && node->async_flush_state == OCS_ASYNC_FLUSH_COMPLETE) {
+			flush_completed = TRUE;
 		}
+
 	ocs_node_unlock(node);
 
-	if (free_node) {
-		ocs_node_free(node);
+	/* Remove the lookup if flush was triggered */
+	if (remove_lookup) {
+		ocs_node_remove_lookup(node);
+
+		/* Post marker WQE to initiate flush. */
+		if (ocs_hal_rq_marker_gen_req(&node->ocs->hal, SLI4_RQ_MARKER_CATEGORY_ALL,
+					ocs_node_flush_callback,
+					(void *) node) != 0) {
+			/* Could not trigger flush, free the node */
+			node->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+			flush_completed = TRUE;
+		}
 	}
+
+	/* Free the node only if flush is completed */
+	if (flush_completed)
+		ocs_node_free(node);
 
 	return;
 }
@@ -1743,9 +1959,8 @@ ocs_ddump_node(ocs_textbuf_t *textbuf, ocs_node_t *node)
 	ocs_ddump_value(textbuf, "hold_frames", "%d", node->hold_frames);
 	ocs_ddump_value(textbuf, "io_alloc_enabled", "%d", node->io_alloc_enabled);
 	ocs_ddump_value(textbuf, "shutdown_reason", "%d", node->shutdown_reason);
-	ocs_ddump_value(textbuf, "send_ls_rsp", "%d", node->send_ls_rsp);
-	ocs_ddump_value(textbuf, "ls_rsp_did", "%d", node->ls_rsp_did);
-	ocs_ddump_value(textbuf, "ls_rsp_oxid", "%#04x", node->ls_rsp_oxid);
+	ocs_ddump_value(textbuf, "async_flush_state", "%d", node->async_flush_state);
+
 	ocs_ddump_value(textbuf, "req_free", "%d", node->req_free);
 	ocs_ddump_value(textbuf, "els_req_cnt", "%d", node->els_req_cnt);
 	ocs_ddump_value(textbuf, "els_cmpl_cnt", "%d", node->els_cmpl_cnt);
@@ -1755,6 +1970,7 @@ ocs_ddump_node(ocs_textbuf_t *textbuf, ocs_node_t *node)
 	ocs_ddump_value(textbuf, "wwnn", "%s", node->wwnn);
 	ocs_ddump_value(textbuf, "wwpn", "%s", node->wwpn);
 	ocs_ddump_value(textbuf, "login_state", "%d", (node->sm.current_state == __ocs_d_device_ready) ? 1 : 0);
+	ocs_ddump_value(textbuf, "nsler_negotiated", "%d", ocs_node_nsler_negotiated(node));
 	ocs_ddump_value(textbuf, "chained_io_count", "%d", node->chained_io_count);
 	ocs_ddump_value(textbuf, "abort_cnt", "%d", node->abort_cnt);
 
@@ -1923,6 +2139,7 @@ node_check_ct_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	return rc;
 }
+
 void
 ocs_mgmt_node_list(ocs_textbuf_t *textbuf, void *object)
 {
@@ -1946,6 +2163,7 @@ ocs_mgmt_node_list(ocs_textbuf_t *textbuf, void *object)
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "init");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "wwpn");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "wwnn");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "nsler_negotiated");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "pend_frames");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "chained_io_count");
 
@@ -2001,12 +2219,6 @@ ocs_mgmt_node_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *object
 		} else if (ocs_strcmp(unqualified_name, "req_free") == 0) {
 			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "req_free", node->req_free);
 			retval = 0;
-		} else if (ocs_strcmp(unqualified_name, "ls_rsp_oxid") == 0) {
-			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ls_rsp_oxid", "0x%#04x", node->ls_rsp_oxid);
-			retval = 0;
-		} else if (ocs_strcmp(unqualified_name, "ls_rsp_did") == 0) {
-			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ls_rsp_did", "0x%#04x", node->ls_rsp_did);
-			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "abort_cnt") == 0) {
 			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "abort_cnt", "%d", node->abort_cnt);
 			retval = 0;
@@ -2021,6 +2233,9 @@ ocs_mgmt_node_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *object
 			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "wwnn") == 0) {
 			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "wwnn", "%s", node->wwnn);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "nsler_negotiated") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "nsler_negotiated", "%d", ocs_node_nsler_negotiated(node));
 			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "current_state") == 0) {
 			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "current_state", node->current_state_name);
@@ -2083,13 +2298,12 @@ ocs_mgmt_node_get_all(ocs_textbuf_t *textbuf, void *object)
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "hold_frames", node->hold_frames);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "io_alloc_enabled", node->io_alloc_enabled);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "req_free", node->req_free);
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ls_rsp_oxid", "0x%#04x", node->ls_rsp_oxid);
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ls_rsp_did", "0x%#04x", node->ls_rsp_did);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "abort_cnt", "%d", node->abort_cnt);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "targ",  node->targ);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "init",  node->init);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "wwpn", "%s", node->wwpn);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "wwnn", "%s", node->wwnn);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "nsler_negotiated", "%d", ocs_node_nsler_negotiated(node));
 
 	ocs_lock(&node->pend_frames_lock);
 	ocs_list_foreach(&node->pend_frames, frame) {
@@ -2327,33 +2541,40 @@ ocs_node_recv_els_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	} els_cmd_list[] = {
 		{FC_ELS_CMD_PLOGI,	OCS_EVT_PLOGI_RCVD, 	sizeof(fc_plogi_payload_t)},
 		{FC_ELS_CMD_FLOGI,	OCS_EVT_FLOGI_RCVD, 	sizeof(fc_plogi_payload_t)},
-		{FC_ELS_CMD_LOGO,	OCS_EVT_LOGO_RCVD, 	sizeof(fc_acc_payload_t)},
-		{FC_ELS_CMD_RRQ,	OCS_EVT_RRQ_RCVD, 	sizeof(fc_acc_payload_t)},
+		{FC_ELS_CMD_LOGO,	OCS_EVT_LOGO_RCVD, 	sizeof(fc_ls_acc_payload_t)},
+		{FC_ELS_CMD_RRQ,	OCS_EVT_RRQ_RCVD, 	sizeof(fc_ls_acc_payload_t)},
 		{FC_ELS_CMD_RDP,	OCS_EVT_RDP_RCVD, 	sizeof(fc_rdp_res_frame_t)},
 		{FC_ELS_CMD_PRLI, 	OCS_EVT_PRLI_RCVD, 	sizeof(fc_prli_payload_t)},
 		{FC_ELS_CMD_PRLO, 	OCS_EVT_PRLO_RCVD, 	sizeof(fc_prlo_payload_t)},
-		{FC_ELS_CMD_PDISC, 	OCS_EVT_PDISC_RCVD, 	MAX_ACC_REJECT_PAYLOAD},
-		{FC_ELS_CMD_FDISC, 	OCS_EVT_FDISC_RCVD, 	MAX_ACC_REJECT_PAYLOAD},
+		{FC_ELS_CMD_PDISC, 	OCS_EVT_PDISC_RCVD, 	MAX_LS_ACC_RJT_PAYLOAD},
+		{FC_ELS_CMD_FDISC, 	OCS_EVT_FDISC_RCVD, 	MAX_LS_ACC_RJT_PAYLOAD},
 		{FC_ELS_CMD_ADISC, 	OCS_EVT_ADISC_RCVD, 	sizeof(fc_adisc_payload_t)},
-		{FC_ELS_CMD_RSCN, 	OCS_EVT_RSCN_RCVD, 	MAX_ACC_REJECT_PAYLOAD},
-		{FC_ELS_CMD_SCR	, 	OCS_EVT_SCR_RCVD, 	MAX_ACC_REJECT_PAYLOAD},
-		{FC_ELS_CMD_AUTH, 	OCS_EVT_AUTH_RCVD, 	MAX_ACC_REJECT_PAYLOAD},
+		{FC_ELS_CMD_RSCN, 	OCS_EVT_RSCN_RCVD, 	MAX_LS_ACC_RJT_PAYLOAD},
+		{FC_ELS_CMD_SCR	, 	OCS_EVT_SCR_RCVD, 	MAX_LS_ACC_RJT_PAYLOAD},
+		{FC_ELS_CMD_LCB, 	OCS_EVT_LCB_RCVD, 	sizeof(fc_lcb_payload_t)},
+		{FC_ELS_CMD_AUTH, 	OCS_EVT_AUTH_RCVD, 	MAX_LS_ACC_RJT_PAYLOAD},
 	};
 	ocs_t *ocs = node->ocs;
 	ocs_node_cb_t cbdata;
 	fc_header_t *hdr;
 	uint8_t *buf;
 	ocs_sm_event_t evt = OCS_EVT_ELS_RCVD;
-	uint32_t payload_size = MAX_ACC_REJECT_PAYLOAD;
+	uint32_t payload_size = MAX_LS_ACC_RJT_PAYLOAD;
 	uint32_t i;
 
 	hdr = (fc_header_t *)seq->header.data;
 	buf = seq->payload.data;
-	cbdata.payload_len = seq->payload.data_len;
 
 	ocs_memset(&cbdata, 0, sizeof(cbdata));
 	cbdata.header = hdr;
 	cbdata.payload = buf;
+	cbdata.payload_len = seq->payload.data_len;
+
+	/* No need to respond back to switch for FPIN notification */
+	if (FC_ELS_CMD_FPIN == buf[0]) {
+		ocs_node_post_event(node, OCS_EVT_FPIN_RCVD, &cbdata);
+		goto out;
+	}
 
 	/* find a matching event for the ELS command */
 	for (i = 0; i < ARRAY_SIZE(els_cmd_list); i ++) {
@@ -2375,7 +2596,7 @@ ocs_node_recv_els_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	}
 
 	/* Update FCP control requests */
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 	percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.control_requests, 1);
 #else
 	ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.control_requests, 1);
@@ -2391,44 +2612,82 @@ ocs_node_recv_els_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	case OCS_EVT_PLOGI_RCVD: {
 		fc_plogi_payload_t *sp = (fc_plogi_payload_t *)buf;
 
-		ocs_log_info(ocs, "ELS PLOGI (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
+		node_printf(node, "ELS PLOGI (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
 			     FC_ELS_CMD_PLOGI, ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id),
 			     (((uint64_t)ocs_be32toh(sp->port_name_hi) << 32ll) | (ocs_be32toh(sp->port_name_lo))));
 		ocs_display_sparams(node->display_name, "plogi rcvd req", 0, NULL, ((uint8_t *)buf) + 4);
 		break;
 	}
-	case OCS_EVT_PRLI_RCVD:
-		ocs_log_info(ocs, "ELS PRLI (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
-			     FC_ELS_CMD_PRLI, ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id), ocs_node_get_wwpn(node));
+	case OCS_EVT_PDISC_RCVD: {
+		fc_plogi_payload_t *sp = (fc_plogi_payload_t *)buf;
+
+		node_printf(node, "ELS PDISC (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
+			     FC_ELS_CMD_PDISC, ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id),
+			     (((uint64_t)ocs_be32toh(sp->port_name_hi) << 32ll) | (ocs_be32toh(sp->port_name_lo))));
+		ocs_display_sparams(node->display_name, "pdisc rcvd req", 0, NULL, ((uint8_t *)buf) + 4);
 		break;
+	}
+	case OCS_EVT_PRLI_RCVD: {
+		fc_prli_payload_t *prli = (fc_prli_payload_t *)buf;
+
+		node_printf(node, "ELS %s PRLI (0x%x) REQ rcvd; OX_ID: %04x, " \
+			     "S_ID: %06x, WWPN: %016" PRIX64", flags: %04x, sparams: %04x\n",
+			     ((FC_TYPE_NVME == prli->type) ? "NVMe" : "FCP"), FC_ELS_CMD_PRLI,
+			     ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id), ocs_node_get_wwpn(node),
+			     ocs_be16toh(prli->flags), ocs_be16toh(prli->service_params));
+		break;
+	}
+	case OCS_EVT_RSCN_RCVD: {
+		fc_rscn_payload_t *rscn = (fc_rscn_payload_t *)buf;
+		fc_rscn_affected_port_id_page_t *port_id_page = NULL;
+		uint32_t port_list_count = ((ocs_be16toh(rscn->payload_length) / rscn->page_length) - 1);
+		uint32_t offset = 0;
+
+		/* Check if this is a Peer-Zone RSCN */
+		while (port_list_count) {
+			port_id_page = (fc_rscn_affected_port_id_page_t *)(((uint8_t *)&rscn->port_list[0]) + offset);
+			if (FC_RSCN_EVT_QUAL_PEER_ZONE == port_id_page->rscn_event_qualifier) {
+				node_printf(node, "ELS Peer-Zone RSCN (0x%x) rcvd; addr_format: %x, port_id: %06x\n",
+					     FC_ELS_CMD_RSCN, port_id_page->address_format,
+					     fc_be24toh(port_id_page->port_id));
+				ocs_notify_peer_zone_rscn(ocs, fc_be24toh(port_id_page->port_id));
+			}
+
+			offset += rscn->page_length;
+			port_list_count--;
+		}
+
+		break;
+	}
 	case OCS_EVT_RDP_RCVD:
-		ocs_log_info(ocs, "ELS RDP (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
+		node_printf(node, "ELS RDP (0x%x) REQ rcvd; OX_ID: %04x, S_ID: %06x, WWPN: %016" PRIX64"\n",
 			     FC_ELS_CMD_RDP, ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id), ocs_node_get_wwpn(node));
 
-		/* First get required RDP data from FW,
-		 * send RDP ELS response from completion*/
+		/* Get all the required RDP data from FW before sending the RDP ELS response */
 		ocs_rdp_defer_response(ocs, hdr, seq->fcfi);
 		ocs_hal_sequence_free(&ocs->hal, seq);
 		return 0;
-	case OCS_EVT_AUTH_RCVD:
-		ocs_log_debug(ocs, "ELS AUTH rcvd\n");
-		break;
 	default:
+		node_printf(node, "Processing %s; OX_ID: %04x, S_ID: %06x\n",
+			    ocs_sm_event_name(evt), ocs_be16toh(hdr->ox_id), fc_be24toh(hdr->s_id));
 		break;
 	}
 
 	cbdata.io = ocs_els_io_alloc(node, payload_size, OCS_ELS_ROLE_RESPONDER);
 	if (cbdata.io != NULL) {
-		cbdata.io->hal_priv = seq->hal_priv;
 		/* if we're here, sequence initiative has been transferred */
 		cbdata.io->seq_init = 1;
-
+		cbdata.io->hal_priv = seq->hal_priv;
+		ocs_els_io_update_ls_rsp_params(cbdata.io, cbdata.header, cbdata.payload);
 		ocs_node_post_event(node, evt, &cbdata);
 	} else {
-		node_printf(node, "failure to allocate SCSI IO for ELS s_id %06x d_id %06x ox_id %04x rx_id %04x\n",
-			    fc_be24toh(hdr->s_id), fc_be24toh(hdr->d_id), ocs_be16toh(hdr->ox_id), ocs_be16toh(hdr->rx_id));
+		node_printf_ratelimited(node, "failure to allocate SCSI IO for ELS s_id %06x "
+				"d_id %06x ox_id %04x rx_id %04x\n",
+				fc_be24toh(hdr->s_id), fc_be24toh(hdr->d_id), ocs_be16toh(hdr->ox_id),
+				ocs_be16toh(hdr->rx_id));
 	}
 
+out:
 	ocs_hal_sequence_free(&ocs->hal, seq);
 	return 0;
 }
@@ -2462,7 +2721,6 @@ ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 	hdr = (fc_header_t *)seq->header.data;
 	buf = seq->payload.data;
-	cbdata.payload_len = seq->payload.data_len;
 
 	ox_id = ocs_be16toh(hdr->ox_id);
 	rx_id = ocs_be16toh(hdr->rx_id);
@@ -2470,29 +2728,33 @@ ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	ocs_memset(&cbdata, 0, sizeof(cbdata));
 	cbdata.header = hdr;
 	cbdata.payload = buf;
-	cbdata.io = ocs_scsi_io_alloc(node, OCS_SCSI_IO_ROLE_RESPONDER);
-	if (!cbdata.io) {
-		ocs_atomic_add_return(&xport->io_alloc_failed_count, 1);
-		node_printf(node, "SCSI IO allocation failed for ABTS received "\
-			    "s_id %06x d_id %06x ox_id %04x rx_id %04x\n",
-			    fc_be24toh(hdr->s_id), fc_be24toh(hdr->d_id), ox_id, rx_id);
-		goto exit;
-	}
-
-	cbdata.io->hal_priv = seq->hal_priv;
-	cbdata.io->ocs = ocs;
-	cbdata.io->node = node;
-	cbdata.io->cmd_tgt = true;
+	cbdata.payload_len = seq->payload.data_len;
+	cbdata.node = node;
 
 	sit = fc_be24toh(hdr->f_ctl) & FC_FCTL_SEQUENCE_INITIATIVE;
 	switch(hdr->info) {
 	case FC_RCTL_BLS_INFO_ABTS:
 		if (sit) {
+			cbdata.io = ocs_scsi_io_alloc(node, OCS_SCSI_IO_ROLE_RESPONDER,
+					ocs_hal_get_eq_idx(seq));
+			if (!cbdata.io) {
+				ocs_atomic_add_return(&xport->io_alloc_failed_count, 1);
+				node_printf_ratelimited(node, "SCSI IO allocation failed for ABTS received "\
+						"s_id %06x d_id %06x ox_id %04x rx_id %04x\n",
+						fc_be24toh(hdr->s_id), fc_be24toh(hdr->d_id), ox_id, rx_id);
+				goto exit;
+			}
+
+			cbdata.io->hal_priv = seq->hal_priv;
+			cbdata.io->ocs = ocs;
+			cbdata.io->node = node;
+			cbdata.io->cmd_tgt = true;
+
 			cbdata.io->seq_init = true;
 			node->abort_cnt++;
 			ocs_node_post_event(node, OCS_EVT_ABTS_RCVD, &cbdata);
 		} else {
-			node_printf(node, "Drop ABTS no-SIT frame hdr = %08x %08x %08x %08x %08x %08x\n",
+			node_printf_ratelimited(node, "Drop ABTS no-SIT frame hdr = %08x %08x %08x %08x %08x %08x\n",
 				    ocs_htobe32(((uint32_t *)hdr)[0]),
 				    ocs_htobe32(((uint32_t *)hdr)[1]),
 				    ocs_htobe32(((uint32_t *)hdr)[2]),
@@ -2504,8 +2766,11 @@ ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	case FC_RCTL_BLS_INFO_FLUSH:
 		ocs_node_post_event(node, OCS_EVT_FLUSH_BLS_RCVD, &cbdata);
 		break;
+	case FC_RCTL_BLS_INFO_BA_ACC:
+	case FC_RCTL_BLS_INFO_BA_RJT:
+		break;
 	default:
-		node_printf(node, "Drop unknown BLS frame hdr = %08x %08x %08x %08x %08x %08x\n",
+		node_printf_ratelimited(node, "Drop unknown BLS frame hdr = %08x %08x %08x %08x %08x %08x\n",
 			    ocs_htobe32(((uint32_t *)hdr)[0]),
 			    ocs_htobe32(((uint32_t *)hdr)[1]),
 			    ocs_htobe32(((uint32_t *)hdr)[2]),
@@ -2514,7 +2779,6 @@ ocs_node_recv_bls_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 			    ocs_htobe32(((uint32_t *)hdr)[5]));
 		break;
 	}
-
 exit:
 	ocs_hal_sequence_free(&ocs->hal, seq);
 	return 0;
@@ -2545,7 +2809,7 @@ ocs_node_recv_ct_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	fcct_iu_header_t *iu = seq->payload.data;
 
 	ocs_sm_event_t evt = OCS_EVT_ELS_RCVD;
-	uint32_t payload_size = MAX_ACC_REJECT_PAYLOAD;
+	uint32_t payload_size = MAX_LS_ACC_RJT_PAYLOAD;
 	uint16_t gscmd = ocs_be16toh(iu->cmd_rsp_code);
 	uint16_t gstype = iu->gs_type;
 	ocs_node_cb_t cbdata;
@@ -2580,7 +2844,6 @@ ocs_node_recv_ct_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 
 	if (gstype == FC_GS_TYPE_LOOPBACK) {
 		ocs_io_t *els_loopback_io = NULL;
-
 		uint16_t ox_id = ocs_be16toh(hdr->ox_id);
 
 		els_loopback_io = ocs_io_find_init_els_io(ocs, node, ox_id);
@@ -2592,7 +2855,6 @@ ocs_node_recv_ct_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 					   ((uint8_t *)iu + sizeof(fcct_iu_header_t)),
 					   els_loopback_io->els_info->loopback_evt_data.loopback_rx_data_len);
 			}
-			ocs_sem_v(&els_loopback_io->els_info->loopback_evt_data.wait_io_sem);
 			evt = OCS_EVT_CT_LOOPBACK_RCVD;
 		} else {
 			ocs_log_err(node->ocs, "Unable to find loopback originator IO\n");
@@ -2610,7 +2872,7 @@ ocs_node_recv_ct_frame(ocs_node_t *node, ocs_hal_sequence_t *seq)
 	}
 
 	/* Update FCP control requests */
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 	percpu_counter_add(&ocs->xport->fc_stats.stats.fcp_stats.control_requests, 1);
 #else
 	ocs_atomic_add_return(&ocs->xport->fc_stats.stats.fcp_stats.control_requests, 1);
@@ -2719,7 +2981,7 @@ ocs_node_is_remote_node(ocs_remote_node_t *rnode)
  * @return Returns 0 if frame processed and RX buffers cleaned
  * up appropriately, -1 if frame not handled.
  */
-int32_t 
+int32_t
 ocs_node_recv_tow_data(ocs_node_t *node, ocs_hal_sequence_t *seq)
 {
 	ocs_node_cb_t cbdata;

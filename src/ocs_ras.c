@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -259,7 +261,7 @@ ocs_ras_alloc_dma_buffers(ocs_t *ocs, ocs_ras_adapter_desc_t *adapter_desc)
 	int32_t rc;
 	int32_t buf_count;
 
-	rc = ocs_dma_alloc(ocs, &adapter_desc->lwpd_buffer, 64, 8);
+	rc = ocs_dma_alloc(ocs, &adapter_desc->lwpd_buffer, 64, 8, OCS_M_FLAGS_NONE);
 	if (rc)
 		return rc;
 
@@ -267,7 +269,8 @@ ocs_ras_alloc_dma_buffers(ocs_t *ocs, ocs_ras_adapter_desc_t *adapter_desc)
 
 	buf_count =  adapter_desc->log_buf_size / adapter_desc->buf_unit_size;
 	for (i = 0; i < buf_count; i++) {
-		rc = ocs_dma_alloc(ocs, &adapter_desc->buffers[i], adapter_desc->buf_unit_size, 4096);
+		rc = ocs_dma_alloc(ocs, &adapter_desc->buffers[i], adapter_desc->buf_unit_size,
+				   4096, OCS_M_FLAGS_NONE);
 		if (rc)
 			return rc;
 
@@ -403,7 +406,7 @@ ocs_ras_init(uint32_t fw_log_level, uint32_t log_buf_size)
 	ocs_ras_subsystem_g.log_buf_size = log_buf_size;
 	ocs_ras_subsystem_g.fw_log_level = fw_log_level;
 	ocs_ras_subsystem_g.num_adapters = 0;
-	ocs_lock_init(NULL, &ocs_ras_subsystem_g.lock, "ras diag logging lock");
+	ocs_lock_init(NULL, &ocs_ras_subsystem_g.lock, OCS_LOCK_ORDER_IGNORE, "ras diag logging lock");
 	ocs_list_init(&ocs_ras_subsystem_g.adapter_list, ocs_ras_adapter_desc_t, link);
 	ocs_ras_subsystem_g.init_done = OCS_RAS_MOD_INIT_DONE;
 }

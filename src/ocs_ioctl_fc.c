@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -114,7 +116,8 @@ ocs_device_ioctl_xport(ocs_t *ocs, unsigned int cmd, unsigned long arg)
 			rc = ocs_sport_vport_new(domain, req->wwpn, req->wwnn, port_id, req->enable_ini,
 				req->enable_tgt, NULL, NULL, TRUE);
 		} else {
-			rc = ocs_sport_vport_del(ocs, domain, req->wwpn, req->wwnn, true);
+			rc = ocs_xport_control(ocs->xport, OCS_XPORT_POST_VPORT_SHUTDOWN,
+					req->wwpn, req->wwnn, req->domain_index, true);
 		}
 
 		if (ocs_ioctl_postprocess(ocs, (void*) arg, req, sizeof(*req))) {

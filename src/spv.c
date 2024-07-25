@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -174,8 +176,15 @@ spv_new(ocs_os_handle_t os)
 {
 	sparse_vector_t spv;
 	uint32_t i;
+	uint32_t flags = OCS_M_ZERO;
 
-	spv = ocs_malloc(os, sizeof(*spv), OCS_M_ZERO);
+#if !defined(OCS_USPACE)
+	ocs_os_t *ocs_os = os;
+	if (ocs_os->hw_cmpl_context != OCS_HW_CMPL_CONTEXT_THREAD)
+		flags |= OCS_M_NOWAIT;
+#endif
+
+	spv = ocs_malloc(os, sizeof(*spv), flags);
 	if (!spv) {
 		return NULL;
 	}

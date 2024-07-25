@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -38,10 +40,8 @@
 
 #ifndef _OCSU_IOCTL_H
 #define _OCSU_IOCTL_H
-
 extern void *ocs_ioctl_preprocess(ocs_t *ocs, void *arg, size_t size);
 extern int32_t ocs_ioctl_postprocess(ocs_t *ocs, void *arg, void *kern_ptr, size_t size);
 extern void ocs_ioctl_free(ocs_t *ocs, void *kern_ptr, size_t size);
 void ioctl_sig_handler(int signo);
-
 #endif

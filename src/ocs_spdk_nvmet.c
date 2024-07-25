@@ -1,34 +1,35 @@
 /*
- *  BSD LICENSE
+ * BSD LICENSE
  *
- *  Copyright (c) 2011-2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #include <pthread.h>
@@ -213,7 +214,7 @@ ocs_nvme_alloc_sgls(ocs_t *ocs, uint32_t xri_base, uint32_t xri_count, bool prer
 
 	for (i = 0; i < xri_count; i++) {
 		rc = ocs_dma_alloc(hal->os, &hal->nvmet_sgls[i],
-				   BCM_MAX_IOVECS * sizeof(bcm_sge_t), 64);
+				   BCM_MAX_IOVECS * sizeof(bcm_sge_t), 64, OCS_M_NOWAIT);
 		if (rc) {
 			ocs_log_err(hal->os, "ocs_dma_alloc nvmet_sgls failed\n");
 			goto err;
@@ -223,7 +224,7 @@ ocs_nvme_alloc_sgls(ocs_t *ocs, uint32_t xri_base, uint32_t xri_count, bool prer
 
 	if (prereg) {
 		/* The reqbuf contains space to issue registration of sgls for 256 xris at a time */
-		rc = ocs_dma_alloc(hal->os, &reqbuf, req_buf_length, OCS_MIN_DMA_ALIGNMENT);
+		rc = ocs_dma_alloc(hal->os, &reqbuf, req_buf_length, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT);
 		if (rc) {
 			ocs_log_err(hal->os, "ocs_dma_alloc reqbuf failed\n");
 			goto err;
@@ -234,7 +235,7 @@ ocs_nvme_alloc_sgls(ocs_t *ocs, uint32_t xri_base, uint32_t xri_count, bool prer
 			n = MIN(sgls_per_request, nremaining);
 			if (sli_cmd_fcoe_post_sgl_pages(&hal->sli, cmd, sizeof(cmd),
 							xri_base + posted_idx, n, 
-							sgls + posted_idx, NULL, &reqbuf)) {
+							sgls + posted_idx, &reqbuf)) {
 				rc = ocs_hal_command(hal, cmd, OCS_CMD_POLL, NULL, NULL);
 				if (rc) {
 					ocs_log_err(hal->os, "SGL post failed\n");
@@ -299,6 +300,7 @@ ocs_hw_port_cleanup(ocs_t *ocs, struct spdk_nvmf_fc_hw_port_init_args *args)
 		}
 
 		ocs_nvme_free_sgls(ocs, fc_hw_port->sgl_list, fc_hw_port->xri_count);
+		
 		free(args);
 		ocs->tgt_ocs.args = NULL;
 	}
@@ -323,7 +325,7 @@ ocs_nvme_get_queue_indexes(ocs_t *ocs, uint32_t filter, uint32_t *eq_idx,
 		}
 
 		/* Check if this RQ has the filter we are looking for */
-		for (j = 0; j < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; j ++) {
+		for (j = 0; j < SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG; j ++) {
 			if (rq->filter_mask & (1U << j)) {
 				if (hal->config.filter_def[j] == filter && rq->nvmeq) {
 					*rq_idx = i;
@@ -427,7 +429,6 @@ ocs_nvme_hw_port_create(ocs_t *ocs)
 				hal->sli.config.extent[SLI_RSRC_FCOE_XRI].size;
 	fc_hw_port->xri_count = hal->sli.config.extent[SLI_RSRC_FCOE_XRI].nvme_size;
 	fc_hw_port->sgl_preregistered = OCS_NVME_PREREG_SGL;
-	fc_hw_port->num_cores = ocs->ocs_os.num_cores;
 
 	ocs_log_info(ocs, "SLI4 NVME XRI base = %d cnt = %d\n",
 		     fc_hw_port->xri_base, fc_hw_port->xri_count);	
@@ -631,6 +632,12 @@ ocs_nvme_hw_port_free(ocs_t *ocs)
 }
 
 int
+ocs_nvme_hw_port_reinit(ocs_t *ocs)
+{
+	return 0;
+}
+
+int
 ocs_nvme_process_hw_port_online(ocs_t *ocs)
 {
 	struct spdk_nvmf_fc_hw_port_online_args args;
@@ -752,36 +759,9 @@ err:
 }
 
 int
-ocs_nvme_process_prli(ocs_io_t *io, uint16_t ox_id)
+ocs_nvme_validate_initiator(ocs_node_t *node)
 {
-	ocs_t *ocs = io->ocs;
-	ocs_node_t *node;
-	struct spdk_nvmf_fc_hw_i_t_add_args args;
-
-	if (!io || !(node = io->node)) {
-		return -1;
-	}
-
-	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_add_args));
-
-	args.port_handle	= node->ocs->instance_index;
-	args.nport_handle	= node->sport->instance_index;
-	args.rpi		= node->rnode.indicator;
-	args.s_id		= node->rnode.fc_id;
-	args.fc_nodename.u.wwn	= ocs_node_get_wwnn(node);
-	args.fc_portname.u.wwn	= ocs_node_get_wwpn(node);
-
-	args.initiator_prli_info = node->nvme_prli_service_params;
-	args.target_prli_info	= node->nvme_prli_service_params;
-
-	if (ocs_nvme_api_call_sync(SPDK_FC_IT_ADD, &args, &args.cb_ctx)) {
-		ocs_log_err(ocs, "NVME IT add failed.\n");
-		return -1;
-	}
-
-	node_printf(node, "NVME IT add success.\n");
-
-	return 0;
+	return 1;
 }
 
 int
@@ -823,7 +803,7 @@ static void ocs_spdk_node_post_event_cb(void *arg)
 	if (!args->node) {
 		ocs_log_err(NULL, "Node post event failed! Invalid Node pointer\n");
 	} else {
-		ocs_node_post_event(args->node, args->event, NULL);
+		ocs_node_post_event(args->node, args->event, args->cb_data);
 	}
 
 	ocs_free(args->node->ocs, args, sizeof(*args));
@@ -832,6 +812,7 @@ static void ocs_spdk_node_post_event_cb(void *arg)
 struct ocs_nvme_node_lost_ctx {
 	struct spdk_nvmf_fc_hw_i_t_delete_args args;
 	ocs_node_t *node;
+	void *cb_data;
 };
 
 static void
@@ -852,6 +833,7 @@ ocs_nvme_node_lost_cb(uint8_t port_handle, enum spdk_fc_event event_type,
 	node_post_args = ocs_malloc(node->ocs, sizeof(*node_post_args), OCS_M_ZERO);
 	node_post_args->node = node;
 	node_post_args->event = OCS_EVT_NODE_DEL_INI_COMPLETE;
+	node_post_args->cb_data = ctx->cb_data;
 
 	if (ocs_send_msg_to_worker(node->ocs, OCS_SPDK_WORKER_NODE_POST_EVENT, false,
 				   ocs_spdk_node_post_event_cb, node_post_args)) {
@@ -863,7 +845,7 @@ exit:
 }
 
 int
-ocs_nvme_node_lost(ocs_node_t *node)
+ocs_nvme_node_lost(ocs_node_t *node, void *cbdata)
 {
 	struct ocs_nvme_node_lost_ctx *ctx;
 	struct spdk_nvmf_fc_hw_i_t_delete_args *args;
@@ -873,6 +855,7 @@ ocs_nvme_node_lost(ocs_node_t *node)
 		goto err;
 	}
 	ctx->node = node;
+	ctx->cb_data = cbdata;
 
 	args = &ctx->args;
 	args->port_handle	= node->ocs->instance_index;
@@ -896,16 +879,37 @@ err:
 }
 
 int
-ocs_nvme_new_initiator(ocs_node_t *node)
+ocs_nvme_new_initiator(ocs_node_t *node, void *cbdata)
 {
-	node_printf(node, "NVME new initiator logged-in\n");
+	ocs_t *ocs = node->ocs;
+	struct spdk_nvmf_fc_hw_i_t_add_args args;
+
+	memset(&args, 0, sizeof(struct spdk_nvmf_fc_hw_i_t_add_args));
+
+	args.port_handle	= node->ocs->instance_index;
+	args.nport_handle	= node->sport->instance_index;
+	args.rpi		= node->rnode.indicator;
+	args.s_id		= node->rnode.fc_id;
+	args.fc_nodename.u.wwn	= ocs_node_get_wwnn(node);
+	args.fc_portname.u.wwn	= ocs_node_get_wwpn(node);
+
+	args.initiator_prli_info = node->nvme_prli_service_params;
+	args.target_prli_info	= node->nvme_prli_service_params;
+
+	if (ocs_nvme_api_call_sync(SPDK_FC_IT_ADD, &args, &args.cb_ctx)) {
+		ocs_log_err(ocs, "NVME IT add failed.\n");
+		return -1;
+	}
+
+	node_printf(node, "NVME IT add success.\n");
+
 	return 0;
 }
 
 int
-ocs_nvme_del_initiator(ocs_node_t *node)
+ocs_nvme_del_initiator(ocs_node_t *node, void *cbdata)
 {
-	return ocs_nvme_node_lost(node);
+	return ocs_nvme_node_lost(node, cbdata);
 }
 
 int
@@ -943,7 +947,7 @@ ocs_nvme_tgt_new_sport(ocs_sport_t *sport)
 
 	if (ocs_tgt_nvme_enabled(ocs) &&
 	    ocs_nvme_nport_create(sport)) {
-		ocs_log_err(ocs, "Failed to create nport\n")
+		ocs_log_err(ocs, "Failed to create nport\n");
 		rc = -1;
 	}
 
@@ -982,4 +986,26 @@ int
 ocs_nvme_tgt_del_device(ocs_t *ocs)
 {
 	return 0;
+}
+
+int
+ocs_nvme_tgt_driver_init(void)
+{
+	return 0;
+}
+
+int
+ocs_nvme_tgt_driver_exit(void)
+{
+	return 0;
+}
+
+void
+ocs_tgt_common_new_device(ocs_t *ocs)
+{
+}
+
+void
+ocs_tgt_common_del_device(ocs_t *ocs)
+{
 }

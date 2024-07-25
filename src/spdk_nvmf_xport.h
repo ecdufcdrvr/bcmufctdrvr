@@ -1,34 +1,35 @@
 /*
- *   BSD LICENSE
+ * BSD LICENSE
  *
- *   Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *   The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #if !defined(__SPDK_NVMF_XPORT_H__)
@@ -44,7 +45,7 @@
 /* maximum number of IO queues for NVME over FC */
 #define OCS_NVME_FC_MAX_IO_QUEUES  16
 
-#define BCM_MAX_IOVECS (SPDK_NVMF_MAX_SGL_ENTRIES + 2) /* 2 for skips */
+#define BCM_MAX_IOVECS roundup((SPDK_NVMF_MAX_SGL_ENTRIES + 2) /* 2 for skips */, 4)
 
 /* HWQP to assign NMVE admin queue to */
 #define OCS_NVME_FC_AQ_IND 0
@@ -64,7 +65,7 @@ typedef struct bcm_sge {
 /* Common queue definition structure */
 typedef struct bcm_sli_queue {
 	/* general queue housekeeping fields */
-	uint16_t  head, tail, used;
+	uint32_t  head, tail, used;
 	uint32_t  posted_limit;    /* number of CQE/EQE to process before ringing doorbell */
 	uint32_t  processed_limit; /* number of CQE/EQE to process in a shot */
 	uint16_t  type;            /* bcm_fc_queue_type_e queue type */
@@ -72,7 +73,7 @@ typedef struct bcm_sli_queue {
 	/* the following fields set by the FC driver */
 	uint16_t  qid;           /* f/w Q_ID */
 	uint16_t  size;          /* size of each entry */
-	uint16_t  max_entries;   /* number of entries */
+	uint32_t  max_entries;   /* number of entries */
 	uint32_t  if_type;	 /* Differentiates the eq/cq version */
 	uint16_t  phase;	 /* For if_type = 6, this value toggle for each iteration
                                     of the queue, a queue entry is valid when a cqe valid
@@ -140,7 +141,6 @@ struct bcm_nvmf_fc_port {
 
 	/* Internal */
 	struct spdk_mempool *xri_pool;
-	uint32_t num_cores;
 };
 
 /*

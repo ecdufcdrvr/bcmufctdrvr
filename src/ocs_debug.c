@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -250,7 +252,7 @@ ocs_queue_history_init(ocs_t *ocs, ocs_hal_q_hist_t *q_hist)
 	if (q_hist->q_hist == NULL) {
 		ocs_log_err(ocs, "Could not allocate queue history buffer\n");
 	} else {
-		ocs_lock_init(ocs, &q_hist->q_hist_lock, "queue history lock[%d]", ocs_instance(ocs));
+		ocs_lock_init(ocs, &q_hist->q_hist_lock, OCS_LOCK_ORDER_IGNORE, "queue history lock[%d]", ocs_instance(ocs));
 	}
 
 	q_hist->q_hist_index = 0;
@@ -507,10 +509,10 @@ ocs_display_sparams(const char *prelabel, const char *reqlabel, int dest, void *
 			ocs_snprintf(label, sizeof(label), "sparam: %s", reqlabel);
 		}
 
-		ocs_dump32(OCS_DEBUG_ENABLE_SPARAM_DUMP, NULL, label, sparams, sizeof(fc_plogi_payload_t));
+		ocs_dump32(OCS_DEBUG_ENABLE_SPARAM_DUMP, NULL, label, sparams, COMMON_SPARAM_WORDS * sizeof(uint32_t));
 		break;
 	case 1:
-		ocs_ddump_buffer((ocs_textbuf_t*) textbuf, reqlabel, 0, sparams, sizeof(fc_plogi_payload_t));
+		ocs_ddump_buffer((ocs_textbuf_t*) textbuf, reqlabel, 0, sparams, COMMON_SPARAM_WORDS * sizeof(uint32_t));
 		break;
 	}
 }

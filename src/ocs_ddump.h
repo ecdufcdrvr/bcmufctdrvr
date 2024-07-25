@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -71,5 +73,6 @@ extern int32_t ocs_adapter_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentr
 					uint32_t alloc_flag, bool adapter_dump);
 extern int32_t ocs_clear_saved_ddump(ocs_t *ocs);
 extern void ocs_ddump_queue_entries(ocs_textbuf_t *textbuf, void *q_addr, uint32_t size, uint32_t length, int32_t index, uint32_t qentries);
+extern void ocs_ddump_pci_config_space(ocs_t *ocs, ocs_textbuf_t *textbuf);
 
 #endif // __OCS_DDUMP_H__

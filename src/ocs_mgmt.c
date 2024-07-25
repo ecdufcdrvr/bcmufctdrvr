@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,8 +43,22 @@
 
 #include "ocs.h"
 #include "ocs_mgmt.h"
-#include "ocs_vpd.h"
 #include "ocs_recovery.h"
+#include "ocs_scsi_fc.h"
+#include "ocs_ras.h"
+#include "ocs_els.h"
+
+#define INTERNAL_LOOPBACK		0x1
+#define EXTERNAL_LOOPBACK		0x2
+#define PCI_LOOPBACK			0x3
+
+#define LOOPBACK_FRAME_TIMEOUT_SEC	5
+
+typedef struct ocs_loopback_cb_args_s {
+	ocs_atomic_t frame_cnt;
+	ocs_atomic_t delay_args_mem_free;
+	ocs_sem_t wait_io_sem;
+} ocs_loopback_cb_args_t;
 
 /*
  * Lancer board temperature command helper structure.
@@ -57,12 +73,13 @@ typedef struct ocs_mgmt_lancer_temp_result_s {
 /* Executables*/
 
 static int ocs_mgmt_firmware_write(ocs_t *ocs, char *, void *buf, uint32_t buf_len, void*, uint32_t);
+static int ocs_mgmt_sfp_firmware_write(ocs_t *ocs, char *, void *buf, uint32_t buf_len, void*, uint32_t);
 static int ocs_mgmt_firmware_reset(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_length,
 				void *arg_out, uint32_t arg_out_length);
 static int ocs_mgmt_trigger_error(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_length,
 				void *arg_out, uint32_t arg_out_length);
 
-#if !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
 static int32_t
 ocs_mgmt_gen_rq_empty(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, void *arg_out, uint32_t arg_out_length);
 #endif
@@ -77,8 +94,8 @@ static int ocs_mgmt_port_migration(ocs_t *ocs, char *, void *buf, uint32_t buf_l
 static int ocs_mgmt_read_parity_stats(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_length,
 				void *arg_out, uint32_t arg_out_length);
 
-static void ocs_mgmt_fw_write_cb(int32_t status, int32_t ext_status, uint32_t actual_write_length,
-				 uint32_t change_status, void *arg);
+static void ocs_mgmt_fw_write_cb(int32_t status, int32_t ext_status, int32_t ext_status_2,
+				 uint32_t actual_write_length, uint32_t change_status, void *arg);
 static int ocs_mgmt_force_assert(ocs_t *ocs, char *, void *buf, uint32_t buf_len, void*, uint32_t);
 
 #if defined(OCS_INCLUDE_RAMD)
@@ -134,6 +151,7 @@ static void get_lip_count(ocs_t *, char *, ocs_textbuf_t*);
 static void get_hw_rev1(ocs_t *, char *, ocs_textbuf_t*);
 static void get_hw_rev2(ocs_t *, char *, ocs_textbuf_t*);
 static void get_hw_rev3(ocs_t *, char *, ocs_textbuf_t*);
+static void get_flash_id(ocs_t *, char *, ocs_textbuf_t*);
 static void get_fw_dump_present(ocs_t *, char *, ocs_textbuf_t*);
 static void get_fw_dump_max_size(ocs_t *, char *, ocs_textbuf_t*);
 static void get_debug_mq_dump(ocs_t*, char*, ocs_textbuf_t*);
@@ -141,6 +159,7 @@ static void get_debug_cq_dump(ocs_t*, char*, ocs_textbuf_t*);
 static void get_debug_wq_dump(ocs_t*, char*, ocs_textbuf_t*);
 static void get_debug_eq_dump(ocs_t*, char*, ocs_textbuf_t*);
 static void get_logmask(ocs_t*, char*, ocs_textbuf_t*);
+static void get_ctrlmask(ocs_t*, char*, ocs_textbuf_t*);
 static void get_current_speed(ocs_t*, char*, ocs_textbuf_t*);
 static void get_current_topology(ocs_t*, char*, ocs_textbuf_t*);
 static void get_current_link_state(ocs_t*, char*, ocs_textbuf_t*);
@@ -159,6 +178,7 @@ static void get_profile_list(ocs_t*, char*, ocs_textbuf_t*);
 static void get_active_profile(ocs_t*, char*, ocs_textbuf_t*);
 static void get_port_protocol(ocs_t*, char*, ocs_textbuf_t*);
 static void get_driver_version(ocs_t*, char*, ocs_textbuf_t*);
+static void get_scsi_host_name(ocs_t*, char*, ocs_textbuf_t*);
 static void get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf);
 static void get_supported_speeds(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf);
 static void get_tgt_rscn_delay(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf);
@@ -180,6 +200,8 @@ static int set_debug_cq_dump(ocs_t*, char*, char*);
 static int set_debug_wq_dump(ocs_t*, char*, char*);
 static int set_debug_eq_dump(ocs_t*, char*, char*);
 static int set_logmask(ocs_t*, char*, char*);
+static int set_ctrlmask(ocs_t*, char*, char*);
+
 static int set_configured_speed(ocs_t*, char*, char*);
 static int set_configured_topology(ocs_t*, char*, char*);
 static int set_configured_link_state(ocs_t*, char*, char*);
@@ -217,6 +239,17 @@ static int32_t
 ocs_mgmt_update_x86_bios_config(ocs_t *ocs, char *name,
 				void *arg_in, uint32_t arg_in_len,
 				void *arg_out, uint32_t arg_out_len);
+#ifdef OCS_GEN_ABORTS
+static int32_t
+ocs_mgmt_abort_thread(ocs_thread_t *mythread);
+
+static int32_t
+ocs_mgmt_gen_aborts(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_len,
+                    void *arg_out, uint32_t arg_out_len);
+#endif
+static int32_t
+ocs_mgmt_update_protocols(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_len,
+			  void *arg_out, uint32_t arg_out_len);
 
 static void ocs_mgmt_linkcfg_cb(int32_t status, uintptr_t value, void *arg);
 extern int32_t ocs_read_temperature_lancer(ocs_t *ocs, void *buf, uint32_t buf_len);
@@ -234,6 +267,7 @@ ocs_mgmt_table_entry_t mgmt_table[] = {
 		{"hw_rev1", get_hw_rev1, NULL, NULL},
 		{"hw_rev2", get_hw_rev2, NULL, NULL},
 		{"hw_rev3", get_hw_rev3, NULL, NULL},
+		{"flash_id", get_flash_id, NULL, NULL},
 		{"wwnn", get_wwnn, NULL, NULL},
 		{"wwpn", get_wwpn, NULL, NULL},
 		{"sn", get_sn, NULL, NULL},
@@ -253,6 +287,7 @@ ocs_mgmt_table_entry_t mgmt_table[] = {
 		{"lip_count", get_lip_count, NULL, NULL},
 		{"profile_list", get_profile_list, NULL, NULL},
 		{"driver_version", get_driver_version, NULL, NULL},
+		{"scsi_host_name", get_scsi_host_name, NULL, NULL},
 		{"current_speed", get_current_speed, NULL, NULL},
 		{"current_topology", get_current_topology, NULL, NULL},
 		{"current_link_state", get_current_link_state, NULL, NULL},
@@ -270,6 +305,7 @@ ocs_mgmt_table_entry_t mgmt_table[] = {
 		{"debug_wq_dump", get_debug_wq_dump, set_debug_wq_dump, NULL},
 		{"debug_eq_dump", get_debug_eq_dump, set_debug_eq_dump, NULL},
 		{"logmask", get_logmask, set_logmask, NULL},
+		{"ctrlmask", get_ctrlmask, set_ctrlmask, NULL},
 		{"loglevel", get_loglevel, set_loglevel, NULL},
 		{"linkcfg", get_linkcfg, set_linkcfg, NULL},
 		{"requested_wwnn", get_req_wwnn, set_req_wwnn, NULL},
@@ -280,9 +316,10 @@ ocs_mgmt_table_entry_t mgmt_table[] = {
 		{"fw_dump_present", get_fw_dump_present, NULL, NULL},
 		{"fw_dump_max_size", get_fw_dump_max_size, NULL, NULL},
 		{"firmware_write", NULL, NULL, ocs_mgmt_firmware_write},
+		{"sfp_firmware_write", NULL, NULL, ocs_mgmt_sfp_firmware_write},
 		{"firmware_reset", NULL, NULL, ocs_mgmt_firmware_reset},
 		{"trigger_error", NULL, NULL, ocs_mgmt_trigger_error},
-#if !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
 		/* Commands not supported in uspace SPDK driver */
 		{"gen_rq_empty", NULL, NULL, ocs_mgmt_gen_rq_empty},
 #endif
@@ -316,6 +353,26 @@ ocs_mgmt_table_entry_t mgmt_table[] = {
 		{"get_bios_config_info", NULL, NULL, ocs_mgmt_get_bios_config},
 		{"update_uefi_bios_config_info", NULL, NULL, ocs_mgmt_update_uefi_bios_config},
 		{"update_x86_bios_config_info", NULL, NULL, ocs_mgmt_update_x86_bios_config},
+		{"update_protocols", NULL, NULL, ocs_mgmt_update_protocols},
+#ifdef OCS_GEN_ABORTS
+		{"gen_abts", NULL, NULL, ocs_mgmt_gen_aborts},
+#endif
+};
+
+ocs_mgmt_table_entry_t mgmt_info_table[] = {
+		{"current_speed", get_current_speed, NULL, NULL},
+		{"supported_speeds", get_supported_speeds, NULL, NULL},
+		{"current_topology", get_current_topology, NULL, NULL},
+		{"current_link_state", get_current_link_state, NULL, NULL},
+ 		{"wwnn", get_wwnn, NULL, NULL},
+ 		{"wwpn", get_wwpn, NULL, NULL},
+		{"requested_wwpn", get_req_wwpn, set_req_wwpn, NULL},
+		{"fw_rev", get_fw_rev, NULL, NULL},
+		{"businfo", get_businfo, NULL, NULL},
+		{"sn", get_sn, NULL, NULL},
+		{"pn", get_pn, NULL, NULL},
+		{"sfp_a0", get_sfp_a0, NULL, NULL},
+		{"sfp_a2", get_sfp_a2, NULL, NULL},
 };
 
 /**
@@ -689,15 +746,22 @@ ocs_mgmt_exec(ocs_t *ocs, char *action, void *arg_in,
 			if (result < 0)
 				goto free_and_exit;
 
-			if (ocs_sem_p(&domain_exec_args->sem, OCS_SEM_FOREVER)) {
-				ocs_log_err(ocs, "ocs_sem_p failed\n");
+			/*
+			 * Note: Currently only TDZ & FDMI ELS IO requests are being offloaded to domain_exec.
+			 *	 This timeout can be changed if there are any addl. requests that needs to be
+			 *	 handled in domain_exec handler.
+			 */
+			if (ocs_sem_p(&domain_exec_args->sem, OCS_FC_MGMT_SERVER_WAIT_TIMEOUT_US)) {
+				ocs_log_err(ocs, "domain_exec: ocs_sem_p failed\n");
 				result = -ENXIO;
-			} else if (domain_exec_args->sport_exec_args.retval) {
-				result = domain_exec_args->retval;
 			} else {
-				if (ocs_copy_to_user(arg_out, domain_exec_args->arg_out, arg_out_length)) {
-					ocs_log_err(ocs, "Error: copy to user buffer failed\n");
-					result = -EFAULT;
+				result = domain_exec_args->retval;
+
+				if ((0 == result) || (FCCT_HDR_CMDRSP_REJECT == result)) {
+					if (ocs_copy_to_user(arg_out, domain_exec_args->arg_out, arg_out_length)) {
+						ocs_log_err(ocs, "Error: copy to user buffer failed\n");
+						result = -EFAULT;
+					}
 				}
 			}
 
@@ -716,6 +780,21 @@ free_and_exit:
 	}
 
 	return result;
+}
+
+void
+ocs_mgmt_get_hba_info(ocs_t *ocs, ocs_textbuf_t *textbuf)
+{
+	uint32_t i;
+
+	ocs_mgmt_start_unnumbered_section(textbuf, "ocs");
+
+	for (i=0;i<ARRAY_SIZE(mgmt_info_table);i++) {
+		if (mgmt_info_table[i].get_handler)
+			mgmt_info_table[i].get_handler(ocs, mgmt_info_table[i].name, textbuf);
+	}
+
+	ocs_mgmt_end_unnumbered_section(textbuf, "ocs");
 }
 
 void
@@ -758,6 +837,561 @@ ocs_mgmt_get_all(ocs_t *ocs, ocs_textbuf_t *textbuf)
 	ocs_device_unlock(ocs);
 
 	ocs_mgmt_end_unnumbered_section(textbuf, "ocs");
+}
+
+void
+ocs_mgmt_driver_list(ocs_textbuf_t *textbuf, void *object)
+{
+	ocs_mgmt_start_unnumbered_section(textbuf, "driver");
+
+	/* Add my values to textbuf */
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "initiator");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "target");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "logmask");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "ctrlmask");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "logdest");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "ramlog_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "hal_war_version");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "num_scsi_ios");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "ddump_saved_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "dif_separate");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "wwn_bump");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "topology");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "speed");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "holdoff_link_online");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "enable_fw_ag_rsp");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "enable_dpp");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "enable_hlm");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "hlm_group_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "explicit_buffer_list");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "external_loopback");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "target_io_timer");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "target_wqe_timer");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "auto_xfer_rdy_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "auto_xfer_rdy_xri_cnt");
+#if defined(OCS_INCLUDE_RAMD)
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "num_luns");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "global_ramd");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "ramdisc_blocksize");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "ramdisc_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "global_ramdisc");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "p_type");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "stub_res6_rel6");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "esoc");
+#endif
+#if !defined(OCS_USPACE)
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "hw_cmpl_context");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "pm_state");
+	/* Actions */
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_sleep");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_prepare");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_hibernate");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_resume");
+#endif
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "gendump");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "dump_to_host");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "fdb_dump_to_host");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "clear_ramlog");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "gen_saved_ddump");
+
+	ocs_mgmt_end_unnumbered_section(textbuf, "driver");
+}
+
+int
+ocs_mgmt_driver_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *object)
+{
+	char qualifier[80];
+	int retval = -1;
+
+	ocs_mgmt_start_unnumbered_section(textbuf, "driver");
+
+	snprintf(qualifier, sizeof(qualifier), "%s/driver", parent);
+
+	/* If it doesn't start with my qualifier I don't know what to do with it */
+	if (ocs_strncmp(name, qualifier, strlen(qualifier)) == 0) {
+		char *unqualified_name = name + strlen(qualifier) +1;
+
+		/* See if it's a value I can supply */
+		if (FALSE) {
+			;
+		} else if (ocs_strcmp(unqualified_name, "initiator") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "initiator", textbuf->ocs->enable_ini);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "target") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "target", textbuf->ocs->enable_tgt);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "logmask") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "logmask", "0x%x", textbuf->ocs->logmask);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "ctrlmask") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ctrlmask", "0x%x", textbuf->ocs->ctrlmask);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "logdest") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "logdest", "%d", logdest);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "ramlog_size") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ramlog_size", "%d", textbuf->ocs->ramlog_size);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "hal_war_version") == 0) {
+			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "hal_war_version", textbuf->ocs->hal_war_version);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "num_scsi_ios") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_scsi_ios", "%d", textbuf->ocs->num_scsi_ios);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "ddump_saved_size") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ddump_saved_size", "%d",
+					  textbuf->ocs->ddump_saved_size);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "dif_separate") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "dif_separate", textbuf->ocs->dif_separate);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "wwn_bump") == 0) {
+			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "wwn_bump", textbuf->ocs->wwn_bump);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "topology") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "topology", "%d", textbuf->ocs->topology);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "speed") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "speed", "%d", textbuf->ocs->speed);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "enable_fw_ag_rsp") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_fw_ag_rsp",
+					      textbuf->ocs->enable_fw_ag_rsp);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "enable_dpp") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_dpp", textbuf->ocs->enable_dpp);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "enable_hlm") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_hlm", textbuf->ocs->enable_hlm);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "hlm_group_size") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "hlm_group_size", "%d", textbuf->ocs->hlm_group_size);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "explicit_buffer_list") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "explicit_buffer_list",
+					      textbuf->ocs->explicit_buffer_list);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "external_loopback") == 0) {
+			ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "external_loopback",
+					      textbuf->ocs->external_loopback);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "target_io_timer") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "target_io_timer", "%d",
+					  textbuf->ocs->target_io_timer_sec);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "target_wqe_timer") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "target_wqe_timer", "%d",
+					  textbuf->ocs->tgt_wqe_timer);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "tow_feature") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_feature", "%d", textbuf->ocs->tow_feature);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "tow_io_size") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_io_size", "%d", textbuf->ocs->tow_io_size);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "tow_xri_cnt") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_xri_cnt", "%d", textbuf->ocs->tow_xri_cnt);
+			retval = 0;
+#if defined(OCS_INCLUDE_RAMD)
+		} else if (ocs_strcmp(unqualified_name, "num_luns") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_luns", "%d", textbuf->ocs->num_luns);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "ramdisc_blocksize") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ramdisc_blocksize", "%d",
+					  textbuf->ocs->ramdisc_blocksize);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "ramdisc_size") == 0) {
+			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "ramdisc_size", textbuf->ocs->ramdisc_size);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "global_ramdisc") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "global_ramdisc", "%d", textbuf->ocs->global_ramdisc);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "p_type") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "p_type", "%d", textbuf->ocs->p_type);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "stub_res6_rel6") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "stub_res6_rel6", "%d", textbuf->ocs->stub_res6_rel6);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "esoc") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "esoc", "%d", textbuf->ocs->esoc);
+			retval = 0;
+#endif
+#if !defined(OCS_USPACE)
+		} else if (ocs_strcmp(unqualified_name, "hw_cmpl_context") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "hw_cmpl_context", "%d",
+					  textbuf->ocs->ocs_os.hw_cmpl_context);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "pm_state") == 0) {
+			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "pm_state", ocs_pm_get_state_string(textbuf->ocs));
+			retval = 0;
+#endif
+		}
+	}
+
+	ocs_mgmt_end_unnumbered_section(textbuf, "driver");
+
+	return retval;
+}
+
+void
+ocs_mgmt_driver_get_all(ocs_textbuf_t *textbuf, void *object)
+{
+	ocs_mgmt_start_unnumbered_section(textbuf, "driver");
+
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "initiator", textbuf->ocs->enable_ini);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "target", textbuf->ocs->enable_tgt);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "logmask", "0x%x", textbuf->ocs->logmask);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ctrlmask", "0x%x", textbuf->ocs->ctrlmask);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "logdest", "%d", logdest);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "loglevel", "%d", loglevel);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "rq_threads", "%d", textbuf->ocs->rq_threads);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ramlog_size", "%d", textbuf->ocs->ramlog_size);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "hal_war_version", textbuf->ocs->hal_war_version);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_scsi_ios", "%d", textbuf->ocs->num_scsi_ios);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ddump_saved_size", "%d", textbuf->ocs->ddump_saved_size);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "dif_separate", textbuf->ocs->dif_separate);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "queue_topology",
+			     (const char *)ocs_hal_get_ptr(&textbuf->ocs->hal, OCS_HAL_QUEUE_TOPOLOGY));
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "rr_quanta", "%d", textbuf->ocs->rr_quanta);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "filter_def", textbuf->ocs->filter_def);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "explicit_buffer_list", "%d", textbuf->ocs->explicit_buffer_list);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ethernet_license", "%d", textbuf->ocs->ethernet_license);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_fw_ag_rsp", textbuf->ocs->enable_fw_ag_rsp);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "enable_dpp", "%d", textbuf->ocs->enable_dpp);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "wwn_bump", textbuf->ocs->wwn_bump);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "topology", "%d", textbuf->ocs->topology);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "speed", "%d", textbuf->ocs->speed);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_hlm", textbuf->ocs->enable_hlm);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "hlm_group_size", "%d", textbuf->ocs->hlm_group_size);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "explicit_buffer_list", textbuf->ocs->explicit_buffer_list);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "external_loopback", textbuf->ocs->external_loopback);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "target_io_timer", "%d", textbuf->ocs->target_io_timer_sec);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "target_wqe_timer", "%d", textbuf->ocs->tgt_wqe_timer);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "cq_process_limit", "%d", textbuf->ocs->cq_process_limit);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_feature", "%d", textbuf->ocs->tow_feature);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_io_size", "%d", textbuf->ocs->tow_io_size);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "tow_xri_cnt", "%d", textbuf->ocs->tow_xri_cnt);
+#if defined(OCS_INCLUDE_RAMD)
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_vports", "%d", textbuf->ocs->num_vports);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_luns", "%d", textbuf->ocs->num_luns);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ramdisc_blocksize", "%d", textbuf->ocs->ramdisc_blocksize);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "ramdisc_size", textbuf->ocs->ramdisc_size);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "global_ramdisc", "%d", textbuf->ocs->global_ramdisc);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "p_type", "%d", textbuf->ocs->p_type);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "ramd_threading", "%d", textbuf->ocs->ramd_threading);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "thread_cmds", "%d", textbuf->ocs->thread_cmds);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "external_dif", textbuf->ocs->external_dif);
+	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "stub_res6_rel6", textbuf->ocs->stub_res6_rel6);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "esoc", "%d", textbuf->ocs->esoc);
+#endif
+#if !defined(OCS_USPACE)
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "disable_fec", "%d", textbuf->ocs->disable_fec);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "sliport_healthcheck", "%d", textbuf->ocs->sliport_healthcheck);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "watchdog_timeout", "%d", textbuf->ocs->watchdog_timeout);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "hw_cmpl_context", "%d", textbuf->ocs->ocs_os.hw_cmpl_context);
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "pm_state", ocs_pm_get_state_string(textbuf->ocs));
+	/* Actions */
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_sleep");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_prepare");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_hibernate");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "pm_resume");
+#endif
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "gendump");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "dump_to_host");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "fdb_dump_to_host");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "clear_ramlog");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_EX, "gen_saved_ddump");
+
+	ocs_mgmt_end_unnumbered_section(textbuf, "driver");
+}
+
+int
+ocs_mgmt_driver_exec(char *parent, char *action_name, void *arg_in,
+		     uint32_t arg_in_length, void *arg_out, uint32_t arg_out_length, void *object)
+{
+	char qualifier[80];
+	int retval = -EOPNOTSUPP;
+	ocs_t *ocs = (ocs_t *)object;
+
+	ocs_snprintf(qualifier, sizeof(qualifier), "%s/driver", parent);
+
+	/* If it doesn't start with my qualifier I don't know what to do with it */
+	if (ocs_strncmp(action_name, qualifier, strlen(qualifier)) == 0) {
+		char *unqualified_name = action_name + strlen(qualifier) +1;
+
+		/* See if it's a value I can supply */
+		if (ocs_strcmp(unqualified_name, "gendump") == 0) {
+			bool force;
+
+			retval = ocs_copy_from_user(&force, arg_in, sizeof(force));
+			if (retval) {
+				ocs_log_err(ocs, "Gendump read user failed\n");
+				return -EFAULT;
+			}
+
+#if !defined(OCS_USPACE_RAMD)
+			retval = ocs_gendump(ocs, OCS_FW_CHIP_LEVEL_DUMP, force);
+#else
+			retval = ocsu_gendump(ocs);
+#endif
+		}
+
+		if (ocs_strcmp(unqualified_name, "sfp_fw_upgrade") == 0) {
+			retval = ocs_sfp_fw_upgrade(ocs, arg_in, arg_in_length,
+					arg_out, arg_out_length);
+
+			if (retval) {
+				ocs_log_err(ocs, "SFP fw upgrade command failed \n");
+				return -EFAULT;
+			}
+
+		}
+
+		if (ocs_strcmp(unqualified_name, "dump_to_host") == 0) {
+			retval = ocs_dump_to_host(ocs, arg_out, arg_out_length, OCS_FW_CHIP_LEVEL_DUMP);
+		}
+		if (ocs_strcmp(unqualified_name, "fdb_dump_to_host") == 0) {
+			retval = ocs_dump_to_host(ocs, arg_out, arg_out_length, OCS_FW_FUNC_DESC_DUMP);
+		}
+		if (ocs_strcmp(unqualified_name, "trunk_mode") == 0) {
+			uint32_t trunk_mode;
+
+			retval = -1;
+			if (arg_in && arg_in_length) {
+				if (!ocs_copy_from_user(&trunk_mode, arg_in, MIN(arg_in_length, sizeof(trunk_mode))))
+					retval = ocs_set_fc_trunk_mode(ocs, trunk_mode);
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "trunk_info") == 0) {
+			uint32_t trunk_info;
+
+			if (arg_out && arg_out_length) {
+				retval = ocs_get_fc_trunk_info(ocs, &trunk_info);
+				if (retval || ocs_copy_to_user(arg_out, &trunk_info,
+								MIN(arg_out_length, sizeof(trunk_info)))) {
+					retval = -EPERM;
+				}
+			} else {
+				retval = -EINVAL;
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "link_loopback") == 0) {
+			ocs_log_debug(ocs, "Performing loopback operation\n");
+			retval = ocs_run_link_loopback(ocs, arg_in, arg_in_length, arg_out, arg_out_length, 1);
+		}
+		if (ocs_strcmp(unqualified_name, "link_stress_loopback") == 0) {
+			uint32_t num_frames = (arg_in_length / LOOPBACK_BUF_SIZE);
+
+			if (num_frames > (uint32_t)ocs->num_scsi_ios) {
+				ocs_log_err(ocs, "Number of loopback frames should be less than %d\n",
+					    ocs->num_scsi_ios);
+				return -1;
+			}
+
+			ocs_log_debug(ocs, "Performing stress mode loopback operation\n");
+			retval = ocs_run_link_loopback(ocs, arg_in, arg_in_length, arg_out,
+						       arg_out_length, num_frames);
+		}
+		if (ocs_strcmp(unqualified_name, "pci_loopback") == 0) {
+			retval = ocs_run_pci_loopback(ocs, arg_in, arg_in_length, arg_out, arg_out_length);
+		}
+		if (ocs_strcmp(unqualified_name, "set_loopback") == 0) {
+			uint32_t local_arg_in;
+
+			retval = -1;
+			if (arg_in && arg_in_length) {
+				if (!ocs_copy_from_user(&local_arg_in, arg_in,
+							MIN(arg_in_length, sizeof(local_arg_in)))) {
+					retval = ocs_set_loopback_mode(ocs, local_arg_in);
+				}
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "get_link_state") == 0) {
+			ocs_xport_stats_t *link_status;
+
+			link_status = ocs_malloc(ocs, sizeof(ocs_xport_stats_t), OCS_M_ZERO);
+			if (link_status == NULL) {
+				ocs_log_err(ocs, "Failed to allocate buffer for link_status\n");
+				return -ENOMEM;
+			}
+
+			retval = ocs_xport_status(ocs->xport, OCS_XPORT_PORT_STATUS, link_status);
+			if (!retval && arg_out) {
+				if (ocs_copy_to_user(arg_out, &link_status->value, sizeof(uint32_t)))
+					retval = -1;
+			}
+
+			if (link_status)
+				ocs_free(ocs, link_status, sizeof(ocs_xport_stats_t));
+		}
+		if (ocs_strcmp(unqualified_name, "set_link_state") == 0) {
+			uint32_t local_arg_in;
+
+			retval = -1;
+			if (arg_in && arg_in_length) {
+				if (!ocs_copy_from_user(&local_arg_in, arg_in,
+							MIN(arg_in_length, sizeof(local_arg_in)))) {
+					if (local_arg_in == OCS_XPORT_PORT_ONLINE) {
+						retval = ocs_device_init_link(ocs);
+					} else {
+						retval = ocs_xport_control(ocs->xport, local_arg_in);
+					}
+				}
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "fw_diag_log") == 0) {
+			retval = ocs_ras_collect_diag_logs(ocs, arg_in, arg_in_length, arg_out, arg_out_length);
+		}
+		if (ocs_strcmp(unqualified_name, "clear_ramlog") == 0) {
+			char local_arg_in[128];
+			int clear_start_of_day = 0;
+			int clear_recent = 0;
+
+			if (arg_in) {
+				if (ocs_copy_from_user(local_arg_in, arg_in,
+							MIN(arg_in_length, sizeof(local_arg_in)-1))) {
+					ocs_log_warn(ocs, "Error: copy arg_in from user failed\n");
+					return -1;
+				}
+
+				local_arg_in[sizeof(local_arg_in)-1] = 0;
+				if (ocs_strcmp(local_arg_in, "recent") == 0) {
+					clear_recent = 1;
+				} else if (ocs_strcmp(local_arg_in, "start_of_day") == 0) {
+					clear_start_of_day = 1;
+				} else if (ocs_strcmp(local_arg_in, "all") == 0) {
+					clear_recent = 1;
+					clear_start_of_day = 1;
+				}
+			} else {
+				clear_recent = 1;
+				clear_start_of_day = 1;
+			}
+
+			ocs_log_debug(ocs, "Clear ramlog:%s%s\n", clear_start_of_day ? " start_of_day" : "",
+				      clear_recent ? " recent" : "");
+
+			ocs_ramlog_clear(ocs, ocs->ramlog, clear_start_of_day, clear_recent);
+			retval = 0;
+		}
+		if (ocs_strcmp(unqualified_name, "gen_saved_ddump") == 0) {
+			retval = ocs_get_saved_ddump(ocs, 0xff, ~0, 0);
+		}
+		if (ocs_strcmp(unqualified_name, "dual_dump_state") == 0) {
+			uint32_t dual_dump_state;
+
+			if (arg_out && arg_out_length) {
+				ocs_get_dual_dump_state(ocs, &dual_dump_state);
+				retval = 0;
+				if (ocs_copy_to_user(arg_out, &dual_dump_state,
+						     MIN(arg_out_length, sizeof(dual_dump_state))))
+					retval = -EPERM;
+			} else {
+				retval = -EINVAL;
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "lancer_temp") == 0) {
+			retval = ocs_read_temperature_lancer(ocs, arg_out, arg_out_length);
+			if (retval != 0)
+				ocs_log_err(ocs, "Failed to read temperature\n");
+		}
+		if (ocs_strcmp(unqualified_name, "edif") == 0) {
+			ocs_edif_params_t params;
+			uint8_t edif_mode;
+
+                        if (!arg_in || !arg_in_length)
+                                return -EINVAL;
+
+                        if (ocs_copy_from_user(&params, arg_in, sizeof(params)))
+                                return -EIO;
+			
+			edif_mode = params.edif;
+
+                        retval = ocs_hal_edif_mode(&ocs->hal, params.query, &edif_mode);
+                        if (retval) {
+                                ocs_log_err(ocs, "edif failed\n");
+                                return retval;
+                        }
+
+                        if (ocs_copy_to_user(arg_out, &edif_mode, arg_out_length)) {
+                                return -EIO;
+                        }
+                }
+
+#if !defined(OCS_USPACE)
+		if (ocs_strcmp(unqualified_name, "pm_prepare") == 0) {
+			retval = ocs_pm_request(ocs, OCS_PM_PREPARE, NULL, NULL);
+		}
+		if (ocs_strcmp(unqualified_name, "pm_sleep") == 0) {
+			retval = ocs_pm_request(ocs, OCS_PM_SLEEP, NULL, NULL);
+		}
+		if (ocs_strcmp(unqualified_name, "pm_hibernate") == 0) {
+			retval = ocs_pm_request(ocs, OCS_PM_HIBERNATE, NULL, NULL);
+		}
+		if (ocs_strcmp(unqualified_name, "pm_resume") == 0) {
+			retval = ocs_pm_request(ocs, OCS_PM_RESUME, NULL, NULL);
+		}
+		if (ocs_strcmp(unqualified_name, "sriov_vfs_set_wwn") == 0) {
+			ocs_sriov_vfs_params_t params;
+
+			if (!arg_in || !arg_in_length)
+				return -EINVAL;
+
+			if (ocs_copy_from_user(&params, arg_in, MIN(arg_in_length, sizeof(params))))
+				return -EIO;
+
+			retval = -EINVAL;
+			if (params.num_wwpn && (params.num_wwpn <= ocs->sriov_nr_vfs))
+				retval = ocs_sriov_vfs_set_wwn(ocs, params.num_wwpn, params.wwnn, params.wwpn);
+		}
+#endif
+		if (ocs_strcmp(unqualified_name, "hbs_conf") == 0) {
+			ocs_hbs_conf_t hbs_conf;
+
+			if (!arg_in || !arg_in_length)
+				return -EINVAL;
+
+			if (ocs_copy_from_user(&hbs_conf, arg_in, sizeof(hbs_conf)))
+				return -EIO;
+
+			if (hbs_conf.mode == 0 || hbs_conf.mode == 1) {
+				retval = ocs_hal_set_hbs_mode(&ocs->hal, hbs_conf.bufsize, hbs_conf.mode);
+			} else {
+				ocs_hbs_params_t hbs_params = {0};
+
+				if (!arg_out || !arg_out_length)
+					return -EINVAL;
+
+				retval = ocs_hal_read_hbs_params(&ocs->hal, &hbs_params);
+				if (retval) {
+					ocs_log_err(ocs, "HBS read params failed\n");
+					retval = -EIO;
+				} else if (ocs_copy_to_user(arg_out, &hbs_params, arg_out_length)) {
+					retval = -EIO;
+				}
+			}
+		}
+		if (ocs_strcmp(unqualified_name, "sgl_chaining_capable") == 0) {
+			if (!arg_out || !arg_out_length)
+				return -EINVAL;
+
+			retval = 0;
+			if (ocs_copy_to_user(arg_out,
+					     &ocs->hal.io[0]->is_port_owned, /*sgl_chaining_allowed*/
+					     arg_out_length))
+				retval = -EIO;
+		}
+		if (ocs_strcmp(unqualified_name, "sgl_chaining_stats") == 0) {
+			if (!arg_out || !arg_out_length)
+				return -EINVAL;
+
+			retval = 0;
+			if (ocs_copy_to_user(arg_out, &ocs->hal.oflow_sgl_used, arg_out_length))
+				retval = -EIO;
+		}
+	}
+
+	return retval;
 }
 
 #if defined(OCS_INCLUDE_RAMD)
@@ -904,7 +1538,7 @@ static int32_t
 ocs_mgmt_firmware_reset(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_length, void *arg_out, uint32_t arg_out_length)
 {
 	char arg_str[12] = { '\0' };
-	uint8_t dump_level = OCS_FW_DUMP_LEVEL_NONE;
+	bool trigger_dump = false;
 
 	if (arg_in_length && arg_in) {
 		if (arg_in_length > 12)
@@ -917,10 +1551,10 @@ ocs_mgmt_firmware_reset(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_le
 
 		/* Check if we have to generate a FW dump */
 		if (0 == ocs_strncmp(arg_str, "force_dump", ocs_strlen("force_dump")))
-			dump_level = OCS_FW_CHIP_LEVEL_DUMP;
+			trigger_dump = true;
 	}
 
-	return ocs_fw_reset(ocs, dump_level);
+	return ocs_fw_reset(ocs, trigger_dump);
 }
 
 static int32_t
@@ -928,7 +1562,7 @@ ocs_mgmt_trigger_error(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_len
 {
 	char arg_str[8] = { '\0' };
 	uint8_t dump_level = OCS_FW_CHIP_LEVEL_DUMP;
-	
+
 	if (arg_in_length && arg_in) {
 		if (arg_in_length > 8)
 			arg_in_length = 8;
@@ -941,7 +1575,9 @@ ocs_mgmt_trigger_error(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_len
 		if (0 == ocs_strncmp(arg_str, "fdb", ocs_strlen("fdb")))
 			dump_level = OCS_FW_FUNC_DESC_DUMP;
 	}
-	ocs_device_trigger_fw_error(ocs, dump_level);
+
+	ocs_device_trigger_fw_error(ocs, dump_level, true);
+
 	return 0;
 }
 
@@ -962,8 +1598,8 @@ ocs_mgmt_function_reset(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 static int32_t
 ocs_mgmt_port_migration(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, void *arg_out, uint32_t arg_out_length)
 {
-#if !defined(OCS_USPACE_SPDK)
-	return ocs_recovery_reset(ocs, OCS_RECOVERY_MODE_PORT_MIGRATION, OCS_RESET_LEVEL_NONE, FALSE);
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
+	return ocs_recovery_reset(ocs, OCS_RECOVERY_MODE_PORT_MIGRATION, OCS_RESET_LEVEL_PORT, FALSE);
 #else
 	return -1;
 #endif
@@ -977,10 +1613,12 @@ typedef struct ocs_mgmt_fw_write_result {
 	uint32_t actual_xfer;
 	uint32_t change_status;
 	uint32_t ext_status;
+	uint32_t ext_status_2;
 } ocs_mgmt_fw_write_result_t;
 
 static int32_t
-ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, void *arg_out, uint32_t arg_out_length)
+ocs_mgmt_firmware_write_object(ocs_t *ocs, char *name, void *buf, uint32_t buf_len,
+			void *arg_out, uint32_t arg_out_length, bool sfp_fw)
 {
 	int rc = 0;
 	uint32_t bytes_left;
@@ -991,18 +1629,20 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 	int last = 0;
 	ocs_mgmt_fw_write_result_t result;
 	uint32_t change_status = 0;
-        char status_str[80];
 
+	ocs_memset(&result, 0, sizeof(result));
 	ocs_sem_init(&(result.semaphore), 0, "fw_write");
 
 	bytes_left = buf_len;
 	offset = 0;
 	userp = (uint8_t *)buf;
 
-	if (ocs_dma_alloc(ocs, &dma, FW_WRITE_BUFSIZE, 4096)) {
-		ocs_log_err(ocs, "ocs_mgmt_firmware_write: malloc failed");
+	if (ocs_dma_alloc(ocs, &dma, FW_WRITE_BUFSIZE, 4096, OCS_M_FLAGS_NONE)) {
+		ocs_log_err(ocs, "ocs_mgmt_firmware_write_object: malloc failed");
 		return -ENOMEM;
 	}
+
+	ocs_log_info(ocs, "Firmware update is initiated\n");
 
 	while (bytes_left > 0) {
 		if (bytes_left > FW_WRITE_BUFSIZE) {
@@ -1013,6 +1653,7 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 
 		// Copy xfer_size bytes from user space to kernel buffer
 		if (ocs_copy_from_user(dma.virt, userp, xfer_size)) {
+			ocs_log_err(ocs, "copy_from_user failed\n");
 			rc = -EFAULT;
 			break;
 		}
@@ -1023,7 +1664,24 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 		}
 
 		// Send the HAL command
-		ocs_hal_firmware_write(&ocs->hal, &dma, xfer_size, offset, last, ocs_mgmt_fw_write_cb, &result);
+		if (sfp_fw) {
+			if (ocs_hal_sfp_firmware_write(&ocs->hal, &dma, xfer_size, offset, last,
+						ocs_mgmt_fw_write_cb, &result)) {
+				ocs_log_err(ocs, "Firmware image data write failed. xfer_size %d, "
+						"offset %08x, last %d\n", xfer_size, offset, last);
+				rc = -EIO;
+				break;
+			}
+
+		} else {
+			if (ocs_hal_firmware_write(&ocs->hal, &dma, xfer_size, offset, last,
+						ocs_mgmt_fw_write_cb, &result)) {
+				ocs_log_err(ocs, "Firmware image data write failed. xfer_size %d, "
+						"offset %08x, last %d\n", xfer_size, offset, last);
+				rc = -EIO;
+				break;
+			}
+		}
 
 		// Wait for semaphore to be signaled when the command completes
 		// TODO:  Should there be a timeout on this?  If so, how long?
@@ -1034,27 +1692,29 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 			break;
 		}
 
-		if (result.actual_xfer == 0) {
-			ocs_log_test(ocs, "actual_write_length is %d\n", result.actual_xfer);
-			rc = -EFAULT;
-			break;
-		}
-
-		// Check status
-		if (result.status != 0) {
-			ocs_log_err(ocs, "write returned status %d, additional status %d\n",
-				    result.status, result.ext_status);
+		if (result.actual_xfer == 0 || result.status != 0) {
 			if (result.ext_status == SLI4_MBOX_EXT_STATUS_OBJ_UNSUPPORTED_FIRMWARE) {
 				ocs_log_err(ocs, "Firmware does not meet minimum version requirement for this IPL\n");
 				rc = -EACCES;
+			} else if (result.ext_status == SLI4_MBOX_EXT_STATUS_OBJ_BAD_MAGIC_NUMBER) {
+				ocs_log_err(ocs, "Invalid Firmware image for this HBA\n");
+				rc = -EFAULT;
 			} else {
+				ocs_log_err(ocs, "Firmware write failed. actual_xfer %d, status: 0x%x, ext_status: 0x%x, "
+					    "ext_status_2: 0x%x\n",
+					    result.actual_xfer, result.status,
+					    result.ext_status, result.ext_status_2);
+
 				rc = -EFAULT;
 			}
+
 			break;
 		}
 
-		if (last) {
+		if (!sfp_fw && last) {
 			change_status = result.change_status;
+			if (change_status == SLI4_WRITE_OBJECT_CHANGE_STATUS_NO_RESET)
+				ocs_hal_update_fw_revision(&ocs->hal);
 		}
 
 		bytes_left -= result.actual_xfer;
@@ -1064,12 +1724,19 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 	}
 
 	/* Create string with status and copy to userland */
-	if ((arg_out_length > 0) && (arg_out != NULL)) {
-		if (arg_out_length > sizeof(status_str)) {
-			arg_out_length = sizeof(status_str);
+	if ((arg_out_length >= sizeof(ocs_fw_write_status_t)) && (arg_out != NULL)) {
+		ocs_fw_write_status_t exec_status;
+
+		ocs_memset(&exec_status, 0, sizeof(ocs_fw_write_status_t));
+		if (arg_out_length > sizeof(ocs_fw_write_status_t)) {
+			arg_out_length = sizeof(ocs_fw_write_status_t);
 		}
-		ocs_snprintf(status_str, arg_out_length, "%d", change_status);
-		if (ocs_copy_to_user(arg_out, status_str, arg_out_length))
+		exec_status.status = result.status;
+		exec_status.ext_status = result.ext_status;
+		exec_status.ext_status2 = result.ext_status_2;
+		exec_status.change_status = change_status;
+
+		if (ocs_copy_to_user(arg_out, &exec_status, arg_out_length))
 			ocs_log_test(ocs, "copy to user failed for change_status\n");
 	}
 
@@ -1080,7 +1747,8 @@ ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, voi
 }
 
 static void
-ocs_mgmt_fw_write_cb(int32_t status, int32_t ext_status, uint32_t actual_write_length,
+ocs_mgmt_fw_write_cb(int32_t status, int32_t ext_status, int32_t ext_status_2,
+		     uint32_t actual_write_length,
 		     uint32_t change_status, void *arg)
 {
 	ocs_mgmt_fw_write_result_t *result = arg;
@@ -1089,8 +1757,25 @@ ocs_mgmt_fw_write_cb(int32_t status, int32_t ext_status, uint32_t actual_write_l
 	result->actual_xfer = actual_write_length;
 	result->change_status = change_status;
 	result->ext_status = ext_status;
+	result->ext_status_2 = ext_status_2;
 
 	ocs_sem_v(&(result->semaphore));
+}
+
+static int32_t
+ocs_mgmt_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len,
+			void *arg_out, uint32_t arg_out_length)
+{
+	return ocs_mgmt_firmware_write_object(ocs, name, buf, buf_len, arg_out,
+			arg_out_length, false);
+}
+
+static int32_t
+ocs_mgmt_sfp_firmware_write(ocs_t *ocs, char *name, void *buf, uint32_t buf_len,
+			void *arg_out, uint32_t arg_out_length)
+{
+	return ocs_mgmt_firmware_write_object(ocs, name, buf, buf_len, arg_out,
+			arg_out_length, true);
 }
 
 typedef struct ocs_mgmt_parity_stats_result_s {
@@ -1173,10 +1858,410 @@ ocs_mgmt_read_parity_stats(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in
 	return rc;
 }
 
-void ocs_read_temperature_lancer_cb(int32_t status, uint32_t curr_temp,
-				    uint32_t crit_temp_thr, uint32_t warn_temp_thr,
-				    uint32_t norm_temp_thr, uint32_t fan_off_thr,
-				    uint32_t fan_on_thr, void *arg)
+int32_t
+ocs_set_fc_trunk_mode(ocs_t *ocs, uint32_t trunk_mode)
+{
+	int32_t rc;
+
+	rc = ocs_hal_set_trunk_mode(&ocs->hal, trunk_mode);
+	if (rc) {
+		ocs_log_err(ocs, "failed to set trunk mode\n");
+	} else {
+		ocs_log_debug(ocs, "Trunk mode been set successfully\n");
+	}
+
+	return rc;
+}
+
+int32_t
+ocs_get_fc_trunk_info(ocs_t *ocs, uint32_t *trunk_info)
+{
+	int32_t rc;
+
+	rc = ocs_hal_get_trunk_info(&ocs->hal, trunk_info);
+	if (rc) {
+		ocs_log_err(ocs, "failed to get trunk info\n");
+	} else {
+		ocs_log_debug(ocs, "Trunk info obtained successfully\n");
+	}
+
+	return rc;
+}
+
+int
+ocs_get_dual_dump_state(ocs_t *ocs, uint32_t *dump_state)
+{
+	int32_t rc;
+
+	rc = ocs_hal_config_get_dual_dump_state(&ocs->hal, dump_state);
+	if (rc)
+		ocs_log_err(ocs, "Failed to retrieve dual dump state\n");
+
+	return rc;
+}
+
+int
+ocs_set_loopback_mode(ocs_t *ocs, uint32_t loopback_mode)
+{
+	int rc = 0;
+
+	if (loopback_mode == INTERNAL_LOOPBACK) {
+		ocs_log_debug(ocs, "Setting port to internal loopback mode\n");
+	} else if (loopback_mode == EXTERNAL_LOOPBACK) {
+		ocs_log_debug(ocs, "Setting port to external loopback mode\n");
+	} else {
+		ocs_log_debug(ocs, "Unsupported loopback mode: %d\n", loopback_mode);
+		rc = -1;
+		goto exit_set_loopback_mode;
+	}
+
+	ocs->external_loopback = 1;
+	rc = ocs_hal_set_loopback_mode(&ocs->hal, loopback_mode);
+	if (rc) {
+		ocs->external_loopback = 0;
+		ocs_log_err(ocs, "failed to set loopback mode\n");
+	} else {
+		ocs_log_debug(ocs, "Loopback mode been set successfully\n");
+	}
+
+exit_set_loopback_mode:
+	return rc;
+}
+
+static void
+ocs_run_link_loopback_cb(ocs_node_t *node, ocs_node_cb_t *cbdata, void *arg)
+{
+	ocs_loopback_cb_args_t *loopback_cb_args = arg;
+
+	if (loopback_cb_args) {
+		if (ocs_atomic_read(&loopback_cb_args->delay_args_mem_free)) {
+			ocs_log_debug(node->ocs, "Freeing loopback cb args memory\n");
+			ocs_free(node->ocs, loopback_cb_args, sizeof(ocs_loopback_cb_args_t));
+			goto els_io_done;
+		}
+
+		if (ocs_atomic_read(&loopback_cb_args->frame_cnt) &&
+		    ocs_atomic_sub_and_test(&loopback_cb_args->frame_cnt, 1)) {
+			ocs_sem_v(&loopback_cb_args->wait_io_sem);
+		}
+	}
+
+els_io_done:
+	if (cbdata) {
+		ocs_io_t *els = NULL;
+
+		els = cbdata->els;
+		els->els_info->els_callback = NULL;
+		els->els_info->els_callback_arg = NULL;
+		ocs_memset(&els->els_info->loopback_evt_data, 0, sizeof(els->els_info->loopback_evt_data));
+		ocs_ref_put(&els->ref);
+	}
+}
+
+int
+ocs_run_link_loopback(ocs_t *ocs, void *user_tx_buf, uint32_t user_tx_buf_len,
+		      void *user_rx_buf, uint32_t user_rx_buf_len, uint32_t num_frames)
+{
+	int rc = 0;
+	uint32_t i, offset = 0;
+	void *tx_buf = NULL;
+	void *rx_buf = NULL;
+	void *tx_buf_offset = NULL;
+	void *rx_buf_offset = NULL;
+	ocs_io_t *els = NULL;
+	ocs_node_t *node = NULL;
+	ocs_loopback_cb_args_t *loopback_cb_args = NULL;
+
+	if ((user_tx_buf_len == 0) || (user_rx_buf_len == 0) || (user_tx_buf_len != user_rx_buf_len)) {
+		ocs_log_test(ocs, "Error: loopback tx/rx buffer length is invalid\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	if (!user_tx_buf || !user_rx_buf) {
+		ocs_log_test(ocs, "Error: loopback tx/rx data buffer is not provided\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	tx_buf = ocs_malloc(ocs, user_tx_buf_len, OCS_M_ZERO);
+	if (!tx_buf) {
+		ocs_log_err(ocs, "Failed to allocate buffers for tx frame\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	rx_buf = ocs_malloc(ocs, user_rx_buf_len, OCS_M_ZERO);
+	if (!rx_buf) {
+		ocs_log_err(ocs, "Failed to allocate buffers for rx frame\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	if (ocs_copy_from_user(tx_buf, user_tx_buf, user_tx_buf_len)) {
+		ocs_log_err(ocs, "Failed to copy user data into tx buf\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	loopback_cb_args = ocs_malloc(ocs, sizeof(ocs_loopback_cb_args_t), OCS_M_ZERO);
+	if (!loopback_cb_args) {
+		ocs_log_err(ocs, "Failed to allocate loopback callback arg\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	ocs_atomic_set(&loopback_cb_args->frame_cnt, 0);
+	ocs_atomic_set(&loopback_cb_args->delay_args_mem_free, 0);
+	ocs_sem_init(&loopback_cb_args->wait_io_sem, 0, "loopback_frame_sem");
+
+	if (ocs->domain)
+		node = ocs_node_find(ocs->domain->sport, 1);
+
+	if (!node) {
+		ocs_log_err(ocs, "Failed to find node for loopback test\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	ocs_node_lock(node);
+	for (i = 0, offset = 0; i < num_frames; i++, offset += LOOPBACK_BUF_SIZE) {
+		tx_buf_offset = tx_buf + offset;
+		rx_buf_offset = rx_buf + offset;
+
+		ocs_atomic_add_return(&loopback_cb_args->frame_cnt, 1);
+		els = ocs_ns_send_loopback_frame(node, tx_buf_offset, LOOPBACK_BUF_SIZE, rx_buf_offset,
+						 LOOPBACK_BUF_SIZE, LOOPBACK_FRAME_TIMEOUT_SEC, 0,
+						 ocs_run_link_loopback_cb, loopback_cb_args);
+		if (!els) {
+			ocs_log_err(ocs, "Loopback ELS IO(%d) submission failed\n", i);
+			ocs_atomic_sub_and_test(&loopback_cb_args->frame_cnt, 1);
+			ocs_node_unlock(node);
+			rc = -1;
+			goto free_and_return;
+		}
+	}
+	ocs_node_unlock(node);
+
+	if (ocs_atomic_read(&loopback_cb_args->frame_cnt) &&
+	    ocs_sem_p(&loopback_cb_args->wait_io_sem, (LOOPBACK_FRAME_TIMEOUT_SEC + 1) * 1000 * 1000) != 0) {
+		ocs_log_err(ocs, "wait_io_sem failed; loopback frame not received\n");
+		els->els_info->loopback_evt_data.loopback_rx_data = NULL;
+		ocs_atomic_set(&loopback_cb_args->delay_args_mem_free, 1);
+		rc = -1;
+		goto free_and_return;
+	}
+
+	if (ocs_copy_to_user(user_rx_buf, rx_buf, user_rx_buf_len)) {
+		ocs_log_err(ocs, "Failed to copy rx data into user buf\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+free_and_return:
+	ocs->external_loopback = 0;
+
+	if (loopback_cb_args && !ocs_atomic_read(&loopback_cb_args->delay_args_mem_free))
+		ocs_free(ocs, loopback_cb_args, sizeof(ocs_loopback_cb_args_t));
+
+	if (tx_buf)
+		ocs_free(ocs, tx_buf, user_tx_buf_len);
+
+	if (rx_buf)
+		ocs_free(ocs, rx_buf, user_rx_buf_len);
+
+	return rc;
+}
+
+int
+ocs_sfp_fw_upgrade(ocs_t *ocs, void *arg_in, uint32_t arg_in_len,
+		     void *arg_out, uint32_t arg_out_len)
+{
+	int rc = 0;
+	uint16_t upgrade_op;
+	void *results;
+
+	if (!arg_in || !arg_in_len || !arg_out || !arg_out_len) {
+		ocs_log_err(ocs, "Invalid input output parameters \n");
+		return -1;
+	}
+
+	if (ocs_copy_from_user(&upgrade_op, arg_in, MIN(arg_in_len, sizeof(upgrade_op)))) {
+		ocs_log_err(ocs, "Failed to copy input parameter\n");
+		return -1;
+	}
+
+	results = ocs_malloc(ocs, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (results == NULL) {
+		ocs_log_err(ocs, "Failed to allocate buffer for mbox command\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	rc = ocs_hal_sfp_fw_upgrade(&ocs->hal, upgrade_op, results, arg_out_len);
+	if (rc) {
+		ocs_log_err(ocs, "sfp fw upgrade command failed %d\n", rc);
+	}
+
+	if (ocs_copy_to_user(arg_out, results, arg_out_len)) {
+		ocs_log_err(ocs, "Failed to copy results\n");
+		rc = -1;
+	}
+
+free_and_return:
+	if (results)
+		ocs_free(ocs, results, arg_out_len);
+
+	return rc;
+}
+
+int
+ocs_run_pci_loopback(ocs_t *ocs, void *user_tx_buf, uint32_t user_tx_buf_len,
+		     void *user_rx_buf, uint32_t user_rx_buf_len)
+{
+	int rc = 0;
+	void *tx_buf = NULL;
+	void *rx_buf = NULL;
+
+	if ((user_tx_buf_len == 0) || (user_rx_buf_len == 0) || (user_tx_buf_len != user_rx_buf_len)) {
+		ocs_log_test(ocs, "Error: loopback tx/rx buffer length is invalid\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	if (!user_tx_buf || !user_rx_buf) {
+		ocs_log_test(ocs, "Error: loopback either tx data or rx buffer not provided\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	tx_buf = ocs_malloc(ocs, user_tx_buf_len , OCS_M_ZERO | OCS_M_NOWAIT);
+	if (tx_buf == NULL) {
+		ocs_log_err(ocs, "Failed to allocate buffer for TX frame\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	rx_buf = ocs_malloc(ocs, user_rx_buf_len , OCS_M_ZERO | OCS_M_NOWAIT);
+	if (rx_buf == NULL) {
+		ocs_log_err(ocs, "Failed to allocate buffer for TX frame\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	if (ocs_copy_from_user(tx_buf, user_tx_buf, user_tx_buf_len)) {
+		ocs_log_err(ocs, "Failed to copy user data into TX buf\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+	rc = ocs_hal_run_biu_diag(&ocs->hal, tx_buf, user_tx_buf_len, rx_buf, user_rx_buf_len);
+	if (rc) {
+		ocs_log_err(ocs, "BIU DIAG MBOX command is failed\n");
+		goto free_and_return;
+	}
+
+	if (ocs_copy_to_user(user_rx_buf, rx_buf, user_rx_buf_len)) {
+		ocs_log_err(ocs, "Failed to copy RX data into user buf\n");
+		rc = -1;
+		goto free_and_return;
+	}
+
+free_and_return:
+	if (tx_buf)
+		ocs_free(ocs, tx_buf, user_tx_buf_len);
+
+	if (rx_buf)
+		ocs_free(ocs, rx_buf, user_rx_buf_len);
+
+	return rc;
+}
+
+void
+ocs_capture_ras_global_params(void)
+{
+	char prop_buf[32];
+	uint32_t fw_diag_log_size = 0;
+	uint32_t fw_diag_log_level = 1;
+
+	if (ocs_get_property("fw_diag_log_size", prop_buf, sizeof(prop_buf)) == 0) {
+		char *p;
+
+		fw_diag_log_size = ocs_strtoul(prop_buf, &p, 0);
+
+		switch(*p) {
+		case 'm': case 'M':
+			fw_diag_log_size *= 1024;
+			FALL_THROUGH; /* fall through */
+		case 'k': case 'K':
+			fw_diag_log_size *= 1024;
+			break;
+		default:
+			/* invalid parameter, disable the feature */
+			fw_diag_log_size *= 0;
+		}
+
+		if (fw_diag_log_size) {
+			if (fw_diag_log_size > OCS_RAS_LOGICAL_BUFFER_SIZE_MAX)
+				fw_diag_log_size = OCS_RAS_LOGICAL_BUFFER_SIZE_MAX;
+			if (fw_diag_log_size < OCS_RAS_LOGICAL_BUFFER_SIZE_MIN)
+				fw_diag_log_size = OCS_RAS_LOGICAL_BUFFER_SIZE_MIN;
+			/* verify and adjust logical buffer size to multiple of 128KB */
+			fw_diag_log_size = ((fw_diag_log_size / OCS_RAS_LOGICAL_BUFFER_SIZE_MIN) *
+					    OCS_RAS_LOGICAL_BUFFER_SIZE_MIN);
+		}
+	}
+	hal_global.fw_diag_log_size = fw_diag_log_size;
+
+	if (ocs_get_property("fw_diag_log_level", prop_buf, sizeof(prop_buf)) == 0) {
+		fw_diag_log_level = ocs_strtoul(prop_buf, 0, 0);
+		if (fw_diag_log_level > OCS_RAS_FW_LOG_LEVEL_MAX)
+			fw_diag_log_level = OCS_RAS_FW_LOG_LEVEL_MAX;
+	}
+	hal_global.fw_diag_log_level = fw_diag_log_level;
+}
+
+int
+ocs_ras_collect_diag_logs(ocs_t *ocs, void *user_tx_buf, uint32_t user_tx_buf_len,
+			  void *user_rx_buf, uint32_t user_rx_buf_len)
+{
+	int rc = 0;
+	void *rx_buf = NULL;
+	int32_t buf_len;
+
+	if (!user_rx_buf_len || !user_rx_buf) {
+		ocs_log_err(ocs, "Error: tx/rx buffer is invalid\n");
+		return -EINVAL;
+	}
+
+	rx_buf = ocs_vmalloc(ocs, user_rx_buf_len, OCS_M_ZERO);
+	if (rx_buf == NULL) {
+		ocs_log_err(ocs, "unable to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	buf_len = ocs_ras_copy_logs(ocs, rx_buf + sizeof(uint32_t), user_rx_buf_len - sizeof(uint32_t));
+	*((uint32_t *)rx_buf) = buf_len;
+	if (buf_len > 0) {
+		if (ocs_copy_to_user(user_rx_buf, rx_buf, buf_len + sizeof(uint32_t))) {
+			ocs_log_err(ocs, "Failed to copy buffer for fw diag log\n");
+			rc = -EPERM;
+		} else {
+			rc = 0;
+		}
+	} else {
+		rc = -EINVAL;
+	}
+
+	ocs_vfree(ocs, rx_buf, user_rx_buf_len);
+	return rc;
+}
+
+void
+ocs_read_temperature_lancer_cb(int32_t status, uint32_t curr_temp,
+				uint32_t crit_temp_thr, uint32_t warn_temp_thr,
+				uint32_t norm_temp_thr, uint32_t fan_off_thr,
+				uint32_t fan_on_thr, void *arg)
 {
 	ocs_mgmt_lancer_temp_result_t *result = (ocs_mgmt_lancer_temp_result_t *)arg;
 	ocs_t *ocs = result->ocs;
@@ -1197,13 +2282,19 @@ void ocs_read_temperature_lancer_cb(int32_t status, uint32_t curr_temp,
 	ocs_sem_v(&result->waitsem);
 }
 
-int32_t ocs_read_temperature_lancer(ocs_t *ocs, void *buf, uint32_t buf_len)
+int32_t
+ocs_read_temperature_lancer(ocs_t *ocs, void *buf, uint32_t buf_len)
 {
 	int32_t rc = -1;
 	ocs_mgmt_lancer_temp_result_t *result;
 
 	if (buf_len < OCS_DUMP_TYPE4_WKI_TAG_SAT_TEM_RESP_LEN) {
 		ocs_log_err(ocs, "Insufficient output buffer\n");
+		return rc;
+	}
+
+	if (!buf) {
+		ocs_log_err(ocs, "Error: buffer is invalid\n");
 		return rc;
 	}
 
@@ -1270,7 +2361,7 @@ ocs_mgmt_get_bios_config(ocs_t *ocs, char *name,
 
 		rc = ocs_hal_dump_type2(&ocs->hal, OCS_EFIBIOS_REGION_ID, uefi_bios_region_info, sizeof(ocs_uefi_bios_struct_t));
 		if (rc) {
-			ocs_log_err(ocs, "Failed to read UEFI BIOS config data\n");
+			ocs_log_err(ocs, "Failed to read UEFI BIOS config data rc: %d \n", rc);
 			ocs_free(ocs, uefi_bios_region_info, sizeof(ocs_uefi_bios_struct_t));
 			return -1;
 		}
@@ -1333,7 +2424,7 @@ ocs_mgmt_update_uefi_bios_config(ocs_t *ocs, char *name,
 
 	rc = ocs_hal_update_cfg(&ocs->hal, OCS_EFIBIOS_REGION_ID, bios_region_info, sizeof(ocs_uefi_bios_struct_t));
 	if (rc) {
-		ocs_log_err(ocs, "Failed to update UEFI BIOS config data\n");
+		ocs_log_err(ocs, "Failed to update UEFI BIOS config data: %x\n", rc);
 		rc = -1;
 	}
 
@@ -1378,7 +2469,7 @@ typedef struct ocs_mgmt_sfp_result {
 	int32_t status;
 	ocs_atomic_t refcnt;
 	uint32_t bytes_read;
-	uint32_t page_data[32];
+	uint32_t page_data[64];
 } ocs_mgmt_sfp_result_t;
 
 static void
@@ -1390,7 +2481,7 @@ ocs_mgmt_sfp_cb(void *os, int32_t status, uint32_t bytes_read, uint32_t *data, v
 	if (result) {
 		result->status = status;
 		result->bytes_read = bytes_read;
-		ocs_memcpy(&result->page_data, data, SFP_PAGE_SIZE);
+		ocs_memcpy(&result->page_data, data, bytes_read);
 
 		if (ocs_atomic_sub_and_test(&result->refcnt, 1)) {
 			ocs_free(ocs, result, sizeof(*result));
@@ -1398,6 +2489,93 @@ ocs_mgmt_sfp_cb(void *os, int32_t status, uint32_t bytes_read, uint32_t *data, v
 		}
 		ocs_sem_v(&(result->semaphore));
 	}
+}
+
+static bool
+ocs_validate_filter_def(ocs_t *ocs, char *filter)
+{
+	char *p = filter, *e;
+	uint32_t i;
+
+	for (i = 0; (i < ARRAY_SIZE(ocs->hal.config.filter_def)) && p && *p; ) {
+		ocs_strtoul(p, &e, 0);
+		i ++;
+
+		if (!e || *e != ',')
+			break;
+		p = e + 1;
+	}
+
+	if (i != ARRAY_SIZE(ocs->hal.config.filter_def))
+		return false;
+	else
+		return true;
+}
+
+static int32_t
+ocs_mgmt_update_protocols(ocs_t *ocs, char *name,
+			  void *arg_in, uint32_t arg_in_len,
+			  void *arg_out, uint32_t arg_out_len)
+{
+	int32_t rc = 0;
+	int initiator_flags = 0, target_flags = 0;
+	ocs_hal_qtop_t *qtop;
+	ocs_configure_protocols_t *protocols = ocs_malloc(ocs, sizeof(ocs_configure_protocols_t),
+			OCS_M_ZERO | OCS_M_NOWAIT);
+
+	if (protocols == NULL) {
+		ocs_log_err(ocs, "failed to allocate memory\n");
+		return -ENOSPC;
+	}
+
+	if (ocs_copy_from_user(protocols, arg_in, MIN(arg_in_len, sizeof(ocs_configure_protocols_t)))) {
+		ocs_log_err(ocs, "failed to copy from user buff\n");
+		rc = -EFAULT;
+		goto exit;
+	}
+
+	if (protocols->scsi_initiator)
+		initiator_flags |= OCS_INITIATOR_TYPE_FCP;
+	if (protocols->nvme_initiator)
+		initiator_flags |= OCS_INITIATOR_TYPE_NVME;
+	if (protocols->scsi_target)
+		target_flags |= OCS_TARGET_TYPE_FCP;
+	if (protocols->nvme_target)
+		target_flags |= OCS_TARGET_TYPE_NVME;
+
+	/* Make sure at least one protocol is valid */
+	if (!initiator_flags && !target_flags) {
+		ocs_log_err(ocs, "at least one protocol is required\n");
+		rc = -EINVAL;
+		goto exit;
+	}
+
+	/* Validate queue_topology */
+	qtop = ocs_hal_qtop_parse(&ocs->hal, (const char *)protocols->queue_topology);
+	if (!qtop) {
+		ocs_log_err(ocs, "queue_topology %s format is incorrect.\n", protocols->queue_topology);
+		rc = -EINVAL;
+		goto exit;
+	}
+	ocs_hal_qtop_free(qtop);
+
+	if (!ocs_validate_filter_def(ocs, protocols->filter_def)) {
+		ocs_log_err(ocs, "filter_def %s format is incorrect.\n", protocols->filter_def);
+		rc = -EINVAL;
+		goto exit;
+	}
+
+	/* Update the user values for next reset. */
+	ocs_strncpy(ocs->user_queue_topology, protocols->queue_topology,
+			sizeof(ocs->user_queue_topology));
+	ocs_strncpy(ocs->user_filter_def, protocols->filter_def,
+			sizeof(ocs->user_filter_def));
+	ocs->user_ini_fc_types = initiator_flags;
+	ocs->user_tgt_fc_types = target_flags;
+	ocs->update_protocols = true;
+exit:
+	ocs_free(ocs, protocols, sizeof(ocs_configure_protocols_t));
+	return rc;
 }
 
 /**
@@ -1522,7 +2700,7 @@ ocs_mgmt_list_dhchap_secrets(ocs_t *ocs, char *name,
 	}
 
 	rc = ocs_copy_to_user(arg_out, ids, arg_out_len);
-	if (rc) 
+	if (rc)
 		ocs_log_err(ocs, "Failed to copy buffer\n");
 
 	ocs_free(ocs, ids, arg_out_len);
@@ -1619,6 +2797,15 @@ get_driver_version(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 }
 
 static void
+get_scsi_host_name(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
+{
+	char scsi_host_devname[256];
+
+	ocs_scsi_get_host_devname(ocs, scsi_host_devname, sizeof(scsi_host_devname));
+	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "scsi_host_devname", scsi_host_devname);
+}
+
+static void
 get_desc(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
 	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "desc", ocs->desc);
@@ -1669,6 +2856,15 @@ get_hw_rev3(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	ocs_hal_get(&ocs->hal, OCS_HAL_HW_REV3, &value);
 
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "hw_rev3", "%u", value);
+}
+
+static void
+get_flash_id(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
+{
+	uint32_t value;
+	ocs_hal_get(&ocs->hal, OCS_HAL_FLASH_ID, &value);
+
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "flash_id", "%u", value);
 }
 
 static void
@@ -1742,40 +2938,56 @@ get_phy_port_num(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "phy_port_num", "0x%04x", phy_port);
 }
 
+static uint32_t
+get_sli_family(ocs_t *ocs)
+{
+	uint32_t sli_intf;
+
+	sli_intf = ocs_config_read32(ocs, SLI4_INTF_REG);
+
+	return sli_intf_sli_family(sli_intf); 
+
+}
+
 static void
 get_asic_id(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
+	uint32_t family;
+	uint32_t asic_id;
+	uint32_t rev_id;
 
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "asic_id_reg", "0x%04x",
-		ocs_config_read32(ocs, SLI4_ASIC_ID_REG));
+	family = get_sli_family(ocs); 
+
+	if (family == SLI4_FAMILY_CHECK_ASIC_TYPE) {
+		asic_id =  ocs_config_read32(ocs, SLI4_ASIC_ID_REG);
+	} else {
+		rev_id = ocs_config_read32(ocs, SLI4_PCI_CLASS_REVISION) & SLI4_PCI_REV_ID_MASK;
+		asic_id = (family << SLI4_ASIC_GEN_SHIFT) | rev_id;
+	}
+
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "asic_id_reg", "0x%04x", asic_id);
+
 }
 
 static void
 get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
 	uint32_t family;
-	uint32_t asic_id;
-	uint32_t asic_gen_num;
-	uint32_t asic_rev_num;
 	uint32_t rev_id;
 	char result_buf[80];
 	char tmp_buf[80];
 
-	family = (ocs_config_read32(ocs, SLI4_INTF_REG) & 0x00000f00) >> 8;
-	asic_id = ocs_config_read32(ocs, SLI4_ASIC_ID_REG);
-	asic_rev_num = asic_id & 0xff;
-	asic_gen_num = (asic_id & 0xff00) >> 8;
-
-	rev_id = ocs_config_read32(ocs, SLI4_PCI_CLASS_REVISION) & 0xff;
-
+	family = get_sli_family(ocs); 
+	rev_id = ocs_config_read32(ocs, SLI4_PCI_CLASS_REVISION) & SLI4_PCI_REV_ID_MASK;
+	
 	switch(family) {
-	case 0x00:
+	case SLI4_ASIC_GEN_BE2:
 		// BE2
 		ocs_strncpy(result_buf,  "BE2 A", sizeof(result_buf));
 		ocs_snprintf(tmp_buf, 2, "%d", rev_id);
 		strcat(result_buf, tmp_buf);
 		break;
-	case 0x01:
+	case SLI4_FAMILY_BE3R:
 		// BE3
 		ocs_strncpy(result_buf, "BE3", sizeof(result_buf));
 		if (rev_id >= 0x10) {
@@ -1786,17 +2998,17 @@ get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		ocs_snprintf(tmp_buf, 2, "%d", rev_id & 0x0f);
 		strcat(result_buf, tmp_buf);
 		break;
-	case 0x02:
+	case SLI4_FAMILY_SKYHAWK:
 		// Skyhawk A0
 		ocs_strncpy(result_buf, "Skyhawk A0", sizeof(result_buf));
 		break;
-	case 0x0a:
+	case SLI4_FAMILY_LANCER_A0:
 		// Lancer A0
 		ocs_strncpy(result_buf, "Lancer A", sizeof(result_buf));
 		ocs_snprintf(tmp_buf, 2, "%d", rev_id & 0x0f);
 		strcat(result_buf, tmp_buf);
 		break;
-	case 0x0b:
+	case SLI4_FAMILY_LANCER_B0_D0:
 		// Lancer B0 or D0
 		ocs_strncpy(result_buf, "Lancer", sizeof(result_buf));
 		ocs_snprintf(tmp_buf, 3, " %c", ((rev_id & 0xf0) >> 4) + 'A');
@@ -1804,37 +3016,38 @@ get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		ocs_snprintf(tmp_buf, 2, "%d", rev_id & 0x0f);
 		strcat(result_buf, tmp_buf);
 		break;
-	case 0x0c:
+	case SLI4_FAMILY_LANCER_G6:
 		ocs_strncpy(result_buf, "Lancer G6", sizeof(result_buf));
 		break;
-	case 0x0d:
+	case SLI4_FAMILY_PRISM:
 		ocs_strncpy(result_buf, "Prism", sizeof(result_buf));
 		break;
-	case 0x0f:
+	case SLI4_FAMILY_PRISMPLUS:
+		ocs_strncpy(result_buf, "Prismplus", sizeof(result_buf));
+		break;
+	case SLI4_FAMILY_CHECK_ASIC_TYPE: {
+		uint32_t asic_gen_num;
+		uint32_t asic_rev_num;
+		uint32_t asic_id;
+		asic_id = ocs_config_read32(ocs, SLI4_ASIC_ID_REG);
+		asic_rev_num = asic_id & SLI4_PCI_REV_ID_MASK;
+		asic_gen_num = (asic_id >> SLI4_ASIC_GEN_SHIFT) & SLI4_ASIC_GEN_MASK;
+
 		// Refer to ASIC_ID
 		switch(asic_gen_num) {
-		case 0x00:
+		case SLI4_ASIC_GEN_BE2:
 			ocs_strncpy(result_buf, "BE2", sizeof(result_buf));
 			break;
-		case 0x03:
+		case SLI4_ASIC_GEN_BE3:
 			ocs_strncpy(result_buf, "BE3-R", sizeof(result_buf));
 			break;
-		case 0x04:
+		case SLI4_ASIC_GEN_SKYHAWK:
 			ocs_strncpy(result_buf, "Skyhawk-R", sizeof(result_buf));
 			break;
-		case 0x05:
-			ocs_strncpy(result_buf, "Corsair", sizeof(result_buf));
-			break;
-		case 0x0b:
-			ocs_strncpy(result_buf, "Lancer", sizeof(result_buf));
-			break;
-		case 0x0c:
-			ocs_strncpy(result_buf, "LancerG6", sizeof(result_buf));
-			break;
-		case 0x0d:
-			ocs_strncpy(result_buf, "Prism", sizeof(result_buf));
-			break;
 		default:
+			/* Per SLI spec Appenndix A, the only asic's that set 
+			   SLI_Family to 0xF are SKH chips */
+			ocs_log_err(ocs, "family type 0x%x set for asic gen 0x%x\n",family, asic_gen_num);
 			ocs_strncpy(result_buf, "Unknown", sizeof(result_buf));
 		}
 		if (ocs_strcmp(result_buf, "Unknown") != 0) {
@@ -1844,6 +3057,7 @@ get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 			strcat(result_buf, tmp_buf);
 		}
 		break;
+	}
 	default:
 		ocs_strncpy(result_buf, "Unknown", sizeof(result_buf));
 	}
@@ -1855,7 +3069,7 @@ get_chip_type(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 static void
 get_supported_speeds(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
-	char supported_speeds[256] = { 0 };
+	char supported_speeds[128] = { 0 };
 	ocs_xport_stats_t speed;
 	size_t length = 0;
 
@@ -1936,13 +3150,13 @@ get_pci_subsystem_device(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 static void
 get_tgt_rscn_delay(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "tgt_rscn_delay", "%ld", ocs->tgt_rscn_delay_msec / 1000);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "tgt_rscn_delay", "%ld", (long)ocs->tgt_rscn_delay_msec / 1000);
 }
 
 static void
 get_tgt_rscn_period(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "tgt_rscn_period", "%ld", ocs->tgt_rscn_period_msec / 1000);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "tgt_rscn_period", "%ld", (long)ocs->tgt_rscn_period_msec / 1000);
 }
 
 static void
@@ -1982,7 +3196,7 @@ get_cmd_err_inject(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 static void
 get_cmd_delay_value(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "cmd_delay_value", "%ld", ocs->delay_value_msec);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "cmd_delay_value", "%ld", (long)ocs->delay_value_msec);
 }
 
 static void
@@ -2019,18 +3233,18 @@ get_sfp_a0(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	int i;
 	int32_t bytes_read;
 
-	page_data = ocs_malloc(ocs, SFP_PAGE_SIZE, OCS_M_ZERO);
+	page_data = ocs_malloc(ocs, SFP_PAGE_A0_SIZE, OCS_M_ZERO);
 	if (page_data == NULL) {
 		return;
 	}
 
-	buf = ocs_malloc(ocs, (SFP_PAGE_SIZE * 3) + 1, OCS_M_ZERO);
+	buf = ocs_malloc(ocs, (SFP_PAGE_A0_SIZE * 3) + 1, OCS_M_ZERO);
 	if (buf == NULL) {
-		ocs_free(ocs, page_data, SFP_PAGE_SIZE);
+		ocs_free(ocs, page_data, SFP_PAGE_A0_SIZE);
 		return;
 	}
 
-	bytes_read = ocs_mgmt_get_sfp(ocs, SFP_PAGE_A0, page_data, SFP_PAGE_SIZE);
+	bytes_read = ocs_mgmt_get_sfp(ocs, SFP_PAGE_A0, page_data, SFP_PAGE_A0_SIZE);
 	if (bytes_read <= 0) {
 		if (bytes_read == -ENODEV) {
 			ocs_log_debug(ocs, "No SFP module present on this device\n");
@@ -2041,7 +3255,7 @@ get_sfp_a0(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	} else {
 		char *d = buf;
 		uint8_t *s = page_data;
-		int buffer_remaining = (SFP_PAGE_SIZE * 3) + 1;
+		int buffer_remaining = (SFP_PAGE_A0_SIZE * 3) + 1;
 		int bytes_added;
 
 		for (i = 0; i < bytes_read; i++) {
@@ -2054,8 +3268,8 @@ get_sfp_a0(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "sfp_a0", buf);
 	}
 
-	ocs_free(ocs, page_data, SFP_PAGE_SIZE);
-	ocs_free(ocs, buf, (3 * SFP_PAGE_SIZE) + 1);
+	ocs_free(ocs, page_data, SFP_PAGE_A0_SIZE);
+	ocs_free(ocs, buf, (3 * SFP_PAGE_A0_SIZE) + 1);
 }
 
 static void
@@ -2066,24 +3280,24 @@ get_sfp_a2(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	int i;
 	int32_t bytes_read;
 
-	page_data = ocs_malloc(ocs, SFP_PAGE_SIZE, OCS_M_ZERO);
+	page_data = ocs_malloc(ocs, SFP_PAGE_A2_SIZE, OCS_M_ZERO);
 	if (page_data == NULL) {
 		return;
 	}
 
-	buf = ocs_malloc(ocs, (SFP_PAGE_SIZE * 3) + 1, OCS_M_ZERO);
+	buf = ocs_malloc(ocs, (SFP_PAGE_A2_SIZE * 3) + 1, OCS_M_ZERO);
 	if (buf == NULL) {
-		ocs_free(ocs, page_data, SFP_PAGE_SIZE);
+		ocs_free(ocs, page_data, SFP_PAGE_A2_SIZE);
 		return;
 	}
 
-	bytes_read = ocs_mgmt_get_sfp(ocs, SFP_PAGE_A2, page_data, SFP_PAGE_SIZE);
+	bytes_read = ocs_mgmt_get_sfp(ocs, SFP_PAGE_A2, page_data, SFP_PAGE_A2_SIZE);
 	if (bytes_read <= 0) {
 		ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "sfp_a2", "(unknown)");
 	} else {
 		char *d = buf;
 		uint8_t *s = page_data;
-		int buffer_remaining = (SFP_PAGE_SIZE * 3) + 1;
+		int buffer_remaining = (SFP_PAGE_A2_SIZE * 3) + 1;
 		int bytes_added;
 
 		for (i=0; i < bytes_read; i++) {
@@ -2096,8 +3310,8 @@ get_sfp_a2(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 		ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "sfp_a2", buf);
 	}
 
-	ocs_free(ocs, page_data, SFP_PAGE_SIZE);
-	ocs_free(ocs, buf, (3 * SFP_PAGE_SIZE) + 1);
+	ocs_free(ocs, page_data, SFP_PAGE_A2_SIZE);
+	ocs_free(ocs, buf, (3 * SFP_PAGE_A2_SIZE) + 1);
 }
 
 static void
@@ -2106,6 +3320,10 @@ get_fw_dump_present(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 	uint32_t dump_present = OCS_FW_DUMP_STATE_NONE;
 
 	ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_PRESENT, &dump_present);
+
+	if (dump_present == OCS_FW_DUMP_STATUS_NOT_PRESENT)
+		dump_present = 0;
+
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "fw_dump_present", "%d", dump_present);
 }
 
@@ -2152,10 +3370,17 @@ static void
 get_logmask(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
 
-	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "logmask", "0x%02x", ocs->logmask);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "logmask", "0x%08x", ocs->logmask);
 
 }
 
+static void
+get_ctrlmask(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
+{
+
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RW, "ctrlmask", "0x%08x", ocs->ctrlmask);
+
+}
 static void
 get_loglevel(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
@@ -2167,9 +3392,10 @@ get_loglevel(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 static void
 get_current_speed(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 {
-	uint32_t value;
+	uint32_t value = 0, fw_error;
 
-	ocs_hal_get(&(ocs->hal), OCS_HAL_LINK_SPEED, &value);
+	if (!ocs_hal_get(&ocs->hal, OCS_HAL_FW_ERROR, &fw_error) && !fw_error)
+		ocs_hal_get(&ocs->hal, OCS_HAL_LINK_SPEED, &value);
 
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "current_speed", "%d", value);
 }
@@ -2618,6 +3844,15 @@ set_logmask(ocs_t *ocs, char *name, char *value)
 }
 
 static int
+set_ctrlmask(ocs_t *ocs, char *name, char *value)
+{
+
+	ocs->ctrlmask = ocs_strtoul(value, NULL, 0);
+
+	return 0;
+}
+
+static int
 set_loglevel(ocs_t *ocs, char *name, char *value)
 {
 
@@ -2658,7 +3893,8 @@ set_configured_speed(ocs_t *ocs, char *name, char *value)
 		ocs_log_debug(ocs, "Bringing port online\n");
 		xport_rc = ocs_xport_control(ocs->xport, OCS_XPORT_PORT_ONLINE);
 		if (xport_rc != 0) {
-			result = -1;
+			ocs_log_err(ocs, "Port online failed\n");
+			result = -EIO;
 		}
 	}
 
@@ -2677,6 +3913,9 @@ set_configured_topology(ocs_t *ocs, char *name, char *value)
 	if (topo >= OCS_HAL_TOPOLOGY_MAX)
 		return -EINVAL;
 
+	if (!ocs_hal_validate_topology_support(&ocs->hal, topo))
+		return -EIO;
+
 	ocs_log_debug(ocs, "Taking port offline\n");
 	ocs->xport->forced_link_down = 1;
 	xport_rc = ocs_xport_control(ocs->xport, OCS_XPORT_PORT_OFFLINE);
@@ -2685,11 +3924,15 @@ set_configured_topology(ocs_t *ocs, char *name, char *value)
 		ocs->xport->forced_link_down = 0;
 		result = -EIO;
 	} else {
-		ocs_log_debug(ocs, "Setting port to topology %d\n", topo);
 		hal_rc = ocs_hal_set(&ocs->hal, OCS_HAL_TOPOLOGY, topo);
 		if (hal_rc != OCS_HAL_RTN_SUCCESS) {
 			ocs_log_err(ocs, "Topology set failed\n");
 			result = -EIO;
+		} else {
+			// Set the persistent topology before port is online
+			hal_rc = ocs_hal_set_persistent_topology(&ocs->hal, topo, OCS_CMD_NOWAIT);
+			if (hal_rc != OCS_HAL_RTN_SUCCESS)
+				ocs_log_err(ocs, "Set persistent topology feature failed: %d\n", hal_rc);
 		}
 
 		// If we failed to set the topology we still want to try to bring
@@ -3148,7 +4391,7 @@ get_nv_wwpn(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 			ocs_log_test(ocs, "getting wwpn status 0x%x\n", result->status);
 		}
 	} else {
-		ocs_atomic_sub_return(&result->refcnt, 1);	
+		ocs_atomic_sub_return(&result->refcnt, 1);
 	}
 exit:
 	if (ocs_atomic_sub_and_test(&result->refcnt, 1))
@@ -3197,12 +4440,118 @@ get_nv_wwnn(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf)
 			ocs_log_test(ocs, "getting wwnn status 0x%x\n", result->status);
 		}
 	} else {
-		ocs_atomic_sub_return(&result->refcnt, 1);	
+		ocs_atomic_sub_return(&result->refcnt, 1);
 	}
 exit:
 	if (ocs_atomic_sub_and_test(&result->refcnt, 1))
 		ocs_free(ocs, result, sizeof(ocs_mgmt_get_nvparms_result_t));
 }
+
+#ifdef OCS_GEN_ABORTS
+int32_t
+ocs_mgmt_abort_thread(ocs_thread_t *mythread)
+{
+	ocs_t *ocs = mythread->arg;
+	ocs_domain_t *domain;
+	ocs_sport_t *sport;
+	ocs_node_t *node;
+	ocs_io_t *io, *next;
+	ocs_list_t io_abort_list;
+
+	while (!ocs_thread_terminate_requested(mythread)) {
+		ocs_device_lock(ocs);
+		if (!ocs->domain) {
+			ocs_device_unlock(ocs);
+			ocs_msleep(200);
+			continue;
+		}
+
+		domain = ocs->domain;
+		ocs_domain_lock(domain);
+		ocs_list_foreach(&domain->sport_list, sport) {
+			ocs_sport_lock(sport);
+
+			ocs_list_init(&io_abort_list, ocs_io_t, send_abort_link);
+
+			ocs_list_foreach(&sport->node_list, node) {
+				ocs_lock(&node->active_ios_lock);
+				ocs_list_foreach_safe(&node->active_ios, io, next) {
+					if (ocs_ref_get_unless_zero(&io->ref)) {
+						ocs_list_add_tail(&io_abort_list, io);
+						if (ocs->gen_single_abort)
+							break;
+					}
+				}
+				ocs_unlock(&node->active_ios_lock);
+			}
+
+			ocs_list_foreach_safe(&io_abort_list, io, next) {
+				ocs_list_remove(&io_abort_list, io);
+				ocs_scsi_io_dispatch_abort(io, NULL, FALSE);
+
+				if (ocs->duplicate_aborts)
+					ocs_scsi_io_dispatch_abort(io, NULL, FALSE);
+
+				ocs_ref_put(&io->ref);
+			}
+			ocs_sport_unlock(sport);
+		}
+		ocs_domain_unlock(domain);
+		ocs_device_unlock(ocs);
+		ocs_msleep(ocs->gen_abort_interval_msecs);
+	}
+	return 0;
+}
+
+#define OCS_GEN_ABORT_DEF_INTERVAL_MS 500 /* Default 500 ms delay */
+
+static int32_t
+ocs_mgmt_gen_aborts(ocs_t *ocs, char *name, void *arg_in, uint32_t arg_in_len,
+		    void *arg_out, uint32_t arg_out_len)
+{
+	ocs_gen_aborts_t ocs_gen_aborts;
+
+	ocs_assert(arg_in_len == sizeof(ocs_gen_aborts_t), -EFAULT);
+
+	if (ocs_copy_from_user(&ocs_gen_aborts, arg_in, arg_in_len)) {
+		ocs_log_err(ocs, "error: failed to copy from user addr\n");
+		return -EFAULT;
+	}
+
+	if (ocs_gen_aborts.enable) {
+		if (ocs->gen_aborts) {
+			ocs_log_err(ocs, "Internal ABORTS generation is already enabled\n");
+			return 0;
+		}
+		ocs->gen_aborts = true;
+		if (ocs_gen_aborts.gen_single_abort) {
+			ocs_log_debug(ocs, "Generating random ABORT for single IO\n");
+			ocs->gen_single_abort = true;
+		}
+
+		ocs->gen_abort_interval_msecs = ocs_gen_aborts.gen_abort_interval_msecs;
+		if (!ocs->gen_abort_interval_msecs)
+			ocs->gen_abort_interval_msecs	= OCS_GEN_ABORT_DEF_INTERVAL_MS;
+
+		ocs->duplicate_aborts = ocs_gen_aborts.duplicate_aborts;
+		ocs_thread_create(ocs, &ocs->abts_gen_thread, ocs_mgmt_abort_thread,
+				"ocs_gen_abts", ocs, OCS_THREAD_RUN);	
+		ocs_log_debug(ocs, "Internal ABTS generation is enabled\n");
+	} else {
+		if (ocs->gen_aborts) {
+			ocs_thread_terminate(&ocs->abts_gen_thread);
+			ocs->gen_aborts = false;
+			ocs->gen_single_abort = false;
+			ocs->gen_abort_interval_msecs = 0;
+			ocs_log_debug(ocs, "Internal ABORTS generation is disabled\n");
+		} else {
+			ocs_log_warn(ocs, "ABORTS generation did not enabled\n");
+		}
+		ocs->duplicate_aborts = 0;
+	}
+	return 0;
+}
+#endif
 
 /**
  * @brief Get accumulated node abort counts
@@ -3314,7 +4663,7 @@ set_nv_wwn(ocs_t *ocs, char *name, char *wwn_p)
 			return -ENXIO;
 		}
 		if (result.status != 0) {
-			ocs_log_test(ocs, "getting nvparms status 0x%x\n", result.status);
+			ocs_log_err(ocs, "getting nvparms status 0x%x\n", result.status);
 			return -1;
 		}
 	}
@@ -3333,24 +4682,37 @@ set_nv_wwn(ocs_t *ocs, char *name, char *wwn_p)
 		wwnn = ocs_strcmp(wwnn_p, "NA");
 	}
 
+/* maximum length of WWPN/WWNN string including ':'*/
+#define OCS_MAX_WWN_STR 23
+
 	/* Parse the new WWPN */
 	if (wwpn != 0) {
+		if (ocs_strlen(wwpn_p) > OCS_MAX_WWN_STR) {
+			ocs_log_err(ocs, "Invalid WWPN passed %s len: %zu\n",
+				     wwpn_p, ocs_strlen(wwpn_p));
+			return -1;
+		}
 		if (ocs_sscanf(wwpn_p, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
 				&(new_wwpn[0]), &(new_wwpn[1]), &(new_wwpn[2]),
 				&(new_wwpn[3]), &(new_wwpn[4]), &(new_wwpn[5]),
 				&(new_wwpn[6]), &(new_wwpn[7])) != 8) {
-			ocs_log_test(ocs, "can't parse WWPN %s\n", wwpn_p);
+			ocs_log_err(ocs, "can't parse WWPN %s\n", wwpn_p);
 			return -1;
 		}
 	}
 
 	/* Parse the new WWNN */
 	if (wwnn != 0) {
+		if (ocs_strlen(wwnn_p) > OCS_MAX_WWN_STR) {
+			ocs_log_err(ocs, "Invalid WWNN passed %s len: %zu\n",
+				     wwnn_p, ocs_strlen(wwnn_p));
+			return -1;
+		}
 		if (ocs_sscanf(wwnn_p, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
 				&(new_wwnn[0]), &(new_wwnn[1]), &(new_wwnn[2]),
 				&(new_wwnn[3]), &(new_wwnn[4]), &(new_wwnn[5]),
 				&(new_wwnn[6]), &(new_wwnn[7])) != 8) {
-			ocs_log_test(ocs, "can't parse WWNN %s\n", wwnn_p);
+			ocs_log_err(ocs, "can't parse WWNN %s\n", wwnn_p);
 			return -1;
 		}
 	}
@@ -3380,7 +4742,7 @@ set_nv_wwn(ocs_t *ocs, char *name, char *wwn_p)
 			return -ENXIO;
 		}
 		if (result.status != 0) {
-			ocs_log_test(ocs, "setting wwn status 0x%x\n", result.status);
+			ocs_log_err(ocs, "setting wwn status 0x%x\n", result.status);
 			return -1;
 		}
 	}
@@ -3391,34 +4753,33 @@ set_nv_wwn(ocs_t *ocs, char *name, char *wwn_p)
 #if defined(OCS_INCLUDE_IO_DELAY)
 static int32_t
 ocs_mgmt_io_delay_config(ocs_t *ocs, char *name, void *buf, uint32_t buf_len,
-		void *arg_out, uint32_t arg_out_length)
+			 void *arg_out, uint32_t arg_out_length)
 {
 	#define MAX_LIO_DELAY_MS 60000 /*1000 ms */
 	ocs_io_delay_args_t io_delay_args;
-	
+
 	if (ocs_copy_from_user(&io_delay_args, buf, buf_len)) {
 		ocs_log_err(ocs, "error: failed to copy from user addr\n");
 		return -EFAULT;
 	}
 
-        if (io_delay_args.delay_max_ms < io_delay_args.delay_min_ms) {
-                ocs_log_err(ocs, "delay_max_ms: min must be less than or equal to max\n");
-                return -EINVAL;
-        } else if (io_delay_args.delay_max_ms > MAX_LIO_DELAY_MS) {
-                ocs_log_err(ocs, "delay_max_ms: range values must be less than %dms\n",
-				MAX_LIO_DELAY_MS);
-                return -EINVAL;
-        }
+	if (io_delay_args.delay_max_ms < io_delay_args.delay_min_ms) {
+		ocs_log_err(ocs, "delay_max_ms: min must be less than or equal to max\n");
+		return -EINVAL;
+	} else if (io_delay_args.delay_max_ms > MAX_LIO_DELAY_MS) {
+		ocs_log_err(ocs, "delay_max_ms: range values must be less than %dms\n", MAX_LIO_DELAY_MS);
+		return -EINVAL;
+	}
 
 	ocs->tgt_ocs.io_delay_min_ms = io_delay_args.delay_min_ms;
 	ocs->tgt_ocs.io_delay_max_ms = io_delay_args.delay_max_ms;
-	ocs->tgt_ocs.delay_intervel_counter = io_delay_args.delay_intervel_counter;
+	ocs->tgt_ocs.delay_interval_counter = io_delay_args.delay_interval_counter;
 
 	return 0;
 }
 #endif
 
-#if !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
 static int32_t
 ocs_mgmt_gen_rq_empty(ocs_t *ocs, char *name, void *buf, uint32_t buf_len, void *arg_out, uint32_t arg_out_length)
 {
@@ -3586,6 +4947,7 @@ ocs_mgmt_sli4_queue_status(ocs_textbuf_t *textbuf, const char *name, sli4_queue_
 /**
  * @brief parse a WWN from a string into a 64-bit value
  *
+ * @par Description
  * Given a pointer to a string, parse the string into a 64-bit
  * WWN value.  The format of the string must be xx:xx:xx:xx:xx:xx:xx:xx
  *
@@ -3607,7 +4969,7 @@ parse_wwn(char *wwn_in, uint64_t *wwn_out)
 	uint8_t byte7;
 	int rc;
 
-	if (ocs_strchr(wwn_in, ':') == NULL) {
+	if (wwn_in[2] != ':') {
 		rc = ocs_sscanf(wwn_in, "%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
 				&byte0, &byte1, &byte2, &byte3,
 				&byte4, &byte5, &byte6, &byte7);
@@ -3627,12 +4989,36 @@ parse_wwn(char *wwn_in, uint64_t *wwn_out)
 				((uint64_t)byte6 <<  8) |
 				((uint64_t)byte7);
 		return 0;
-
 	} else {
 		return -1;
 	}
 }
 
+/**
+ * @brief Format a 64-bit WWN for printing.
+ *
+ * @par Description
+ * Given a 64-bit WWN value, return a string in the format xx:xx:xx:xx:xx:xx:xx:xx
+ *
+ * @param wwn_in uint64_t containing the WWN.
+ * @param wwn_out pointer to the formatted string.
+ *
+ * @return None.
+ */
+void
+format_wwn(uint64_t wwn_in, char *wwn_out)
+{
+	ocs_snprintf(wwn_out, OCS_WWN_LENGTH,
+		     "%02llx:%02llx:%02llx:%02llx:%02llx:%02llx:%02llx:%02llx",
+		     ((wwn_in & 0xff00000000000000ll) >> 56),
+		     ((wwn_in & 0x00ff000000000000ll) >> 48),
+		     ((wwn_in & 0x0000ff0000000000ll) >> 40),
+		     ((wwn_in & 0x000000ff00000000ll) >> 32),
+		     ((wwn_in & 0x00000000ff000000ll) >> 24),
+		     ((wwn_in & 0x0000000000ff0000ll) >> 16),
+		     ((wwn_in & 0x000000000000ff00ll) >>  8),
+		     ((wwn_in & 0x00000000000000ffll)));
+}
 
 /**
  * @page mgmt_api_overview Management APIs

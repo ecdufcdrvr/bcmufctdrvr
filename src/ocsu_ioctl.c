@@ -1,7 +1,8 @@
-
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -136,7 +137,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 	/* Make sure that system calls may be interrupted */
 	siginterrupt(SIGRTMIN, 1);
 
-	while (!unload) {
+	while (!unload && !ocs_thread_terminate_requested(mythread)) {
 		uint32_t i;
 		uint32_t cmd = 0;
 		uint32_t c2scount = 0;
@@ -148,7 +149,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 		}
 		ocs_log_debug(ocs, "port %d: opening connection from: %s\n", port, client->ipaddr);
 
-		for (;;) {
+		while (!ocs_thread_terminate_requested(mythread)) {
 			char *p = ocs_skt_str_read(client, &flags);
 			if (p == NULL) {
 				break;
@@ -292,6 +293,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 
 				l_req.user_buffer_len = r_req->user_buffer_len;
 				l_req.user_buffer = malloc(r_req->user_buffer_len);
+				l_req.get_all = r_req->get_all;
 				if (l_req.user_buffer == NULL) {
 					ocs_log_err(ocs, "ioctl(%d): malloc failed\n", __LINE__);
 					ocs_skt_str_write(client, 0, "ocs:ioctl:resp:%d:%d", rc, 0);
@@ -428,6 +430,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 
 			default:
 				ocs_log_test(ocs, "Error: unsupported IOCTL command: %08x\n", cmd);
+				ocs_skt_str_write(client, 0, "ocs:ioctl:resp:%d:%d", -1, 0);
 				break;
 			}
 
@@ -442,6 +445,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 		ocs_skt_close(client);
 	}
 
+	ocs_skt_close(node);
 	ocs_log_debug(ocs, "%s terminatied\n", mythread->name);
 	return 0;
 }

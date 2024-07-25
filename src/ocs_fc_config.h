@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -55,7 +57,7 @@
  * @brief Defines the number of SGLs allocated on each IO object
  */
 #ifndef OCS_FC_MAX_SGL
-#define OCS_FC_MAX_SGL		64
+#define OCS_FC_MAX_SGL		512
 #endif
 
 
@@ -85,12 +87,24 @@
 #define OCS_FC_ELS_CT_SEND_DEFAULT_TIMEOUT	180
 #endif
 
-#ifndef OCS_FC_FDMI_DEFAULT_TIMEOUT
-#define OCS_FC_FDMI_DEFAULT_TIMEOUT		10
+#ifndef OCS_FC_MGMT_SERVER_DEFAULT_TIMEOUT
+#define OCS_FC_MGMT_SERVER_DEFAULT_TIMEOUT	10
+#endif
+
+#ifndef OCS_FC_MGMT_SERVER_WAIT_TIMEOUT_US
+#define OCS_FC_MGMT_SERVER_WAIT_TIMEOUT_US	(OCS_FC_ELS_DEFAULT_RETRIES * OCS_FC_MGMT_SERVER_DEFAULT_TIMEOUT * 1000000)
+#endif
+
+#ifndef OCS_FC_FLOGI_TIMEOUT_SEC_MAX
+#define OCS_FC_FLOGI_TIMEOUT_SEC_MAX		160
 #endif
 
 #ifndef OCS_FC_FLOGI_TIMEOUT_SEC
-#define OCS_FC_FLOGI_TIMEOUT_SEC		180
+#define OCS_FC_FLOGI_TIMEOUT_SEC		20
+#endif
+
+#ifndef OCS_FC_FLOGI_MAX_RETRIES
+#define OCS_FC_FLOGI_MAX_RETRIES		4
 #endif
 
 #ifndef OCS_FC_DOMAIN_SHUTDOWN_TIMEOUT_USEC

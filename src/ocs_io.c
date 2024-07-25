@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -53,12 +55,90 @@ static ocs_mgmt_functions_t io_mgmt_functions = {
 	.get_all_handler	=	ocs_mgmt_io_get_all,
 };
 
+#if defined(OCS_DEBUG_TRACK_IO_PROC_TIME)
+
+#define OCS_SCSI_IO_PROC_TIME_THRESHOLD_MSEC    100
+
+inline void
+ocs_scsi_io_clear_proc_ticks(ocs_io_t *io, uint32_t stage)
+{
+	ocs_assert(stage < OCS_SCSI_IO_PROC_CMD_STAGE_MAX);
+	ocs_assert(io);
+
+	io->proc_time[stage] = 0;
+}
+
+inline uint64_t
+ocs_scsi_io_get_proc_ticks(ocs_io_t *io, uint32_t stage)
+{
+	ocs_assert(stage < OCS_SCSI_IO_PROC_CMD_STAGE_MAX, 0);
+	ocs_assert(io, 0);
+
+	return io->proc_time[stage];
+}
+
+inline void
+ocs_scsi_io_set_proc_ticks(ocs_io_t *io, uint32_t stage)
+{
+	ocs_assert(stage < OCS_SCSI_IO_PROC_CMD_STAGE_MAX);
+	ocs_assert(io);
+
+	io->proc_time[stage] = ocs_get_os_ticks();
+}
+
+inline int64_t
+ocs_scsi_io_proc_ticks_elapsed(uint64_t tstart, uint64_t tend)
+{
+	int64_t telapsed;
+
+	telapsed = tend - tstart;
+	if (telapsed < 0) {
+		telapsed = (ocs_os_ticks_max() - tstart) + tend;
+	}
+
+	return telapsed;
+}
+
+inline void
+ocs_scsi_io_proc_check_time(ocs_io_t *io, uint32_t from, uint32_t to)
+{
+	int64_t telapsed;
+
+	ocs_assert(io);
+
+	telapsed = ocs_scsi_io_proc_ticks_elapsed(io->proc_time[from], io->proc_time[to]);
+	if (ocs_ticks_to_ms(telapsed) >= OCS_SCSI_IO_PROC_TIME_THRESHOLD_MSEC) {
+		ocs_log_info(io->ocs, "IO submission time %llu msec (%llu->%llu->%llu->%llu)\n",
+				ocs_ticks_to_ms(telapsed),
+				ocs_ticks_to_ms(io->proc_time[OCS_SCSI_IO_PROC_CMD_RECVD_TSTART]),
+				ocs_ticks_to_ms(io->proc_time[OCS_SCSI_IO_PROC_CMD_SUBMITTED_TSTART]),
+				ocs_ticks_to_ms(io->proc_time[OCS_SCSI_IO_PROC_CMD_SUBMITTED_TFIN]),
+				ocs_ticks_to_ms(io->proc_time[OCS_SCSI_IO_PROC_CMD_RECVD_TFIN]));
+	}
+}
+
+inline void
+ocs_ddump_scsi_io_proc_time(ocs_textbuf_t *textbuf, ocs_io_t *io)
+{
+	ocs_ddump_value(textbuf, "proc_time_recvd_tstart", "%llu", ocs_scsi_io_get_proc_ticks(io, OCS_SCSI_IO_PROC_CMD_RECVD_TSTART));
+	ocs_ddump_value(textbuf, "proc_time_submitted_tstart", "%llu", ocs_scsi_io_get_proc_ticks(io, OCS_SCSI_IO_PROC_CMD_SUBMITTED_TSTART));
+	ocs_ddump_value(textbuf, "proc_time_submitted_tfin", "%llu", ocs_scsi_io_get_proc_ticks(io, OCS_SCSI_IO_PROC_CMD_SUBMITTED_TFIN));
+	ocs_ddump_value(textbuf, "proc_time_recvd_tfin", "%llu", ocs_scsi_io_get_proc_ticks(io, OCS_SCSI_IO_PROC_CMD_RECVD_TFIN));
+}
+
+#endif
+
 /**
  * @brief IO pool.
  *
  * Structure encapsulating a pool of IO objects.
  *
  */
+struct ocs_io_pool_cache_s {
+	ocs_lock_t lock;
+	ocs_list_t list;
+	uint32_t count;
+} ____cacheline_aligned;
 
 struct ocs_io_pool_s {
 	ocs_t *ocs;			/* Pointer to device object */
@@ -66,6 +146,8 @@ struct ocs_io_pool_s {
 	uint32_t io_num_ios;		/* Total IOs allocated */
 	bool els_pool;
 	ocs_pool_t *pool;
+	ocs_io_pool_cache_t *cache;
+	uint32_t cache_thresh;
 };
 
 /**
@@ -93,6 +175,7 @@ struct ocs_io_pool_s {
  * @param ocs Driver instance's software context.
  * @param num_io Number of IO contexts to allocate.
  * @param num_sgl Number of SGL entries to allocate for each IO.
+ * @param els_pool ELS IO pool or not
  *
  * @return Returns a pointer to a new ocs_io_pool_t on success,
  *         or NULL on failure.
@@ -116,7 +199,23 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl, bool els_pool)
 	io_pool->io_num_ios = num_io;
 
 	/* initialize IO pool lock */
-	ocs_lock_init(ocs, &io_pool->lock, "io_pool lock[%d]", ocs->instance_index);
+	ocs_lock_init(ocs, &io_pool->lock, OCS_LOCK_ORDER_IO_POOL, "io_pool lock[%d]", ocs->instance_index);
+
+	io_pool->cache = ocs_malloc(ocs, sizeof(ocs_io_pool_cache_t) * ocs->io_pool_cache_num, OCS_M_ZERO);
+	if (!io_pool->cache) {
+		ocs_log_err(ocs, "allocation of IO pool cache failed\n");
+		goto free_io_pool;
+	}
+
+	for (i = 0; (int) i < ocs->io_pool_cache_num; i++) {
+		ocs_lock_init(ocs, &io_pool->cache[i].lock, OCS_LOCK_ORDER_IO_POOL, "io_pool lock[%d:%d]", ocs->instance_index, i);
+		ocs_list_init(&io_pool->cache[i].list, ocs_io_t, io_alloc_link);
+	}
+
+	if (els_pool)
+		io_pool->cache_thresh = 0;
+	else
+		io_pool->cache_thresh = MIN((int) io_pool->io_num_ios/ocs->io_pool_cache_num, ocs->io_pool_cache_thresh);
 
 	io_pool->pool = ocs_pool_alloc(ocs, sizeof(ocs_io_t), io_pool->io_num_ios, FALSE);
 	if (!io_pool->pool) {
@@ -135,8 +234,8 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl, bool els_pool)
 		io->instance_index = i;
 		io->ocs = ocs;
 
-		ocs_lock_init(ocs, &io->bls_abort_lock, "bls_abort lock[%d]", io->instance_index);
-		ocs_rlock_init(ocs, &io->state_lock, "IO state lock");
+		ocs_lock_init(ocs, &io->bls_abort_lock, OCS_LOCK_ORDER_IGNORE, "bls_abort lock[%d]", io->instance_index);
+		ocs_rlock_init(ocs, &io->state_lock, OCS_LOCK_ORDER_IGNORE, "IO state lock");
 
 		if (els_pool) {
 			io->els_info = ocs_malloc(ocs, sizeof(ocs_io_els_t), OCS_M_ZERO);
@@ -155,7 +254,8 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl, bool els_pool)
 
 		/* allocate a command/response dma buffer */
 		if (ocs->enable_ini) {
-			rc = ocs_dma_alloc(ocs, &io->scsi_info->cmdbuf, SCSI_CMD_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
+			rc = ocs_dma_alloc(ocs, &io->scsi_info->cmdbuf, SCSI_CMD_BUF_LENGTH,
+					   OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE);
 			if (rc) {
 				ocs_log_err(ocs, "ocs_dma_alloc cmdbuf failed\n");
 				goto free_io_pool;
@@ -163,13 +263,15 @@ ocs_io_pool_create(ocs_t *ocs, uint32_t num_io, uint32_t num_sgl, bool els_pool)
 		}
 
 		/* Allocate a response buffer */
-		rc = ocs_dma_alloc(ocs, &io->scsi_info->rspbuf, SCSI_RSP_BUF_LENGTH, OCS_MIN_DMA_ALIGNMENT);
+		rc = ocs_dma_alloc(ocs, &io->scsi_info->rspbuf, SCSI_RSP_BUF_LENGTH,
+				   OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE);
 		if (rc) {
 			ocs_log_err(ocs, "ocs_dma_alloc rspbuf failed\n");
 			goto free_io_pool;
 		}
 
-		io->scsi_info->orig_io = io;
+		io->scsi_info->ul_io = io;
+
 		/* Allocate SGL */
 		io->scsi_info->sgl_allocated = num_sgl;
 		io->scsi_info->sgl_count = 0;
@@ -220,13 +322,11 @@ ocs_io_pool_free(ocs_io_pool_t *io_pool)
 				continue;
 			}
 
-			if (!io_pool->els_pool) {
+			if (io->scsi_info) {
 				ocs_io_scsi_t *scsi_io = io->scsi_info;
 
 				ocs_scsi_tgt_io_exit(io);
 				ocs_scsi_ini_io_exit(io);
-				if (scsi_io == NULL)
-					continue;
 
 				if (scsi_io->sgl) {
 					ocs_free(ocs, scsi_io->sgl, sizeof(*scsi_io->sgl) * scsi_io->sgl_allocated);
@@ -246,6 +346,14 @@ ocs_io_pool_free(ocs_io_pool_t *io_pool)
 		}
 
 		ocs_pool_free(io_pool->pool);
+	}
+
+	if (io_pool->cache) {
+		for (i = 0; (int) i < ocs->io_pool_cache_num; i++) {
+			ocs_lock_free(&io_pool->cache[i].lock);
+		}
+
+		ocs_free(ocs, io_pool->cache, sizeof(ocs_io_pool_cache_t) * ocs->io_pool_cache_num);
 	}
 
 	ocs_lock_free(&io_pool->lock);
@@ -273,25 +381,41 @@ uint32_t ocs_io_pool_allocated(ocs_io_pool_t *io_pool)
  * @return Returns the pointer to a new object, or NULL if none available.
  */
 ocs_io_t *
-ocs_io_pool_io_alloc(ocs_io_pool_t *io_pool)
+ocs_io_pool_io_alloc(ocs_io_pool_t *io_pool, uint32_t eq_idx)
 {
 	ocs_io_t *io = NULL;
 	ocs_t *ocs;
+	ocs_io_pool_cache_t *cache;
 
 	ocs_assert(io_pool, NULL);
 
 	ocs = io_pool->ocs;
+	cache = &io_pool->cache[eq_idx % ocs->io_pool_cache_num];
 
-	ocs_lock(&io_pool->lock);
-	if ((io = ocs_pool_get(io_pool->pool)) != NULL) {
+	if (cache->count) {
+		ocs_lock(&cache->lock);
+		io = ocs_list_remove_head(&cache->list);
+		if (io) {
+			cache->count--;
+		}
+		ocs_unlock(&cache->lock);
+	}
+
+	if (!io) {
+		ocs_lock(&io_pool->lock);
+		io = ocs_pool_get(io_pool->pool);
 		ocs_unlock(&io_pool->lock);
+	}
 
+	if (io) {
 		io->io_type = OCS_IO_TYPE_MAX;
 		io->hio_type = OCS_HAL_IO_MAX;
 		io->hio = NULL;
 		io->wqe_status = 0;
 		io->transferred = 0;
+		io->abts_received = FALSE;
 		io->ocs = ocs;
+		io->eq_idx = eq_idx;
 		io->timeout = 0;
 		if (io->scsi_info)
 			io->scsi_info->sgl_count = 0;
@@ -304,16 +428,11 @@ ocs_io_pool_io_alloc(ocs_io_pool_t *io_pool)
 			io->els_info->els_req_free = 0;
 		io->mgmt_functions = &io_mgmt_functions;
 		io->io_free = 0;
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-		__percpu_counter_add(&ocs->xport->io_active_count, 1, 1000000);
-		__percpu_counter_add(&ocs->xport->io_total_alloc, 1, 1000000);
-#else
+		io->hal_priv = NULL;
 		ocs_atomic_add_return(&ocs->xport->io_active_count, 1);
 		ocs_atomic_add_return(&ocs->xport->io_total_alloc, 1);
-#endif
-	} else {
-		ocs_unlock(&io_pool->lock);
 	}
+
 	return io;
 }
 
@@ -329,29 +448,34 @@ ocs_io_pool_io_free(ocs_io_pool_t *io_pool, ocs_io_t *io)
 {
 	ocs_t *ocs;
 	ocs_hal_io_t *hio = NULL;
+	ocs_io_pool_cache_t *cache;
 
 	ocs_assert(io_pool);
 
 	ocs = io_pool->ocs;
+	cache = &io_pool->cache[io->eq_idx % ocs->io_pool_cache_num];
 
-	ocs_lock(&io_pool->lock);
-		hio = io->hio;
-		io->hio = NULL;
-		io->io_free = 1;
+	hio = io->hio;
+	io->hio = NULL;
+	io->io_free = 1;
+
+	if (cache->count < io_pool->cache_thresh) {
+		ocs_lock(&cache->lock);
+		ocs_list_add_head(&cache->list, io);
+		cache->count++;
+		ocs_unlock(&cache->lock);
+	} else {
+		ocs_lock(&io_pool->lock);
 		ocs_pool_put_head(io_pool->pool, io);
-	ocs_unlock(&io_pool->lock);
+		ocs_unlock(&io_pool->lock);
+	}
 
 	if (hio) {
 		ocs_hal_io_free(&ocs->hal, hio);
 	}
 
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-	__percpu_counter_add(&ocs->xport->io_active_count, -1, 1000000);
-	__percpu_counter_add(&ocs->xport->io_total_free, 1, 1000000);
-#else
 	ocs_atomic_sub_return(&ocs->xport->io_active_count, 1);
 	ocs_atomic_add_return(&ocs->xport->io_total_free, 1);
-#endif
 }
 
 /**
@@ -363,7 +487,7 @@ ocs_io_pool_io_free(ocs_io_pool_t *io_pool, ocs_io_t *io)
  * @param rx_id RX_ID to find (0xffff for unassigned).
  */
 ocs_io_t *
-ocs_io_find_tgt_io_to_abort(ocs_io_t *tmfio, uint16_t ox_id, uint16_t rx_id)
+ocs_scsi_io_find_and_ref_get(ocs_io_t *tmfio, uint16_t ox_id, uint16_t rx_id)
 {
 	ocs_node_t *node = tmfio->node;
 	ocs_io_t *io = NULL;
@@ -489,6 +613,7 @@ ocs_ddump_io(ocs_textbuf_t *textbuf, ocs_io_t *io)
 		ocs_ddump_value(textbuf, "hal_xri", "%s", "pending");
 		ocs_ddump_value(textbuf, "hal_type", "%s", "pending");
 	}
+
 	/* dump SCSI related info */
 	if (io->scsi_info) {
 		ocs_ddump_value(textbuf, "tmf_cmd", "%d", io->scsi_info->tmf_cmd);
@@ -498,6 +623,8 @@ ocs_ddump_io(ocs_textbuf_t *textbuf, ocs_io_t *io)
 		ocs_scsi_ini_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
 		ocs_scsi_tgt_ddump(textbuf, OCS_SCSI_DDUMP_IO, io);
 	}
+
+	ocs_ddump_scsi_io_proc_time(textbuf, io);
 
 	ocs_ddump_endsection(textbuf, "io", io->instance_index);
 }

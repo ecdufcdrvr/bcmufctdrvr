@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -81,6 +83,8 @@ typedef enum {
 	OCS_EVT_DOMAIN_TGT_FREE_OK,
 	OCS_EVT_DOMAIN_FREE_OK,
 	OCS_EVT_DOMAIN_FREE_FAIL,
+	OCS_EVT_DOMAIN_FLUSH_COMPLETE,
+	OCS_EVT_DOMAIN_WAIT_ASYNC_CB_OK,
 	OCS_EVT_HAL_DOMAIN_REQ_ATTACH,
 	OCS_EVT_HAL_DOMAIN_REQ_FREE,
 
@@ -92,6 +96,7 @@ typedef enum {
 	OCS_EVT_SPORT_FREE_OK,
 	OCS_EVT_SPORT_FREE_FAIL,
 	OCS_EVT_SPORT_TOPOLOGY_NOTIFY,
+	OCS_EVT_SPORT_FLUSH_COMPLETE,
 	OCS_EVT_HAL_PORT_ALLOC_OK,
 	OCS_EVT_HAL_PORT_ALLOC_FAIL,
 	OCS_EVT_HAL_PORT_ATTACH_OK,
@@ -112,15 +117,21 @@ typedef enum {
 	OCS_EVT_NODE_AUTH_RETRY,
 	OCS_EVT_NODE_FREE_OK,
 	OCS_EVT_NODE_FREE_FAIL,
+	OCS_EVT_NODE_FLUSH_COMPLETE,
 	OCS_EVT_NODE_RPI_UPDATE_OK,
 	OCS_EVT_NODE_RPI_UPDATE_FAIL,
+	OCS_EVT_NODE_TDZ_CMD,
+	OCS_EVT_NODE_FDMI_GET_CMD,
+	OCS_EVT_NODE_GANXT_GET_CMD,
 	OCS_EVT_ELS_FRAME,
 	OCS_EVT_ELS_REQ_TIMEOUT,
 	OCS_EVT_ELS_REQ_ABORTED,
 	OCS_EVT_ABORT_ELS,		/**< request an ELS IO be aborted */
 	OCS_EVT_ELS_ABORT_CMPL,	        /**< ELS abort process complete */
+	OCS_EVT_ELS_DONT_RETRY,
 
 	OCS_EVT_ABTS_RCVD,
+	OCS_EVT_ABTS_FLUSH_COMPLETE,
 	OCS_EVT_FLUSH_BLS_RCVD,
 
 	OCS_EVT_NODE_MISSING,		/**< node is not in the GID_PT payload */
@@ -132,6 +143,8 @@ typedef enum {
 	OCS_EVT_FLOGI_RCVD,
 	OCS_EVT_LOGO_RCVD,
 	OCS_EVT_RRQ_RCVD,
+	OCS_EVT_FPIN_RCVD,
+	OCS_EVT_SEND_FPIN,
 	OCS_EVT_RDP_RCVD,
 	OCS_EVT_PRLI_RCVD,
 	OCS_EVT_PRLO_RCVD,
@@ -140,6 +153,7 @@ typedef enum {
 	OCS_EVT_ADISC_RCVD,
 	OCS_EVT_RSCN_RCVD,
 	OCS_EVT_SCR_RCVD,
+	OCS_EVT_LCB_RCVD,
 	OCS_EVT_AUTH_RCVD,
 	OCS_EVT_ELS_RCVD,
 
@@ -214,10 +228,10 @@ extern void ocs_sm_disable(ocs_sm_ctx_t *ctx);
 extern ocs_sm_function_t ocs_sm_state(ocs_sm_ctx_t *ctx);
 extern const char *ocs_sm_event_name(ocs_sm_event_t evt);
 
-#if 0
-#define smtrace(sm)	ocs_log_debug(NULL, "%s: %-20s\n", sm, ocs_sm_event_name(evt))
-#else
-#define smtrace(...)
-#endif
+#define smtrace(sm) \
+	do { \
+		if (OCS_LOG_ENABLE_DOMAIN_SM_TRACE(hal ? ((ocs_t *)hal->os) : NULL)) \
+			ocs_log_debug(hal ? hal->os : NULL, "[hal %s] %-20s\n", sm, ocs_sm_event_name(evt)); \
+	} while (0)
 
 #endif /* ! _OCS_SM_H */

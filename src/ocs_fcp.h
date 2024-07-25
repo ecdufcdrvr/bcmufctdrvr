@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,7 +46,9 @@
 #define FC_ELS_CMD_FLOGI	0x04
 #define FC_ELS_CMD_LOGO		0x05
 #define FC_ELS_CMD_RRQ		0x12
+#define FC_ELS_CMD_FPIN		0x16
 #define FC_ELS_CMD_RDP		0x18
+#define FC_ELS_CMD_RDF		0x19
 #define FC_ELS_CMD_PRLI		0x20
 #define FC_ELS_CMD_PRLO		0x21
 #define FC_ELS_CMD_PDISC	0x50
@@ -52,20 +56,23 @@
 #define FC_ELS_CMD_ADISC	0x52
 #define FC_ELS_CMD_RSCN		0x61
 #define FC_ELS_CMD_SCR		0x62
+#define FC_ELS_CMD_LCB		0x81
 #define FC_ELS_CMD_AUTH		0x90
 
 #define FC_TYPE_BASIC_LINK	0
+#define FC_TYPE_EXT_LINK	1
 #define FC_TYPE_FCP		0x08
 #define FC_TYPE_NVME		0x28
 #define FC_TYPE_GS		0x20
 #define FC_TYPE_SW		0x22
+#define FC_TYPE_APP_SERVER	0x60
 
 #define FC_ADDR_FABRIC			0xfffffe	/** well known fabric address */
 #define FC_ADDR_CONTROLLER		0xfffffd	/** well known fabric controller address */
 #define FC_ADDR_IS_DOMAIN_CTRL(x)	(((x) & 0xffff00) == 0xfffc00)	/** is well known domain controller */
 #define FC_ADDR_GET_DOMAIN_CTRL(x)	((x) & 0x0000ff)	/** get domain controller number */
 #define FC_ADDR_NAMESERVER		0xfffffc	/** well known directory server address */
-#define FC_ADDR_FDMI			0xfffffa	/** well known FDMI server address */
+#define FC_ADDR_MGMT_SERVER		0xfffffa	/** well known management server address */
 
 #define FC_GS_TYPE_ALIAS_SERVICE	0xf8
 #define FC_GS_TYPE_MANAGEMENT_SERVICE	0xfa
@@ -73,6 +80,7 @@
 #define FC_GS_TYPE_LOOPBACK		0x10
 
 #define FC_GS_SUBTYPE_NAME_SERVER	0x02
+#define FC_GS_SUBTYPE_ZONE_SERVER	0x03
 #define FC_GS_SUBTYPE_FDMI		0x10
 
 #define FC_ELX_LOOPBACK_DATA		1
@@ -102,6 +110,14 @@
 #define FC_GS_NAMESERVER_RFF_ID		0x021f
 #define FC_GS_NAMESERVER_RSNN_NN	0x0239
 #define FC_GS_NAMESERVER_RSPN_ID	0x0218
+
+/**
+ * Generic Services TDZ Request Command codes:
+ */
+#define FC_GS_TDZ_GFEZ			0x0142
+#define FC_GS_TDZ_GAPZ			0x012A
+#define FC_GS_TDZ_AAPZ			0x022B
+#define FC_GS_TDZ_RAPZ			0x0325
 
 /**
  * Generic Services FDMI Request Command codes:
@@ -327,16 +343,19 @@ typedef struct fc_els_gen_s {
 			resv1: 24;
 } fc_els_gen_t;
 
+#define FC_PLOGI_CSP_W1_MAXFRAME_SIZE_MASK	0x00000FFF
 #define FC_PLOGI_CSP_W1_BBSCN_CLEAR_MASK	0xFFFF0FFF
 #define FC_PLOGI_CSP_W1_VALID_VENDOR_VER_LEVEL	BIT(29)
 #define FC_PLOGI_CSP_W1_APP_HDR_SUPPORT		BIT(24)
 #define OCS_FC_PLOGI_VENDOR_VERSION_EMLX_ID	0x454d4c58	/* EMLX */
 #define FC_FLOGI_CSP_W1_FCSP			BIT(21)
 
+#define COMMON_SPARAM_WORDS			4
+
 typedef struct fc_plogi_playload_s {
 	uint32_t	command_code: 8,
 			resv1: 24;
-	uint32_t	common_service_parameters[4];
+	uint32_t	common_service_parameters[COMMON_SPARAM_WORDS];
 	uint32_t	port_name_hi;
 	uint32_t	port_name_lo;
 	uint32_t	node_name_hi;
@@ -359,10 +378,10 @@ typedef struct fc_logo_payload_s {
 	uint32_t	port_name_lo;
 } fc_logo_payload_t;
 
-typedef struct fc_acc_payload_s {
+typedef struct fc_ls_acc_payload_s {
 	uint32_t	command_code: 8,
 			resv1:24;
-} fc_acc_payload_t;
+} fc_ls_acc_payload_t;
 
 
 typedef struct fc_ls_rjt_payload_s {
@@ -472,10 +491,183 @@ typedef struct fc_scr_payload_s {
 			function:8;
 } fc_scr_payload_t;
 
-#define FC_SCR_REG_FABRIC		1
-#define FC_SCR_REG_NPORT		2
-#define FC_SCR_REG_FULL			3
+#define FC_SCR_REG_FABRIC		BIT(0)
+#define FC_SCR_REG_NPORT		BIT(1)
+#define FC_SCR_REG_PEER_ZONE		BIT(3)
+#define FC_SCR_REG_DFLT		(FC_SCR_REG_FABRIC | FC_SCR_REG_NPORT)
 
+#define FC_RSCN_EVT_QUAL_PEER_ZONE	0x7
+
+typedef struct ocs_fc_rdf_desc_s {
+	uint32_t	rdf_desc_tag;
+	uint32_t	desc_len;
+	uint32_t	decs_tag_count;
+	uint32_t	desc_tag_1;
+	uint32_t	desc_tag_2;
+	uint32_t	desc_tag_3;
+	uint32_t	desc_tag_4;
+} ocs_fc_rdf_desc_t;
+
+typedef struct fc_rdf_payload_s {
+	uint32_t	command_code:8,
+			:24;
+	uint32_t	desc_list_len;
+	ocs_fc_rdf_desc_t rdf_desc;
+} fc_rdf_payload_t;
+
+/*
+ * Generic Link Service TLV Descriptor format
+ *
+ */
+typedef struct fc_fpin_tlv_desc {
+	uint32_t	desc_tag;       /* Notification Descriptor Tag */
+	uint32_t	desc_len;       /* Length of Descriptor (in bytes) */
+	uint8_t		desc_value[0];  /* Descriptor Value */
+} fc_fpin_tlv_desc_t;
+
+typedef struct fc_fpin_payload_s {
+	uint8_t			fpin_cmd;	/* command (0x16) */
+	uint8_t			fpin_zero[3];	/* specified as zero - part of cmd */
+	uint32_t		desc_len;	/* Length of Descriptor List (in bytes). */
+	fc_fpin_tlv_desc_t	fpin_desc[0];   /* Descriptor list */
+} fc_fpin_payload_t;
+
+#define FC_FPIN_HDR_SZ 8
+
+/* Descriptor tag and len fields are considered the mandatory header
+ * for a descriptor
+ */
+#define FC_FPIN_TLV_DESC_HDR_SZ      sizeof(fc_fpin_tlv_desc_t)
+
+/*
+ * Macro, used when initializing payloads, to return the descriptor length.
+ * Length is size of descriptor minus the tag and len fields.
+ */
+#define FC_FPIN_TLV_DESC_LENGTH_FROM_SZ(desc)        \
+                (sizeof(desc) - FC_FPIN_TLV_DESC_HDR_SZ)
+
+/* Macro, used on received payloads, to return the descriptor length */
+#define FC_FPIN_TLV_DESC_SZ_FROM_LENGTH(tlv)         \
+                (ocs_be32toh((tlv)->desc_len) + FC_FPIN_TLV_DESC_HDR_SZ)
+
+/*
+ * This helper is used to walk descriptors in a descriptor list.
+ */
+static inline void *ocs_fc_tlv_next_desc(void *desc)
+{
+        fc_fpin_payload_t *tlv = desc;
+
+        return (desc + FC_FPIN_TLV_DESC_SZ_FROM_LENGTH(tlv));
+}
+
+enum fc_fpin_li_event_types {
+        FPIN_LI_UNKNOWN =		0x0,
+        FPIN_LI_LINK_FAILURE =		0x1,
+        FPIN_LI_LOSS_OF_SYNC =		0x2,
+        FPIN_LI_LOSS_OF_SIG =		0x3,
+        FPIN_LI_PRIM_SEQ_ERR =		0x4,
+        FPIN_LI_INVALID_TX_WD =		0x5,
+        FPIN_LI_INVALID_CRC =		0x6,
+        FPIN_LI_DEVICE_SPEC =		0xF,
+};
+
+/*
+ * Link Integrity Notification Descriptor
+ */
+typedef struct __attribute__((packed)) fc_fpin_li_evt_desc_s {
+	uint32_t	desc_tag;	/* Descriptor Tag */
+	uint32_t	desc_len;	/* Length of Descriptor (in bytes) */
+	uint64_t	detecting_wwpn;	/* Port Name that detected event */
+	uint64_t	attached_wwpn;	/* Port Name of device attached to detecting Port Name */
+	uint16_t	event_type;	/* see enum fc_fpin_li_event_types */
+	uint16_t	event_modifier;	/* Implementation specific value
+					 * describing the event type
+					 */
+	uint32_t	event_threshold;/* duration in ms of the link integrity detection cycle */
+	uint32_t	event_count;	/* minimum number of event occurrences during the event threshold
+					 * to caause the LI event
+					*/
+	uint32_t	pname_count;	/* number of portname_list elements */
+	uint64_t	pname_list[0];	/* list of N_Port_Names accessible through the attached port */
+} fc_fpin_li_evt_desc_t;
+
+enum fc_fpin_del_evt_reason_codes {
+	FPIN_DEL_UNKNOWN =		0x0,
+	FPIN_DEL_TIMEOUT =		0x1,
+	FPIN_DEL_UNABLE_TO_ROUTE =	0x2,
+	FPIN_DEL_DEVICE_SPEC =		0xF,
+};
+
+/*
+ * Delivery Descriptor
+ */
+typedef struct __attribute__((packed)) fc_fpin_del_evt_desc_s {
+	uint32_t	desc_tag;	/* Descriptor Tag */
+	uint32_t	desc_len;	/* Length of Descriptor (in bytes) */
+	uint64_t	detecting_wwpn;	/* Port Name that detected event */
+	uint64_t	attached_wwpn;	/* Port Name of device attached to detecting Port Name */
+	uint32_t	reason_code;	/* See enum fc_fpin_del_reason_codes for values */
+	fc_header_t	event_data; /* 24 byte hdr of discarded frame */
+} fc_fpin_del_evt_desc_t;
+
+enum fc_fpin_pc_event_types {
+	FPIN_PC_NONE =			0x0,
+	FPIN_PC_LOST_CREDIT =		0x1,
+	FPIN_PC_CREDIT_STALL =		0x2,
+	FPIN_PC_OVERSUBSCRIPTION =	0x3,
+	FPIN_PC_DEVICE_SPEC =		0xF,
+};
+
+/*
+ * Peer Congestion Notification Descriptor
+ */
+typedef struct __attribute__((packed)) fc_fpin_pc_evt_desc_s {
+	uint32_t	desc_tag;	/* Descriptor Tag */
+	uint32_t	desc_len;	/* Length of Descriptor (in bytes) */
+	uint64_t	detecting_wwpn;	/* Port Name that detected event */
+	uint64_t	attached_wwpn;	/* Port Name of device attached to detecting Port Name */
+	uint16_t	event_type;	/* see enum fc_fpin_li_event_types */
+	uint16_t	event_modifier;	/* Implementation specific value
+					 * describing the event type
+					 */
+	uint32_t	event_period; /* duration in ms of the link integrity detection cycle */
+	uint32_t	pname_count;	/* number of portname_list elements */
+	uint64_t	pname_list[0];	/* list of N_Port_Names accessible through the attached port */
+} fc_fpin_pc_evt_desc_t;
+
+#define FPIN_MIN_DESC_LEN(a) (sizeof(a) - FC_FPIN_HDR_SZ) /* Minus desc_tag and desc_len */
+
+enum fc_fpin_cgn_severity {
+	FPIN_CGN_NONE =			0,
+	FPIN_CGN_WARNING =		0xf1,
+	FPIN_CGN_ALARM =		0xf7,
+};
+
+/*
+ * Congestion Notification Descriptor
+ */
+typedef struct __attribute__((packed)) fc_fpin_cgn_evt_desc_s {
+	uint32_t	desc_tag;	/* Descriptor Tag */
+	uint32_t	desc_len;	/* Length of Descriptor (in bytes) */
+	uint16_t	event_type;	/* see enum fc_fpin_li_event_types */
+	uint16_t	event_modifier;	/* Implementation specific value
+					 * describing the event type
+					 */
+	uint32_t	event_period;	/* duration in ms of the link
+					 * integrity detection cycle
+					 */
+	uint8_t		severity;	/* Urgency of notification */
+	uint8_t		rsvd[3];
+} fc_fpin_cgn_evt_desc_t;
+
+#define OCS_FPIN_NOTIFY_LINK_INTEG	0x00020001
+#define OCS_FPIN_NOTIFY_DELIVERY	0x00020002
+#define OCS_FPIN_NOTIFY_PEER_CGN	0x00020003
+#define OCS_FPIN_NOTIFY_CGN		0x00020004
+
+#define OCS_ELS_FPIN_REG		0x00030001
+
+#define OCS_FPIN_SEND_EVENT_MAX_SIZE	1024
 typedef struct {
 	uint32_t :2,
 		rscn_event_qualifier:4,
@@ -523,6 +715,7 @@ typedef struct fcct_iu_header_s {
 #define FCCT_VENDOR_SPECIFIC_ERROR		0xff
 
 #define FCCT_NO_ADDITIONAL_EXPLANATION		0
+#define FCCT_PORT_TYPE_NOT_REGISTERED		0x0a
 #define FCCT_AUTHORIZATION_EXCEPTION		0xf0
 #define FCCT_AUTHENTICATION_EXCEPTION		0xf1
 #define FCCT_DATA_BASE_FULL			0xf2
@@ -628,28 +821,14 @@ static inline void fcct_build_req_header(fcct_iu_header_t *hdr, uint16_t cmd,
 	hdr->vendor_specific = 0;
 }
 
-static inline void fcct_loopback_build_req_header(fcct_iu_header_t *hdr, uint16_t cmd, uint16_t max_size)
-{
-	/* use old rev (1) to accommodate older switches */
-	hdr->revision = 1;
-	hdr->in_id = 0;
-	hdr->gs_type = FC_GS_TYPE_LOOPBACK;
-	hdr->gs_subtype = 0;
-	hdr->options = 0;
-	hdr->resv1 = 0;
-	hdr->cmd_rsp_code = ocs_htobe16(cmd);
-	hdr->max_residual_size = ocs_htobe16(max_size/(sizeof(uint32_t))); /* words */
-	hdr->fragment_id = 0;
-	hdr->reason_code = 0;
-	hdr->reason_code_explanation = 0;
-	hdr->vendor_specific = 0;
-}
-
 typedef struct fcct_rftid_req_s {
 	fcct_iu_header_t	hdr;
 	uint32_t		port_id;
 	uint32_t		fc4_types[8];
 } fcct_rftid_req_t;
+
+#define FCP_TYPE_FEATURE_OFFSET 7
+#define NVME_TYPE_FEATURE_OFFSET 23
 
 #define FC4_FEATURE_TARGET	(1U << 0)
 #define FC4_FEATURE_INITIATOR	(1U << 1)
@@ -663,12 +842,127 @@ typedef struct fcct_rffid_req_s {
 				type:8;
 } fcct_rffid_req_t;
 
+#define FCCT_TDZ_ENHANCED_ZONING_ENABLE		BIT(1)
+
+#define FCCT_ZONE_ATTR_TYPE_PEER_ZONE		0x0005
+
+#define FCCT_ZONE_IDENT_TYPE_NPORT_NAME		0x01
+#define FCCT_ZONE_IDENT_TYPE_ALIAS_NAME		0x05
+
+#pragma pack(1)
+typedef struct fcct_tdz_switch_entry_s {
+	uint64_t		name;
+	uint32_t		sez_flags;
+} fcct_tdz_switch_entry_t;
+#pragma pack()
+
+#pragma pack(1)
+typedef struct fcct_tdz_name_s {
+	uint32_t		length:8,
+				:24;
+	char			name[64];
+} fcct_tdz_name_t;
+#pragma pack()
+
+#define OCS_TDZ_NAME_LEN(_zone_name_len)	(sizeof(uint32_t) + (_zone_name_len))
+
+#pragma pack(1)
+typedef struct fcct_tdz_attr_entry_s {
+	uint32_t		type:16,
+				length:16;
+	uint64_t		port_name;
+} fcct_tdz_attr_entry_t;
+#pragma pack()
+
+#define OCS_TDZ_MEM_NPORT_LEN			(sizeof(uint32_t) + sizeof(uint64_t))
+
+#pragma pack(1)
+typedef struct fcct_tdz_attr_block_s {
+	uint32_t		num_attr_entries;
+	fcct_tdz_attr_entry_t	attr_entry[OCS_MAX_PRINCIPAL_MEMBERS];
+} fcct_tdz_attr_block_t;
+#pragma pack()
+
+#define OCS_TDZ_ATTR_BLOCK_LEN(_num_entries)	(sizeof(uint32_t) + ((_num_entries) * (OCS_TDZ_MEM_NPORT_LEN)))
+
+#pragma pack(1)
+typedef struct fcct_tdz_peer_member_s {
+	uint32_t		type:8,
+				:24;
+	union {
+		uint64_t	port_name;
+		fcct_tdz_name_t	alias_name;
+	} value;
+} fcct_tdz_peer_member_t;
+#pragma pack()
+
+#define OCS_TDZ_MEM_ALIAS_LEN(_alias_name_len)	(sizeof(uint32_t) + OCS_TDZ_NAME_LEN(_alias_name_len))
+
+#pragma pack(1)
+typedef struct fcct_tdz_peer_block_s {
+	uint32_t		num_peer_members;
+	fcct_tdz_peer_member_t	peer_member[OCS_MAX_ZONE_PEER_MEMBERS];
+} fcct_tdz_peer_block_t;
+#pragma pack()
+
+/* Get Fabric Enhanced Zoning Support CT request */
+typedef struct fcct_tdz_gfez_req_s {
+	fcct_iu_header_t	hdr;
+} fcct_tdz_gfez_req_t;
+
+/* Get Fabric Enhanced Zoning Support CT response */
+typedef struct fcct_tdz_gfez_rsp_s {
+	fcct_iu_header_t	hdr;
+	uint32_t		fez_flags;
+	uint32_t		:24,
+				num_switch_entries:8;
+	fcct_tdz_switch_entry_t	switch_entry[OCS_MAX_NUM_SWITCH_ENTRIES];
+} fcct_tdz_gfez_rsp_t;
+
+/* Get Active Peer Zones CT request */
+typedef struct fcct_tdz_gapz_req_s {
+	fcct_iu_header_t	hdr;
+	fcct_tdz_name_t		zone_name;
+} fcct_tdz_gapz_req_t;
+
+/* Get Active Peer Zones CT response */
+typedef struct fcct_tdz_gapz_rsp_s {
+	fcct_iu_header_t	hdr;
+	fcct_tdz_name_t		zone_name;
+	fcct_tdz_attr_block_t	zone_attr_block;
+	fcct_tdz_peer_block_t	zone_peer_block;
+} fcct_tdz_gapz_rsp_t;
+
+/* Add/Replace Active Peer Zone CT request */
+typedef struct fcct_tdz_aapz_req_s {
+	fcct_iu_header_t	hdr;
+	fcct_tdz_name_t		zone_name;
+	fcct_tdz_attr_block_t	zone_attr_block;
+	fcct_tdz_peer_block_t	zone_peer_block;
+} fcct_tdz_aapz_req_t;
+
+/* Add/Replace Active Peer Zone CT response */
+typedef struct fcct_tdz_aapz_rsp_s {
+	fcct_iu_header_t	hdr;
+} fcct_tdz_aapz_rsp_t;
+
+/* Remove Active Peer Zone CT request */
+typedef struct fcct_tdz_rapz_req_s {
+	fcct_iu_header_t	hdr;
+	fcct_tdz_name_t		zone_name;
+} fcct_tdz_rapz_req_t;
+
+/* Remove Active Peer Zone CT response */
+typedef struct fcct_tdz_rapz_rsp_s {
+	fcct_iu_header_t	hdr;
+} fcct_tdz_rapz_rsp_t;
+
 /* Attribute Entry */
 typedef union ocs_fdmi_attr_entry_u {
-	uint32_t attr_int;
-	uint8_t  attr_types[32];
 	uint8_t  attr_string[256];
+	uint8_t  attr_types[32];
 	uint64_t attr_wwn;
+	uint32_t attr_int;
 } ocs_fdmi_attr_entry_t;
 
 /*
@@ -807,7 +1101,7 @@ typedef struct fcct_gpnid_acc_s {
 
 typedef struct fcct_gffid_acc_s {
 	fcct_iu_header_t	hdr;
-	uint8_t			fc4_feature_bits;
+	uint8_t			fc4_feature_bits[128];
 } fcct_gffid_acc_t;
 
 typedef struct fcct_gidft_acc_s {
@@ -831,6 +1125,7 @@ typedef struct fcct_gidpt_acc_s {
 
 #pragma pack(1)
 typedef struct fcct_ganxt_acc_s {
+	fcct_iu_header_t	hdr;
 	uint32_t		port_type:8,
 				port_id:24;
 	uint64_t		port_name;
@@ -839,10 +1134,13 @@ typedef struct fcct_ganxt_acc_s {
 	uint64_t		node_name;
 	uint8_t			sym_node_name_len;
 	uint8_t			sym_node_name[255];
-	uint64_t		ip_associator;
-	uint8_t			ip_addr[16];
+	uint8_t                 rsvd1[24];
 	uint32_t		class_of_serv;
 	uint8_t			protocol_types[32];
+	uint8_t                 rsvd2[16];
+	uint64_t		fabric_port_name;
+	uint32_t                rsvd3:8,
+				hard_address:24;
 } fcct_ganxt_acc_t;
 #pragma pack()
 
@@ -937,7 +1235,7 @@ typedef struct fcp_xfer_rdy_iu_s {
 	uint8_t		rsvd[4];
 } fcp_xfer_rdy_iu_t;
 
-#define MAX_ACC_REJECT_PAYLOAD (sizeof(fc_ls_rjt_payload_t) > sizeof(fc_acc_payload_t) ? sizeof(fc_ls_rjt_payload_t) : sizeof(fc_acc_payload_t))
+#define MAX_LS_ACC_RJT_PAYLOAD (sizeof(fc_ls_rjt_payload_t) > sizeof(fc_ls_acc_payload_t) ? sizeof(fc_ls_rjt_payload_t) : sizeof(fc_ls_acc_payload_t))
 
 #define SFF_PG0_IDENT_SFP              0x3
 
@@ -1085,6 +1383,7 @@ struct fc_rdp_bbc_info {
         uint32_t              attached_port_bbc;
         uint32_t              rtt;      /* Round trip time */
 };
+
 #define RDP_BBC_DESC_TAG  0x00010006
 typedef struct fc_rdp_bbc_desc {
         uint32_t              tag;
@@ -1113,6 +1412,7 @@ typedef struct fc_rdp_oed_info {
         uint16_t            lo_warning;
         uint32_t            function_flags;
 } fc_rdp_oed_info_t;
+
 #define RDP_OED_DESC_TAG  0x00010007
 typedef struct fc_rdp_oed_sfp_desc {
         uint32_t             tag;
@@ -1161,6 +1461,23 @@ typedef struct fc_rdp_res_frame {
         struct fc_rdp_oed_sfp_desc oed_rxpower_desc;          /* FC word 63-67*/
         struct fc_rdp_opd_sfp_desc opd_desc;                  /* FC word 68-84*/
 } fc_rdp_res_frame_t;
+
+#define FC_LCB_CAP_DURATION		BIT(0)
+#define FC_LCB_CAP_FREQUENCY		BIT(1)
+
+#define FC_LCB_SUBCMD_BEACON_ON		1
+#define FC_LCB_SUBCMD_BEACON_OFF	2
+
+typedef struct fc_lcb_payload_s {
+	uint32_t	command_code:8,
+			resv1:24;
+	uint32_t	sub_cmd:8,
+			resv2:16,
+			capability:8;
+	uint32_t	status:8,
+			frequency:8,
+			duration:16;
+} fc_lcb_payload_t;
 
 #endif /* !_OCS_FCP_H */
 

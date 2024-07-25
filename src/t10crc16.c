@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,12 +52,12 @@
 /*                                                               */
 /*****************************************************************/
 /*
- * Emulex Inc, changes:
+ * Broadcom Inc., changes:
  * - minor syntax changes for successful compilation with contemporary
  *   C compilers, and OCS SDK API
  * - crctable[] generated using Rocksoft public domain code
  *
- * Used in the Emulex SDK, the generated file crctable.out is cut and pasted into
+ * Used in the Broadcom SDK, the generated file crctable.out is cut and pasted into
  * applicable SDK sources.
  */
 

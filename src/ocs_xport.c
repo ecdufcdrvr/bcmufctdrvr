@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,13 +39,14 @@
  */
 
 #include "ocs.h"
+#include "ocs_compat.h"
+#include "ocs_nvme_stub.h"
 
 static void ocs_xport_link_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_link_stat_counts_t *counters, void *arg);
 static void ocs_xport_linkup_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_link_stat_counts_t *counters, void *arg);
 static void ocs_xport_host_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_host_stat_counts_t *counters, void *arg);
 static void ocs_xport_async_link_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_link_stat_counts_t *counters, void *arg);
 static void ocs_xport_async_host_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_host_stat_counts_t *counters, void *arg);
-static int32_t ocs_xport_stats_timer_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg);
 
 /**
  * @brief Post node event callback argument.
@@ -91,7 +94,7 @@ ocs_xport_alloc(ocs_t *ocs)
  *
  * @return Returns 0 on success, or a non-zero value on failure.
  */
-static void
+void
 ocs_xport_rq_threads_teardown(ocs_xport_t *xport)
 {
 	ocs_t *ocs = xport->ocs;
@@ -132,7 +135,7 @@ ocs_xport_rq_threads_teardown(ocs_xport_t *xport)
  *
  * @return Returns 0 on success, or a non-zero value on failure.
  */
-static int32_t
+int32_t
 ocs_xport_rq_threads_create(ocs_xport_t *xport, uint32_t num_rq_threads)
 {
 	ocs_t *ocs = xport->ocs;
@@ -205,7 +208,7 @@ ocs_xport_attach(ocs_xport_t *xport)
 
 	for (i = 0; i < SLI4_MAX_FCFI; i++) {
 		xport->fcfi[i].hold_frames = 1;
-		ocs_lock_init(ocs, &xport->fcfi[i].pend_frames_lock, "xport pend_frames[%d]", i);
+		ocs_lock_init(ocs, &xport->fcfi[i].pend_frames_lock, OCS_LOCK_ORDER_IGNORE, "xport pend_frames[%d]", i);
 		ocs_list_init(&xport->fcfi[i].pend_frames, ocs_hal_sequence_t, link);
 	}
 
@@ -224,7 +227,18 @@ ocs_xport_attach(ocs_xport_t *xport)
 		return -1;
 	}
 
-	ocs->hal.watchdog_timeout = ocs->watchdog_timeout;
+	/* Validate FW dump type after HAL setup */
+	if (!ocs_fw_dump_type_validate(ocs)) {
+		ocs_log_err(ocs, "FW dump type validate failed\n");
+		return -1;
+	}
+
+	/* Validate SRIOV config after HAL setup */
+	if (!ocs_sriov_config_validate(ocs)) {
+		ocs_log_err(ocs, "Invalid SRIOV config in Virtfn\n");
+		return -1;
+	}
+
 	ocs->hal.sliport_healthcheck = ocs->sliport_healthcheck;
 	ocs->hal.disable_fec = ocs->disable_fec;
 	ocs->hal.enable_fw_ag_rsp = ocs->enable_fw_ag_rsp;
@@ -238,12 +252,11 @@ ocs_xport_attach(ocs_xport_t *xport)
 	ocs_hal_set(&ocs->hal, OCS_HAL_ENABLE_DUAL_DUMP, ocs->enable_dual_dump);
 
 	ocs_hal_get(&ocs->hal, OCS_HAL_MAX_SGL, &max_sgl);
-	max_sgl -= SLI4_SGE_MAX_RESERVED;
 	n_sgl = MIN(OCS_FC_MAX_SGL, max_sgl);
 
 	/* EVT: For chained SGL testing */
 	if (ocs->ctrlmask & OCS_CTRLMASK_TEST_CHAINED_SGLS) {
-		n_sgl = 4;
+		n_sgl = 8;
 	}
 
 	/* Note: number of SGLs must be set for ocs_node_create_pool */
@@ -254,12 +267,13 @@ ocs_xport_attach(ocs_xport_t *xport)
 		ocs_log_debug(ocs, "%s: Configured for %d SGLs\n", ocs->desc, n_sgl);
 	}
 
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-	if (ocs_percpu_counter_init(&xport->io_total_alloc, 0, GFP_KERNEL) ||
-	    ocs_percpu_counter_init(&xport->io_total_free, 0, GFP_KERNEL) ||
-	    ocs_percpu_counter_init(&xport->io_active_count, 0, GFP_KERNEL))
-		goto ocs_xport_attach_cleanup;
+	/* Get updated MAX number of SGL */
+	if (ocs_hal_get(&ocs->hal, OCS_HAL_N_SGL, &n_sgl)) {
+		ocs_log_err(ocs, "failed to get number of SGLs\n");
+		return -1;
+	}
 
+#if !defined(OCS_USPACE)
 	if (ocs_percpu_counter_init(&xport->fc_stats.stats.fcp_stats.input_requests, 0, GFP_KERNEL) ||
 	    ocs_percpu_counter_init(&xport->fc_stats.stats.fcp_stats.input_bytes, 0, GFP_KERNEL) ||
 	    ocs_percpu_counter_init(&xport->fc_stats.stats.fcp_stats.output_requests, 0, GFP_KERNEL) ||
@@ -283,7 +297,7 @@ ocs_xport_attach(ocs_xport_t *xport)
 		ocs_hal_set(&ocs->hal, OCS_HAL_SUPPRESS_RSP_CAPABLE, FALSE);
 	}
 
-	rc = ocs_node_create_pool(ocs, (ocs->max_remote_nodes ? ocs->max_remote_nodes : OCS_MAX_REMOTE_NODES));
+	rc = ocs_node_create_pool(ocs, ocs->max_remote_nodes);
 	if (rc) {
 		ocs_log_err(ocs, "Can't allocate node pool\n");
 		goto ocs_xport_attach_cleanup;
@@ -299,7 +313,7 @@ ocs_xport_attach(ocs_xport_t *xport)
 		goto ocs_xport_attach_cleanup;
 	}
 
-	xport->els_io_pool = ocs_io_pool_create(ocs, OCS_MAX_REMOTE_NODES * 4, 0, true);
+	xport->els_io_pool = ocs_io_pool_create(ocs, ocs->max_remote_nodes * 4, 0, true);
 	if (xport->els_io_pool == NULL) {
 		ocs_log_err(ocs, "Can't allocate ELS IO pool\n");
 		goto ocs_xport_attach_cleanup;
@@ -315,10 +329,7 @@ ocs_xport_attach(ocs_xport_t *xport)
 	return 0;
 
 ocs_xport_attach_cleanup:
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-	percpu_counter_destroy(&xport->io_total_alloc);
-	percpu_counter_destroy(&xport->io_total_free);
-	percpu_counter_destroy(&xport->io_active_count);
+#if !defined(OCS_USPACE)
 	percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.input_requests);
 	percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.input_bytes);
 	percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.output_requests);
@@ -339,30 +350,32 @@ ocs_xport_attach_cleanup:
 static int32_t
 ocs_nsler_setup(ocs_t *ocs)
 {
-	int32_t rc;
 	char prop_buf[32];
 	int32_t enable_nsler;
 
-	rc = ocs_get_property("enable_nsler", prop_buf, sizeof(prop_buf));
-	if (rc)
+	ocs_hal_set(&ocs->hal, OCS_HAL_NSLER_CAPABLE, false);
+	if (ocs_get_property("enable_nsler", prop_buf, sizeof(prop_buf)))
 		return 0;
 
 	enable_nsler = ocs_strtoul(prop_buf, 0, 0);
-	if (!enable_nsler) {
-		ocs_hal_set(&ocs->hal, OCS_HAL_NSLER_CAPABLE, false);
-		return rc;
+	if (!enable_nsler)
+		return 0;
+
+	if (ocs->enable_hlm) {
+		ocs_log_err(ocs, "NSLER and HLM both can't be supported\n");
+		return -1;
 	}
 
-	/*
-	 * HLM & NSLER both can't be supported at same time.
-	 * At the time of coding, SPDK doesn't support HLM.
-	 */
-	rc = sli_get_nsler_capable(&ocs->hal.sli);
-	if (!rc) {
+	if (!sli_feature_iaab_enabled(&ocs->hal.sli) || !sli_feature_iaar_enabled(&ocs->hal.sli)) {
+		ocs_log_err(ocs, "NSLER protocol recommended to use IAAB and IAAR features\n");
+		return -1;
+	}
+
+	if (!sli_get_nsler_capable(&ocs->hal.sli)) {
 		ocs_log_err(ocs, "SLER is not supported\n");
-		ocs_hal_set(&ocs->hal, OCS_HAL_NSLER_CAPABLE, false);
-	} else
+	} else {
 		ocs_hal_set(&ocs->hal, OCS_HAL_NSLER_CAPABLE, true);
+	}
 
 	return 0;
 }
@@ -518,6 +531,126 @@ ocs_tow_setup(ocs_t *ocs)
 
 	return 0;
 }
+/**
+ * @brief Initialize link topology config
+ *
+ * @par Description
+ * Topology can be fetched from mod-param or Persistet Topology(PT).
+ *  a. Mod-param value is used when the value is 1(P2P) or 2(LOOP).
+ *  a. PT is used if mod-param is not provided( i.e, default value of AUTO)
+ * Also, if mod-param is used, update PT.
+ *
+ * @param ocs Pointer to ocs
+ *
+ * @return Returns 0 on success, or a non-zero value on failure.
+ */
+
+static int
+ocs_topology_setup(ocs_t *ocs)
+{
+	uint32_t topology;
+
+	if (ocs->topology == OCS_HAL_TOPOLOGY_AUTO) {
+		topology = sli_get_config_persistent_topology(&ocs->hal.sli);
+	}  else {
+		topology = ocs->topology;
+		/* ignore failure here. link will come-up either in auto mode
+		 * if PT is not supported or last saved PT value */
+		ocs_hal_set_persistent_topology(&ocs->hal, topology, OCS_CMD_POLL);
+	}
+
+	return ocs_hal_set(&ocs->hal, OCS_HAL_TOPOLOGY, topology);
+}
+
+int32_t
+ocs_xport_init_backends(ocs_t *ocs)
+{
+	uint8_t ini_device_set = FALSE;
+	uint8_t tgt_device_set = FALSE;
+	uint8_t nvme_ini_device_set = FALSE;
+	uint8_t nvme_tgt_device_set = FALSE;
+	uint8_t tgt_common_set = FALSE;
+
+	if (ocs->enable_tgt) {
+		if (ocs_tgt_scsi_enabled(ocs)) {
+			if (ocs_scsi_tgt_new_device(ocs)) {
+				ocs_log_err(ocs, "failed to initialize scsi target\n");
+				goto cleanup;
+			}
+			tgt_device_set = TRUE;
+		}
+
+		if (ocs_tgt_nvme_enabled(ocs)) {
+			if (ocs_nvme_tgt_new_device(ocs)) {
+				ocs_log_err(ocs, "failed to initialize nvme target\n");
+				goto cleanup;
+			}
+			nvme_tgt_device_set = TRUE;
+		}
+
+		if (tgt_device_set || nvme_tgt_device_set) {
+			ocs_tgt_common_new_device(ocs);
+			tgt_common_set = TRUE;
+		}
+	}
+
+	/*
+	 * Create Scsi_Host in all modes as this is required for scsi host sysfs interface.
+	 */
+	if (ocs_scsi_ini_new_device(ocs)) {
+		ocs_log_err(ocs, "failed to initialize scsi initiator\n");
+		goto cleanup;
+	}
+	ini_device_set = TRUE;
+
+	if (ocs->enable_ini) {
+		if (ocs_ini_nvme_enabled(ocs)) {
+			if (ocs_nvme_ini_new_device(ocs)) {
+				ocs_log_err(ocs, "failed to initialize nvme initiator\n");
+				goto cleanup;
+			}
+			nvme_ini_device_set = TRUE;
+		}
+	}
+	return 0;
+cleanup:
+	if (ini_device_set)
+		ocs_scsi_ini_del_device(ocs);
+
+	if (tgt_common_set)
+		ocs_tgt_common_del_device(ocs);
+
+	if (tgt_device_set)
+		ocs_scsi_tgt_del_device(ocs);
+
+	if (nvme_tgt_device_set)
+		ocs_nvme_tgt_del_device(ocs);
+
+	if (nvme_ini_device_set)
+		ocs_nvme_ini_del_device(ocs);
+
+	return -1;
+}
+
+void
+ocs_xport_cleanup_backends(ocs_t *ocs)
+{
+	/* free resources associated with target-server and initiator-client */
+	if (ocs_tgt_nvme_enabled(ocs))
+		ocs_nvme_tgt_del_device(ocs);
+
+	if (ocs_ini_nvme_enabled(ocs))
+		ocs_nvme_ini_del_device(ocs);
+
+	if (ocs_tgt_scsi_enabled(ocs))
+		ocs_scsi_tgt_del_device(ocs);
+
+	if (ocs_tgt_nvme_enabled(ocs) || ocs_tgt_scsi_enabled(ocs))
+		ocs_tgt_common_del_device(ocs);
+
+	ocs_scsi_ini_del_device(ocs);
+}
+
 
 /**
  * @brief Initializes the device.
@@ -535,28 +668,23 @@ ocs_xport_initialize(ocs_xport_t *xport)
 	ocs_t *ocs = xport->ocs;
 	int32_t rc;
 	uint32_t i;
-	uint32_t max_hal_io;
-	uint32_t max_sgl;
 	uint32_t hlm;
 	uint32_t dpp;
-	uint32_t rq_limit;
 	uint32_t dif_capable;
 	uint8_t dif_separate = 0;
 	char prop_buf[32];
+	int32_t prop_val;
 
 	/* booleans used for cleanup if initialization fails */
-	uint8_t ini_device_set = FALSE;
-	uint8_t tgt_device_set = FALSE;
 	uint8_t hal_initialized = FALSE;
 
-	ocs_hal_get(&ocs->hal, OCS_HAL_MAX_IO, &max_hal_io);
-	if (ocs_hal_set(&ocs->hal, OCS_HAL_N_IO, max_hal_io) != OCS_HAL_RTN_SUCCESS) {
-		ocs_log_err(ocs, "%s: Can't set number of IOs\n", ocs->desc);
-		return -1;
+	if (ocs_get_property("enable_rq_no_buff_warns", prop_buf, sizeof(prop_buf)) == 0) {
+		prop_val = ocs_strtoul(prop_buf, 0, 0);
+		if (ocs_hal_set(&ocs->hal, OCS_HAL_ENABLE_RQ_NO_BUFF_WARNS, prop_val)) {
+			ocs_log_err(ocs, "HAL set failed for RQ no buffer warns\n");
+			return -1;
+		}
 	}
-
-	ocs_hal_get(&ocs->hal, OCS_HAL_MAX_SGL, &max_sgl);
-	max_sgl -= SLI4_SGE_MAX_RESERVED;
 
 	if (ocs->enable_hlm) {
 		ocs_hal_get(&ocs->hal, OCS_HAL_HIGH_LOGIN_MODE, &hlm);
@@ -594,8 +722,6 @@ ocs_xport_initialize(ocs_xport_t *xport)
 		ocs_log_info(ocs, "Polling mode is enabled\n");
 	}
 
-	ocs_hal_get(&ocs->hal, OCS_HAL_MAX_IO, &max_hal_io);
-
 	if (ocs_nsler_setup(ocs)) {
 		ocs_log_err(ocs, "NVMe SLER setup failed\n");
 		return OCS_HAL_RTN_ERROR;
@@ -617,10 +743,13 @@ ocs_xport_initialize(ocs_xport_t *xport)
 		}
 	}
 
-	if (ocs_hal_set(&ocs->hal, OCS_HAL_TOPOLOGY, ocs->topology) != OCS_HAL_RTN_SUCCESS) {
+	/* Setup persistent topology based on topology mod-param value */
+	rc = ocs_topology_setup(ocs);
+	if (rc) {
 		ocs_log_err(ocs, "%s: Can't set the toplogy\n", ocs->desc);
 		return -1;
 	}
+
 	ocs_hal_set(&ocs->hal, OCS_HAL_RQ_DEFAULT_BUFFER_SIZE, OCS_FC_RQ_SIZE_DEFAULT);
 
 	if (ocs_hal_set(&ocs->hal, OCS_HAL_LINK_SPEED, ocs->speed) != OCS_HAL_RTN_SUCCESS) {
@@ -670,13 +799,14 @@ ocs_xport_initialize(ocs_xport_t *xport)
 
 	/* Initialize vport list */
 	ocs_list_init(&xport->vport_list, ocs_vport_spec_t, link);
-	ocs_lock_init(ocs, &xport->io_pending_lock, "io_pending_lock[%d]", ocs->instance_index);
+	ocs_lock_init(ocs, &xport->io_pending_lock, OCS_LOCK_ORDER_IO_PENDING, "io_pending_lock[%d]", ocs->instance_index);
 	ocs_list_init(&xport->io_pending_list, ocs_io_t, io_pending_link);
 
-#if defined(OCSU_FC_RAMD) || defined(OCSU_FC_WORKLOAD) || defined(OCS_USPACE_SPDK)
 	ocs_atomic_init(&xport->io_active_count, 0);
 	ocs_atomic_init(&xport->io_total_alloc, 0);
 	ocs_atomic_init(&xport->io_total_free, 0);
+
+#if defined(OCS_USPACE)
 	ocs_atomic_init(&xport->fc_stats.stats.fcp_stats.input_requests, 0);
 	ocs_atomic_init(&xport->fc_stats.stats.fcp_stats.input_bytes, 0);
 	ocs_atomic_init(&xport->fc_stats.stats.fcp_stats.output_requests, 0);
@@ -688,8 +818,8 @@ ocs_xport_initialize(ocs_xport_t *xport)
 	ocs_atomic_init(&xport->io_alloc_failed_count, 0);
 	ocs_atomic_init(&xport->io_pending_recursing, 0);
 
-	ocs_lock_init(ocs, &xport->fc_stats_lock, "fc_stats_lock[%d]", ocs->instance_index);
-	ocs_lock_init(ocs, &ocs->hal.watchdog_lock, "watchdog_lock[%d]", ocs_instance(ocs));
+	ocs_lock_init(ocs, &xport->fc_stats_lock, OCS_LOCK_ORDER_FC_STATS, "fc_stats_lock[%d]", ocs->instance_index);
+	ocs_lock_init(ocs, &ocs->hal.watchdog_lock, OCS_LOCK_ORDER_IGNORE, "watchdog_lock[%d]", ocs_instance(ocs));
 
 	rc = ocs_hal_init(&ocs->hal);
 	if (rc) {
@@ -699,70 +829,29 @@ ocs_xport_initialize(ocs_xport_t *xport)
 		hal_initialized = TRUE;
 	}
 
-	rq_limit = max_hal_io/2;
-	if (ocs_hal_set(&ocs->hal, OCS_HAL_RQ_PROCESS_LIMIT, rq_limit) != OCS_HAL_RTN_SUCCESS) {
-		ocs_log_err(ocs, "%s: Can't set the RQ process limit\n", ocs->desc);
-	}
-
-	if (ocs->enable_tgt) {
-		rc = ocs_scsi_tgt_new_device(ocs);
-		if (rc) {
-			ocs_log_err(ocs, "failed to initialize scsi target\n");
-			goto ocs_xport_init_cleanup;
-		}
-
-		rc = ocs_nvme_tgt_new_device(ocs);
-		if (rc) {
-			ocs_log_err(ocs, "failed to initialize nvme target\n");
-			goto ocs_xport_init_cleanup;
-		}
-
-		tgt_device_set = TRUE;
-	}
-
-	/*
-	 * Create Scsi_Host for I+T modes.
-	 * In T only mode, this is required for scsi host sysfs interface.
-	 */
-	if (ocs->enable_ini || ocs->enable_tgt) {
-		rc = ocs_scsi_ini_new_device(ocs);
-		if (rc) {
-			ocs_log_err(ocs, "failed to initialize initiator\n");
-			goto ocs_xport_init_cleanup;
-		} else {
-			ini_device_set = TRUE;
-		}
+	if (ocs_xport_init_backends(ocs)) {
+		ocs_log_err(ocs, "ocs_init_backends failed\n");
+		goto ocs_xport_init_cleanup;
 	}
 
 	/* Add vports */
 	if (ocs->num_vports != 0) {
-
 		uint32_t max_vports;
 		ocs_hal_get(&ocs->hal, OCS_HAL_MAX_VPORTS, &max_vports);
 
-		if (ocs->num_vports < max_vports) {
+		if (ocs->num_vports <= max_vports) {
 			ocs_log_debug(ocs, "Provisioning %d vports\n", ocs->num_vports);
 			for (i = 0; i < ocs->num_vports; i++) {
 				ocs_vport_create_spec(ocs, 0, 0, UINT32_MAX, ocs->enable_ini, ocs->ini_fc_types, ocs->enable_tgt, ocs->tgt_fc_types, NULL, NULL);
 			}
 		} else {
-			ocs_log_err(ocs, "failed to create vports, num_vports range should be (1-%d)\n", max_vports-1);
+			ocs_log_err(ocs, "failed to create vports, num_vports range should be (1-%d)\n", max_vports);
 			goto ocs_xport_init_cleanup;
 		}
 	}
-
 	return 0;
 
 ocs_xport_init_cleanup:
-	if (ini_device_set) {
-		ocs_scsi_ini_del_device(ocs);
-	}
-
-	if (tgt_device_set) {
-		ocs_scsi_tgt_del_device(ocs);
-		ocs_nvme_tgt_del_device(ocs);
-	}
-
 	if (hal_initialized) {
 		/* ocs_hal_teardown can only execute after ocs_hal_init */
 		ocs_hal_teardown(&ocs->hal);
@@ -789,23 +878,10 @@ ocs_xport_detach(ocs_xport_t *xport)
 	/* Free up any saved virtual ports */
 	ocs_vport_del_all(ocs);
 
-	/* free resources associated with target-server and initiator-client */
-	if (ocs->enable_tgt) {
-		ocs_scsi_tgt_del_device(ocs);
-		ocs_nvme_tgt_del_device(ocs);
-	}
+	ocs_xport_cleanup_backends(ocs);
 
-	if (ocs->enable_ini || ocs->enable_tgt) {
-		ocs_scsi_ini_del_device(ocs);
-
-		/*Shutdown FC Statistics timer*/
-		ocs_lock(&xport->fc_stats_lock);
-			xport->fc_stats_timer_shutdown = true;
-		ocs_unlock(&xport->fc_stats_lock);
-
-		if (ocs_timer_pending(&xport->fc_stats_timer))
-			ocs_del_timer(&xport->fc_stats_timer);
-	}
+	/*Shutdown FC Statistics timer*/
+	ocs_del_timer(&xport->fc_stats_timer);
 
 	ocs_hal_teardown(&ocs->hal);
 	return 0;
@@ -866,6 +942,38 @@ ocs_xport_post_node_event_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void 
 	return 0;
 }
 
+/**
+ * @brief post vport shutdown event callback
+ *
+ * @par Description
+ * This function is called from the mailbox completion interrupt context.
+ * By doing this in the interrupt context, it has
+ * the benefit of only posting events in the interrupt context.
+ *
+ * @param hal Pointer to HAL structure.
+ * @param status Completion status for mailbox command.
+ * @param mqe Mailbox queue completion entry.
+ * @param arg Callback argument.
+ *
+ */
+static int32_t
+ocs_xport_post_vport_shutdown_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
+{
+	ocs_t *ocs = hal->os;
+	ocs_vport_args_t *vport_info = arg;
+	ocs_domain_t *domain;
+	
+	if (vport_info != NULL) {
+		domain = ocs_domain_get_instance(ocs, vport_info->domain_index);
+
+		ocs_sport_vport_del(ocs, domain, vport_info->wwpn,
+				vport_info->wwnn, vport_info->delete_vport);
+		ocs_free(ocs, vport_info, sizeof(*vport_info));
+	}	
+
+	return 0;
+}
+
 /*
  * @brief Perform transport attach function.
  *
@@ -887,7 +995,7 @@ ocs_xport_post_node_event_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void 
 int32_t
 ocs_xport_control(ocs_xport_t *xport, ocs_xport_ctrl_e cmd, ...)
 {
-	uint32_t rc = 0;
+	int32_t rc = 0;
 	ocs_t *ocs = NULL;
 	va_list argp;
 
@@ -928,16 +1036,22 @@ ocs_xport_control(ocs_xport_t *xport, ocs_xport_ctrl_e cmd, ...)
 			reset_required = 0;
 		}
 
-		if (!reset_required) {
-			if (ocs_hal_port_control(&ocs->hal, OCS_HAL_PORT_SHUTDOWN, 0, NULL, NULL)) {
-				ocs_log_warn(ocs, "Port shutdown failed. Perform hard shutdown \n");
+		if (reset_required) {
+			uint32_t err1 = sli_reg_read(&ocs->hal.sli, SLI4_REG_SLIPORT_ERROR1);
+			uint32_t err2 = sli_reg_read(&ocs->hal.sli, SLI4_REG_SLIPORT_ERROR2);
+
+			if (err1 == SLI4_SLIPORT_ERROR1_WDT_TIMEOUT &&
+			    err2 == SLI4_SLIPORT_ERROR2_WDT_TIMEOUT &&
+			    ocs->drv_ocs.shutting_down) {
+				ocs_log_warn(ocs, "WDT timeout error. Perform hard shutdown\n");
+				break;
 			}
+		} else if (ocs_hal_port_control(&ocs->hal, OCS_HAL_PORT_SHUTDOWN, 0, NULL, NULL)) {
+			ocs_log_warn(ocs, "Port shutdown failed. Perform hard shutdown \n");
 		}
 
-		if (ocs_list_empty(&ocs->domain_list)) {
-			ocs_log_info(ocs, "Domain list is empty\n");
-		} else {
-			ocs_register_domain_list_empty_cb(ocs);
+		if (ocs_register_domain_list_empty_cb(ocs)) {
+			ocs_log_debug(ocs, "waiting for domain to free\n");
 			rc = ocs_drain_shutdown_events(ocs, &ocs->domain_list_empty_cb_sem);
 			if (rc) {
 				ocs_log_warn(ocs, "Domain shutdown timed out after %d sec; " \
@@ -998,7 +1112,6 @@ ocs_xport_control(ocs_xport_t *xport, ocs_xport_ctrl_e cmd, ...)
 		}
 
 		/* Setup payload */
-		ocs_memset(payload, 0, sizeof(*payload));
 		ocs_sem_init(&payload->sem, 0, "xport_post_node_Event");
 		ocs_atomic_init(&payload->refcnt, 2); /* one for self and one for callback */
 		payload->node = node;
@@ -1023,7 +1136,31 @@ ocs_xport_control(ocs_xport_t *xport, ocs_xport_ctrl_e cmd, ...)
 
 		break;
 	}
+	case OCS_XPORT_POST_VPORT_SHUTDOWN: {
+		ocs_vport_args_t *vport_args;
 
+		vport_args = ocs_malloc(ocs, sizeof(ocs_vport_args_t), OCS_M_ZERO);
+		if (!vport_args) {
+			ocs_log_test(ocs, "failed to allocate memory\n");
+			rc = -1;
+			break;
+		}
+		/* Retrieve arguments */
+		va_start(argp, cmd);
+		vport_args->wwpn = va_arg(argp, uint64_t);
+		vport_args->wwnn = va_arg(argp, uint64_t);
+		vport_args->domain_index = va_arg(argp, uint32_t);
+		vport_args->delete_vport = va_arg(argp, int);
+		va_end(argp);
+
+		if (ocs_hal_async_call(&ocs->hal, ocs_xport_post_vport_shutdown_cb, vport_args)) {
+			ocs_log_err(ocs, "ocs_hal_async_call failed\n");
+			ocs_free(ocs, vport_args, sizeof(*vport_args));
+			rc = -1;
+		}
+
+		break;
+	}
 	case OCS_XPORT_POST_NODE_SHUTDOWN: {
 		ocs_node_t *node;
 		ocs_sm_event_t evt;
@@ -1221,7 +1358,7 @@ ocs_xport_status(ocs_xport_t *xport, ocs_xport_status_e cmd, ocs_xport_stats_t *
 		}
 		break;
 	}
-	case OCS_XPORT_LINK_STATISTICS: 
+	case OCS_XPORT_LINK_STATISTICS:
 		ocs_lock(&ocs->xport->fc_stats_lock);
 			ocs_memcpy((void *)result, &ocs->xport->fc_stats_sysfs, sizeof(ocs_xport_stats_t));
 		ocs_unlock(&ocs->xport->fc_stats_lock);
@@ -1376,6 +1513,45 @@ ocs_xport_async_link_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_lin
 	ocs_unlock(&xport->fc_stats_lock);
 }
 
+const char *OCS_HOST_STAT_NAME[] = {
+	"TX_KBYTE_COUNT",
+	"RX_KBYTE_COUNT",
+	"TX_FRAME_COUNT",
+	"RX_FRAME_COUNT"
+};
+
+/**
+ * @brief copy the statistics to the cache
+ *
+ * @par Description
+ * Copies the statistics value returned by firmware to the driver's
+ * cache. If the stats have rolled over, update the wrap_counter in
+ * the upper 32-bits and copy the new stats value to lower 32 bits.
+ *
+ * @param old_stat: The driver's copy of statistics maintained as 64 bits.
+ *                Upper 32 bits maintain the wrap_counter, i.e., number of times
+ *                the counter has rolled over the 32 bit boundary.
+ *
+ * @param new_stat: The 32 statistics returned by the firmware.
+ *
+ * @param stat_type: The type of stats being updated.
+ *
+ * @return void
+ */
+
+static void
+ocs_wrap_and_copy_stats(uint64_t *old_stat, uint32_t new_stat, uint32_t stat_type)
+{
+	uint32_t *ptr_low = (uint32_t *)old_stat;
+
+	/* if stats have wrappped over, increment the wrap_counter */
+	if (*ptr_low > new_stat) {
+		*old_stat = *old_stat + OCS_WRAP_INCR;
+	}
+	/* update the stats */
+	*ptr_low = new_stat;
+}
+
 static void
 ocs_xport_async_host_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_host_stat_counts_t *counters, void *arg)
 {
@@ -1386,68 +1562,56 @@ ocs_xport_async_host_stats_cb(int32_t status, uint32_t num_counters, ocs_hal_hos
 	result = &xport->fc_stats;
 
 	ocs_lock(&xport->fc_stats_lock);
-	result->stats.host_stats.transmit_kbyte_count = counters[OCS_HAL_HOST_STAT_TX_KBYTE_COUNT].counter;
-	result->stats.host_stats.receive_kbyte_count = counters[OCS_HAL_HOST_STAT_RX_KBYTE_COUNT].counter;
-	result->stats.host_stats.transmit_frame_count = counters[OCS_HAL_HOST_STAT_TX_FRAME_COUNT].counter;
-	result->stats.host_stats.receive_frame_count = counters[OCS_HAL_HOST_STAT_RX_FRAME_COUNT].counter;
+	ocs_wrap_and_copy_stats(&result->stats.host_stats.transmit_kbyte_count,
+				counters[OCS_HAL_HOST_STAT_TX_KBYTE_COUNT].counter, OCS_HAL_HOST_STAT_TX_KBYTE_COUNT);
+	ocs_wrap_and_copy_stats(&result->stats.host_stats.receive_kbyte_count,
+				counters[OCS_HAL_HOST_STAT_RX_KBYTE_COUNT].counter, OCS_HAL_HOST_STAT_RX_KBYTE_COUNT);
+	ocs_wrap_and_copy_stats(&result->stats.host_stats.transmit_frame_count,
+				counters[OCS_HAL_HOST_STAT_TX_FRAME_COUNT].counter, OCS_HAL_HOST_STAT_TX_FRAME_COUNT);
+	ocs_wrap_and_copy_stats(&result->stats.host_stats.receive_frame_count,
+				counters[OCS_HAL_HOST_STAT_RX_FRAME_COUNT].counter, OCS_HAL_HOST_STAT_RX_FRAME_COUNT);
+	result->stats.host_stats.transmit_sequence_count= counters[OCS_HAL_HOST_STAT_TX_SEQ_COUNT].counter;
+	result->stats.host_stats.receive_sequence_count= counters[OCS_HAL_HOST_STAT_RX_SEQ_COUNT].counter;
+	result->stats.host_stats.total_exchanges_originator= counters[OCS_HAL_HOST_STAT_TOTAL_EXCH_ORIG].counter;
+	result->stats.host_stats.total_exchanges_responder= counters[OCS_HAL_HOST_STAT_TOTAL_EXCH_RESP].counter;
+	result->stats.host_stats.receive_p_bsy_count= counters[OCS_HAL_HOSY_STAT_RX_P_BSY_COUNT].counter;
+	result->stats.host_stats.receive_f_bsy_count= counters[OCS_HAL_HOST_STAT_RX_F_BSY_COUNT].counter;
 	ocs_unlock(&xport->fc_stats_lock);
 }
 
-static int32_t
-ocs_xport_stats_timer_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
-{
-	ocs_t *ocs = (ocs_t *)hal->os;
-
-	ocs_lock(&ocs->xport->fc_stats_lock);
-	if (!ocs->xport->fc_stats_timer_shutdown &&
-	    !ocs_timer_pending(&ocs->xport->fc_stats_timer)) {
-		ocs_setup_timer(ocs->hal.os, &ocs->xport->fc_stats_timer,
-				ocs_xport_config_stats_timer, ocs, OCS_XPORT_STATS_TIMER_MS, true);
-	}
-	ocs_unlock(&ocs->xport->fc_stats_lock);
-
-	return 0;
-}
 
 void
-ocs_device_stop_stats_timers(ocs_t *ocs)
+ocs_xport_setup_stats_timer(ocs_t *ocs)
 {
-	ocs_t *other_ocs;
-	uint8_t bus, dev, func;
-	uint32_t index = 0;
-
-	if (!ocs)
+	if (!ocs->xport) {
+		ocs_log_err(ocs, "xport object is NULL, can't schedule the fc stats timer\n");
 		return;
-
-	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
-		uint8_t other_bus, other_dev, other_func;
-
-		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
-		if ((bus == other_bus) && (dev == other_dev)) {
-			ocs_log_debug(other_ocs, "Removing link stats timer\n");
-
-			ocs_lock(&other_ocs->xport->fc_stats_lock);
-				other_ocs->xport->fc_stats_timer_shutdown = true;
-			ocs_unlock(&other_ocs->xport->fc_stats_lock);
-
-			if (ocs_timer_pending(&other_ocs->xport->fc_stats_timer))
-				ocs_del_timer(&other_ocs->xport->fc_stats_timer);
-		}
 	}
+
+#if !defined(OCS_USPACE_RAMD)
+	if (!ocs_scsi_host_ml_registered(ocs)) {
+		ocs_log_err(ocs, "scsi host ml not registered, no fc stats timer\n");
+		return;
+	};
+#endif
+
+	ocs_setup_timer(ocs->hal.os, &ocs->xport->fc_stats_timer,
+			ocs_xport_stats_timer_fn, ocs,
+			OCS_XPORT_STATS_TIMER_MS, true);
 }
 
 /**
- * @brief Get FC link and host Statistics periodically 
- * 
+ * @brief Get FC link and host Statistics periodically
+ *
  * @param hal Hardware context.
- * 
+ *
  * @return NONE.
  */
 void
-ocs_xport_config_stats_timer(void *arg)
+ocs_xport_stats_timer_fn(void *arg)
 {
 	ocs_t *ocs = (ocs_t *)arg;
+	ocs_xport_stats_t *fc_stats_sysfs, *fc_stats;
 
 	if (!ocs) {
 		ocs_log_err(ocs, "failed to locate OCS device\n");
@@ -1459,17 +1623,23 @@ ocs_xport_config_stats_timer(void *arg)
 		return;
 	}
 
+	fc_stats_sysfs = &ocs->xport->fc_stats_sysfs;
+	fc_stats = &ocs->xport->fc_stats;
+
 	/* Copy the cache'd stats */
 	ocs_lock(&ocs->xport->fc_stats_lock);
-	ocs_memcpy(&ocs->xport->fc_stats_sysfs, &ocs->xport->fc_stats, sizeof(ocs_xport_stats_t));
+	ocs_memcpy(fc_stats_sysfs, fc_stats, sizeof(ocs_xport_stats_t));
+
+	fc_stats_sysfs->stats.host_stats.transmit_kbyte_count = fc_stats->stats.host_stats.transmit_kbyte_count;
+	fc_stats_sysfs->stats.host_stats.receive_kbyte_count = fc_stats->stats.host_stats.receive_kbyte_count;
+	fc_stats_sysfs->stats.host_stats.transmit_frame_count = fc_stats->stats.host_stats.transmit_frame_count;
+	fc_stats_sysfs->stats.host_stats.receive_frame_count = fc_stats->stats.host_stats.receive_frame_count;
 	ocs_unlock(&ocs->xport->fc_stats_lock);
 
 	ocs_hal_get_link_stats(&ocs->hal, 1, 0, 0, ocs_xport_async_link_stats_cb, ocs->xport);
 	ocs_hal_get_host_stats(&ocs->hal, 0, ocs_xport_async_host_stats_cb, ocs->xport);
 
-	/* Reschedule the timer */
-	if (ocs_hal_async_call(&ocs->hal, ocs_xport_stats_timer_cb, ocs))
-		ocs_log_err(ocs, "ocs_hal_async_call failed\n");
+	ocs_mod_timer(&ocs->xport->fc_stats_timer, OCS_XPORT_STATS_TIMER_MS);
 }
 
 /**
@@ -1490,10 +1660,7 @@ ocs_xport_free(ocs_xport_t *xport)
 	uint32_t i;
 
 	if (xport) {
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-		percpu_counter_destroy(&xport->io_total_alloc);
-		percpu_counter_destroy(&xport->io_total_free);
-		percpu_counter_destroy(&xport->io_active_count);
+#if !defined(OCS_USPACE)
 		percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.input_requests);
 		percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.input_bytes);
 		percpu_counter_destroy(&xport->fc_stats.stats.fcp_stats.output_requests);

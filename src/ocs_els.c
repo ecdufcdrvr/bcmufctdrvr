@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -61,7 +63,6 @@ static int32_t ocs_els_send(ocs_io_t *els, uint32_t reqlen, uint32_t timeout_sec
 static int32_t ocs_els_send_rsp(ocs_io_t *els, uint32_t rsplen);
 static int32_t ocs_els_acc_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int32_t status, uint32_t ext_status, void *arg);
 static ocs_io_t *ocs_bls_send_acc(ocs_io_t *io, uint32_t s_id, uint16_t ox_id, uint16_t rx_id);
-static ocs_io_t *ocs_bls_send_rjt(ocs_io_t *io, uint32_t s_id, uint16_t ox_id, uint16_t rx_id);
 static int32_t ocs_bls_send_acc_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length,
 	int32_t status, uint32_t ext_status, void *app);
 static int32_t ocs_bls_send_rjt_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length,
@@ -87,7 +88,7 @@ int (*ocs_fdmi_hba_action[])(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad) = {
 	ocs_fdmi_hba_attr_symbolic_name,	/* bit10	RHBA_SYM_NODENAME	*/
 	ocs_fdmi_hba_attr_vendor_info,		/* bit11	RHBA_VENDOR_INFO	*/
 	ocs_fdmi_hba_attr_num_ports,		/* bit12	RHBA_NUM_PORTS		*/
-	ocs_fdmi_hba_attr_fabric_wwnn,		/* bit13	RHBA_FABRIC_WWNN	*/
+	ocs_fdmi_hba_attr_fabric_name,		/* bit13	RHBA_FABRIC_NAME	*/
 	ocs_fdmi_hba_attr_bios_ver,		/* bit14	RHBA_BIOS_VERSION	*/
 	ocs_fdmi_hba_attr_bios_state,		/* bit15	RHBA_BIOS_STATE		*/
 	ocs_fdmi_hba_attr_vendor_id,		/* bit16	RHBA_VENDOR_ID		*/
@@ -97,8 +98,8 @@ int (*ocs_fdmi_hba_action[])(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad) = {
 /* RPA / RPRT attribute jump table */
 int (*ocs_fdmi_port_action[])(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad) = {
 	/* Action routine			Mask bit	Attribute type		*/
-	ocs_fdmi_port_attr_fc4type,		/* bit0		RPRT_SUPPORT_FC4_TYPES	*/
-	ocs_fdmi_port_attr_support_speed,	/* bit1		RPRT_SUPPORTED_SPEED	*/
+	ocs_fdmi_port_attr_supported_fc4type,	/* bit0		RPRT_SUPPORTED_FC4_TYPES*/
+	ocs_fdmi_port_attr_supported_speed,	/* bit1		RPRT_SUPPORTED_SPEED	*/
 	ocs_fdmi_port_attr_speed,		/* bit2		RPRT_PORT_SPEED		*/
 	ocs_fdmi_port_attr_max_frame,		/* bit3		RPRT_MAX_FRAME_SIZE	*/
 	ocs_fdmi_port_attr_os_devname,		/* bit4		RPRT_OS_DEVICE_NAME	*/
@@ -108,7 +109,7 @@ int (*ocs_fdmi_port_action[])(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad) = {
 	ocs_fdmi_port_attr_symbolic_name,	/* bit8		RPRT_SYM_PORTNAME	*/
 	ocs_fdmi_port_attr_port_type,		/* bit9		RPRT_PORT_TYPE		*/
 	ocs_fdmi_port_attr_class,		/* bit10	RPRT_SUPPORTED_CLASS	*/
-	ocs_fdmi_port_attr_fabric_wwpn,		/* bit11	RPRT_FABRICNAME		*/
+	ocs_fdmi_port_attr_fabric_name,		/* bit11	RPRT_FABRICNAME		*/
 	ocs_fdmi_port_attr_active_fc4type,	/* bit12	RPRT_ACTIVE_FC4_TYPES	*/
 	ocs_fdmi_port_attr_port_state,		/* bit13	RPRT_PORT_STATE		*/
 	ocs_fdmi_port_attr_nportid,		/* bit14	RPRT_PORT_ID		*/
@@ -116,6 +117,7 @@ int (*ocs_fdmi_port_action[])(ocs_sport_t *sport, ocs_fdmi_attr_def_t *ad) = {
 };
 
 #define OCS_ELS_RSP_LEN		1024
+
 #define OCS_ELS_FDMI_REG_LEN	2048
 #define OCS_ELS_FDMI_RSP_LEN	4096
 
@@ -162,23 +164,35 @@ ocs_io_transition(ocs_io_t *els, ocs_sm_function_t state, void *data)
  *
  * @param els Pointer to the IO context.
  * @param evt Event to process.
+ * @param dont_block Make sure this function doesn't block.
  * @param data Data to pass in with the transition.
  *
- * @return None.
+ * @return 0 for success and -1 for failure.
  */
-void
-ocs_els_post_event(ocs_io_t *els, ocs_sm_event_t evt, void *data)
+int
+ocs_els_post_event(ocs_io_t *els, ocs_sm_event_t evt, bool dont_block, void *data)
 {
 	/* protect ELS events with node lock */
 	ocs_node_t *node = els->node;
-	ocs_node_lock(node);
-		els->els_info->els_evtdepth ++;
-		ocs_sm_post_event(&els->els_info->els_sm, evt, data);
-		els->els_info->els_evtdepth --;
+
+	if (!dont_block) {
+		ocs_node_lock(node);
+	} else {
+		if (!ocs_node_lock_try(node))
+			return -1;
+	}
+
+	els->els_info->els_evtdepth ++;
+	ocs_sm_post_event(&els->els_info->els_sm, evt, data);
+	els->els_info->els_evtdepth --;
+
 	ocs_node_unlock(node);
+
 	if (els->els_info->els_evtdepth == 0 && els->els_info->els_req_free) {
 		ocs_els_io_free(els);
 	}
+
+	return 0;
 }
 
 /**
@@ -233,9 +247,9 @@ ocs_els_io_alloc_size(ocs_node_t *node, uint32_t reqlen, uint32_t rsplen, ocs_el
 	xport = ocs->xport;
 
 	/* Now allocate DMA for request and response */
-	rc = ocs_dma_alloc(ocs, &els_req, reqlen, OCS_MIN_DMA_ALIGNMENT);
+	rc = ocs_dma_alloc(ocs, &els_req, reqlen, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT);
 	if (rc == 0) {
-		rc = ocs_dma_alloc(ocs, &els_rsp, rsplen, OCS_MIN_DMA_ALIGNMENT);
+		rc = ocs_dma_alloc(ocs, &els_rsp, rsplen, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT);
 		if (rc != 0) {
 			ocs_log_err(ocs, "ocs_dma_alloc for els_rsp failed\n");
 			ocs_dma_free(ocs, &els_req);
@@ -253,7 +267,7 @@ ocs_els_io_alloc_size(ocs_node_t *node, uint32_t reqlen, uint32_t rsplen, ocs_el
 			goto els_io_alloc_err;
 		}
 
-		els = ocs_io_alloc(ocs, OCS_IO_POOL_ELS);
+		els = ocs_io_alloc(ocs, OCS_IO_POOL_ELS, 0);
 		if (els == NULL) {
 			ocs_atomic_add_return(&xport->io_alloc_failed_count, 1);
 			ocs_unlock(&node->active_ios_lock);
@@ -294,6 +308,11 @@ ocs_els_io_alloc_size(ocs_node_t *node, uint32_t reqlen, uint32_t rsplen, ocs_el
 			ocs_memset(&els->els_info->els_sm, 0, sizeof(els->els_info->els_sm));
 			els->els_info->els_sm.app = els;
 
+			els->els_info->current_state_name[0] = '\0';
+			els->els_info->prev_state_name[0] = '\0';
+			els->els_info->current_evt = 0;
+			els->els_info->prev_evt = 0;
+
 			/* initialize fields */
 			els->els_info->els_retries_remaining = OCS_FC_ELS_DEFAULT_RETRIES;
 			els->els_info->els_evtdepth = 0;
@@ -302,6 +321,9 @@ ocs_els_io_alloc_size(ocs_node_t *node, uint32_t reqlen, uint32_t rsplen, ocs_el
 			els->els_info->els_rjt = 0;
 			els->els_info->els_req = els_req;
 			els->els_info->els_rsp = els_rsp;
+			els->els_info->ls_rsp_did = OCS_INVALID_FC_TASK_TAG;
+			els->els_info->ls_rsp_oxid = OCS_INVALID_FC_TASK_TAG;
+			els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_MAX;
 
 			/* add els structure to ELS IO list */
 			ocs_list_add_tail(&node->els_io_pend_list, els);
@@ -314,6 +336,57 @@ els_io_alloc_err:
 	ocs_dma_free(ocs, &els_req);
 	ocs_dma_free(ocs, &els_rsp);
 	return NULL;
+}
+
+void
+ocs_els_io_update_ls_rsp_params(ocs_io_t *els, fc_header_t *hdr, void *payload)
+{
+	fc_els_gen_t *buf = (fc_els_gen_t *)payload;
+
+	els->els_info->ls_rsp_did = fc_be24toh(hdr->d_id);
+	els->els_info->ls_rsp_oxid = ocs_be16toh(hdr->ox_id);
+
+	switch (buf->command_code) {
+		case FC_ELS_CMD_PDISC:
+			if (!pdisc_clear_nexus_state(els->ocs))
+				break;
+			
+			FALL_THROUGH; /* else fallthrough */
+		case FC_ELS_CMD_PLOGI:
+			els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_PLOGI;
+			break;
+
+		case FC_ELS_CMD_LOGO:
+			els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_LOGO;
+			break;
+
+		case FC_ELS_CMD_PRLO: {
+			fc_prlo_payload_t *prlo = (fc_prlo_payload_t *)payload;
+
+			if (prlo->type == FC_TYPE_NVME)
+				els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_NVME_PRLO;
+			else if (prlo->type == FC_TYPE_FCP)
+				els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_FCP_PRLO;
+
+			break;
+		}
+
+		case FC_ELS_CMD_PRLI: {
+			fc_prli_payload_t *prli = (fc_prli_payload_t *)payload;
+
+			if (prli->type == FC_TYPE_NVME)
+				els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_NVME_PRLI;
+			else if (prli->type == FC_TYPE_FCP)
+				els->els_info->ls_rsp_type = OCS_LS_RSP_TYPE_FCP_PRLI;
+
+			break;
+		}
+
+		default:
+			return;
+	}
+
+	els->els_info->ls_cmd_code = buf->command_code;
 }
 
 void
@@ -384,6 +457,19 @@ _ocs_els_io_free(void *arg)
 			 */
 			ocs_list_remove(&node->els_io_pend_list, els);
 			els->els_info->els_pend = 0;
+			
+			/* A reference to prli-els might be stored in the node.
+			 * Remove it since this els is going to be free'd
+			 */
+			if (els == node->ls_rsp_io[OCS_LS_RSP_TYPE_NVME_PRLI]){
+				node_printf(node, "Freeing nvme prli ls_rsp_io \n");
+				node->ls_rsp_io[OCS_LS_RSP_TYPE_NVME_PRLI] = NULL;
+			}
+
+			if (els == node->ls_rsp_io[OCS_LS_RSP_TYPE_FCP_PRLI]){
+				node_printf(node, "Freeing scsi prli ls_rsp_io \n");
+				node->ls_rsp_io[OCS_LS_RSP_TYPE_FCP_PRLI] = NULL;
+			}
 		} else {
 			ocs_log_err(ocs, "neither els->els_info->els_pend nor els->active set\n");
 			ocs_unlock(&node->active_ios_lock);
@@ -465,6 +551,7 @@ ocs_els_make_active(ocs_io_t *els)
 static int32_t
 ocs_els_send(ocs_io_t *els, uint32_t reqlen, uint32_t timeout_sec, ocs_hal_srrs_cb_t cb)
 {
+	int32_t rc;
 	ocs_node_t *node = els->node;
 
 	/* update ELS request counter */
@@ -474,7 +561,11 @@ ocs_els_send(ocs_io_t *els, uint32_t reqlen, uint32_t timeout_sec, ocs_hal_srrs_
 	ocs_els_make_active(els);
 
 	els->wire_len = reqlen;
-	return ocs_scsi_io_dispatch(els, cb);
+	rc = ocs_scsi_io_dispatch(els, cb);
+	if (rc)
+		node->els_req_cnt--;
+
+	return rc;
 }
 
 /**
@@ -494,6 +585,7 @@ ocs_els_send(ocs_io_t *els, uint32_t reqlen, uint32_t timeout_sec, ocs_hal_srrs_
 static int32_t
 ocs_els_send_rsp(ocs_io_t *els, uint32_t rsplen)
 {
+	int32_t rc;
 	ocs_node_t *node = els->node;
 
 	/* increment ELS completion counter */
@@ -503,7 +595,11 @@ ocs_els_send_rsp(ocs_io_t *els, uint32_t rsplen)
 	ocs_els_make_active(els);
 
 	els->wire_len = rsplen;
-	return ocs_scsi_io_dispatch(els, ocs_els_acc_cb);
+	rc = ocs_scsi_io_dispatch(els, ocs_els_acc_cb);
+	if (rc)
+		node->els_cmpl_cnt--;
+
+	return rc;
 }
 
 /**
@@ -531,6 +627,7 @@ ocs_els_req_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 	ocs_t *ocs;
 	ocs_node_cb_t cbdata;
 	ocs_sport_t *sport;
+	fc_els_gen_t *els_gen;
 
 	ocs_assert(arg, -1);
 	els = arg;
@@ -544,8 +641,13 @@ ocs_els_req_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 	ocs_assert(node->sport, -1);
 	sport = node->sport;
 
-	ocs_assert(els->hio, -1);
-	ocs_assert(hio == els->hio, -1);
+	if (hio)
+		ocs_assert(hio == els->hio, -1);
+
+	ocs_assert(node->els_req_cnt, -1);
+	ocs_node_lock(node);
+		node->els_req_cnt--;
+	ocs_node_unlock(node);
 
 	if (status)
 		els_io_printf(els, "status x%x ext x%x\n", status, ext_status);
@@ -557,6 +659,32 @@ ocs_els_req_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 	cbdata.ext_status = ext_status;
 	cbdata.header = NULL;
 	cbdata.els = els;
+
+	els_gen = (fc_els_gen_t *)cbdata.els->els_info->els_req.virt;
+	ocs_assert(els_gen, -1);
+
+	switch (els_gen->command_code) {
+	case FC_ELS_CMD_PLOGI:
+		node_printf(node, "ELS PLOGI (0x%x) %s rcvd; S_ID: %06x, WWPN: %016" PRIX64"\n",
+			     FC_ELS_CMD_PLOGI, ((SLI4_FC_WCQE_STATUS_SUCCESS == status) ? "ACK" : "RJT"),
+			     node->rnode.fc_id, ocs_node_get_wwpn(node));
+		break;
+
+	case FC_ELS_CMD_PRLI: {
+		fc_prli_payload_t *prli = cbdata.els->els_info->els_rsp.virt;
+
+		node_printf(node, "ELS %s PRLI (0x%x) %s rcvd; " \
+			     "S_ID: %06x, WWPN: %016" PRIX64", flags: %04x, sparams: %04x\n",
+			     ((FC_TYPE_NVME == prli->type) ? "NVMe" : "FCP"), FC_ELS_CMD_PRLI,
+			     ((SLI4_FC_WCQE_STATUS_SUCCESS == status) ? "ACK" : "RJT"),
+			     node->rnode.fc_id, ocs_node_get_wwpn(node),
+			     ocs_be16toh(prli->flags), ocs_be16toh(prli->service_params));
+		break;
+	}
+
+	default:
+		break;
+	}
 
 	/* Take a refcount here so that this sport will not get freed while processing the ELS WQE completion */
 	if (!ocs_ref_get_unless_zero(&sport->ref)) {
@@ -576,37 +704,37 @@ ocs_els_req_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 	 */
 	if (length > els->els_info->els_rsp.size) {
 		ocs_log_warn(ocs, "ELS response returned len=%d > buflen=%zu\n", length, els->els_info->els_rsp.size);
-		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, &cbdata);
+		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, false, &cbdata);
 		goto exit_els_req_cb;
 	}
 
 	/* Post event to ELS IO object */
 	switch (status) {
 	case SLI4_FC_WCQE_STATUS_SUCCESS:
-		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_OK, &cbdata);
+		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_OK, false, &cbdata);
 		break;
 
 	case SLI4_FC_WCQE_STATUS_LS_RJT:
-		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_RJT, &cbdata);
+		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_RJT, false, &cbdata);
 		break;
 
 	case SLI4_FC_WCQE_STATUS_LOCAL_REJECT:
 		switch (ext_status) {
 		case SLI4_FC_LOCAL_REJECT_SEQUENCE_TIMEOUT:
-			ocs_els_post_event(els, OCS_EVT_ELS_REQ_TIMEOUT, &cbdata);
+			ocs_els_post_event(els, OCS_EVT_ELS_REQ_TIMEOUT, false, &cbdata);
 			break;
 		case SLI4_FC_LOCAL_REJECT_ABORT_REQUESTED:
-			ocs_els_post_event(els, OCS_EVT_ELS_REQ_ABORTED, &cbdata);
+			ocs_els_post_event(els, OCS_EVT_ELS_REQ_ABORTED, false, &cbdata);
 			break;
 		default:
-			ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, &cbdata);
+			ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, false, &cbdata);
 			break;
 		}
 		break;
 
 	default:
 		ocs_log_warn(ocs, "els req complete: failed status x%x, ext_status, x%x\n", status, ext_status);
-		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, &cbdata);
+		ocs_els_post_event(els, OCS_EVT_SRRS_ELS_REQ_FAIL, false, &cbdata);
 		break;
 	}
 
@@ -641,24 +769,43 @@ ocs_els_acc_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 	ocs_node_t *node;
 	ocs_t *ocs;
 	ocs_node_cb_t cbdata;
-	ocs_io_t *io;
+	ocs_sport_t *sport = NULL;
 
 	ocs_assert(arg, -1);
-	io = arg;
-	els = io;
-	ocs_assert(els, -1);
+	els = arg;
+
 	ocs_assert(els->node, -1);
 	node = els->node;
+
 	ocs_assert(node->ocs, -1);
 	ocs = node->ocs;
 
-	ocs_assert(io->hio, -1);
-	ocs_assert(hio == io->hio, -1);
+	if (hio)
+		ocs_assert(hio == els->hio, -1);
+
+	ocs_assert(node->els_cmpl_cnt, -1);
+	ocs_node_lock(node);
+		node->els_cmpl_cnt--;
+	ocs_node_unlock(node);
 
 	cbdata.status = status;
 	cbdata.ext_status = ext_status;
 	cbdata.header = NULL;
 	cbdata.els = els;
+
+	sport = node->sport;
+
+	/* Take a refcount here so that this sport will not get freed while processing the ELS WQE completion */
+	if (!ocs_ref_get_unless_zero(&sport->ref)) {
+		ocs_log_err(ocs, "Sport is not active\n");
+		return -1;
+	}
+
+	/**
+	 * For ELS WQE completions, we seem to acquire the sport and node locks in a different order
+	 * when compared to other code paths. So, acquire the sport lock here to avoid the deadlock.
+	 */
+	ocs_sport_lock(sport);
 
 	/* Post node event */
 	switch (status) {
@@ -673,6 +820,8 @@ ocs_els_acc_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int
 		ocs_node_post_event(node, OCS_EVT_SRRS_ELS_CMPL_FAIL, &cbdata);
 		break;
 	}
+	ocs_sport_unlock(sport);
+	ocs_ref_put(&sport->ref); /* ocs_ref_get(): same function */
 
 	/* If this IO has a callback, invoke it */
 	if (els->els_info->els_callback) {
@@ -755,9 +904,11 @@ ocs_send_plogi(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 		els->hio_type = OCS_HAL_ELS_REQ;
 		els->iparam.els.timeout = timeout_sec;
-
+		node_printf(node, "ELS PLOGI (0x%x) REQ sent; D_ID: %06x, WWPN: %016" PRIX64"\n",
+			     FC_ELS_CMD_PLOGI, node->rnode.fc_id, ocs_node_get_wwpn(node));
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
+
 	return els;
 }
 
@@ -936,19 +1087,21 @@ ocs_send_prli(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 	fc_prli_payload_t *prli;
 	uint16_t payload_len = 0;
 	uint16_t page_len = 0;
+	uint16_t flags = 0;
+	uint16_t sparams = 0;
 	bool enable_ini, enable_tgt;
 
 	node_els_trace();
 
 	if (fc_type == FC_TYPE_FCP) {
-		enable_ini = ocs_ini_scsi_enabled(ocs);
-		enable_tgt = ocs_tgt_scsi_enabled(ocs);
+		enable_ini = ocs_ini_scsi_backend_enabled(ocs, node->sport);
+		enable_tgt = ocs_tgt_scsi_backend_enabled(ocs, node->sport);
 
 		payload_len = sizeof(fc_prli_payload_t);
 		page_len = FC_PRLI_ACC_FCP_PAGE_LENGTH;
 	} else if (fc_type == FC_TYPE_NVME) {
-		enable_ini = ocs_ini_nvme_enabled(ocs);
-		enable_tgt = ocs_tgt_nvme_enabled(ocs);
+		enable_ini = ocs_ini_nvme_backend_enabled(ocs, node->sport);
+		enable_tgt = ocs_tgt_nvme_backend_enabled(ocs, node->sport);
 
 		payload_len = sizeof(fc_nvme_prli_payload_t);
 		page_len = FC_PRLI_ACC_NVME_PAGE_LENGTH;
@@ -960,6 +1113,11 @@ ocs_send_prli(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 		ocs_log_err(ocs, "Node is not capable of either initiator or target\n");
 		return NULL;
 	}
+
+	flags = FC_PRLI_ESTABLISH_IMAGE_PAIR;
+	sparams = (FC_PRLI_READ_XRDY_DISABLED |
+			(enable_ini ? FC_PRLI_INITIATOR_FUNCTION : 0) |
+			(enable_tgt ? FC_PRLI_TARGET_FUNCTION : 0));
 
 	els = ocs_els_io_alloc(node, payload_len, OCS_ELS_ROLE_ORIGINATOR);
 	if (els == NULL) {
@@ -981,13 +1139,15 @@ ocs_send_prli(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 		prli->payload_length = ocs_htobe16(payload_len);
 		prli->type = fc_type;
 		prli->type_ext = 0;
-		prli->flags = ocs_htobe16(FC_PRLI_ESTABLISH_IMAGE_PAIR);
-		prli->service_params = ocs_htobe16(FC_PRLI_READ_XRDY_DISABLED |
-			(enable_ini ? FC_PRLI_INITIATOR_FUNCTION : 0) |
-			(enable_tgt ? FC_PRLI_TARGET_FUNCTION : 0));
+		prli->flags = ocs_htobe16(flags);
+		prli->service_params = ocs_htobe16(sparams);
 
 		els->hio_type = OCS_HAL_ELS_REQ;
 		els->iparam.els.timeout = timeout_sec;
+		node_printf(node, "ELS %s PRLI (0x%x) REQ sent; " \
+			     "D_ID: %06x, WWPN: %016" PRIX64", flags: %04x, sparams: %04x\n",
+			     ((FC_TYPE_NVME == prli->type) ? "NVMe" : "FCP"), FC_ELS_CMD_PRLI,
+			     node->rnode.fc_id, ocs_node_get_wwpn(node), flags, sparams);
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
 
@@ -1012,7 +1172,7 @@ ocs_send_prli(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
  */
 
 ocs_io_t *
-ocs_send_prlo(ocs_node_t *node, uint32_t fc4_type, uint32_t timeout_sec, uint32_t retries, 
+ocs_send_prlo(ocs_node_t *node, uint32_t fc4_type, uint32_t timeout_sec, uint32_t retries,
 	els_cb_t cb, void *cbarg)
 {
 	ocs_t *ocs = node->ocs;
@@ -1263,13 +1423,471 @@ ocs_send_scr(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 		ocs_memset(req, 0, sizeof(*req));
 		req->command_code = FC_ELS_CMD_SCR;
-		req->function = FC_SCR_REG_FULL;
+		req->function = FC_SCR_REG_DFLT;
+
+		if (ocs_tdz_enabled(node->ocs))
+			req->function |= FC_SCR_REG_PEER_ZONE;
 
 		els->hio_type = OCS_HAL_ELS_REQ;
 		els->iparam.els.timeout = timeout_sec;
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
 	return els;
+}
+
+ocs_io_t *
+ocs_send_rdf(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
+	els_cb_t cb, void *cbarg)
+{
+	ocs_io_t *els;
+	ocs_t *ocs = node->ocs;
+	fc_rdf_payload_t *req;
+
+	node_els_trace();
+
+	els = ocs_els_io_alloc(node, sizeof(*req), OCS_ELS_ROLE_ORIGINATOR);
+	if (els == NULL) {
+		ocs_log_err(ocs, "IO alloc failed\n");
+	} else {
+		els->els_info->els_timeout_sec = timeout_sec;
+		els->els_info->els_retries_remaining = retries;
+		els->els_info->els_callback = cb;
+		els->els_info->els_callback_arg = cbarg;
+		els->display_name = "rdf";
+
+		req = els->els_info->els_req.virt;
+
+		ocs_memset(req, 0, sizeof(*req));
+		req->command_code = FC_ELS_CMD_RDF;
+		req->desc_list_len = ocs_htobe32(sizeof(ocs_fc_rdf_desc_t));
+
+		req->rdf_desc.rdf_desc_tag = ocs_htobe32(OCS_ELS_FPIN_REG);
+		req->rdf_desc.desc_len = ocs_htobe32((sizeof(ocs_fc_rdf_desc_t)) - 8);
+		req->rdf_desc.desc_tag_1 = ocs_htobe32(OCS_FPIN_NOTIFY_LINK_INTEG);
+		req->rdf_desc.desc_tag_2 = ocs_htobe32(OCS_FPIN_NOTIFY_DELIVERY);
+		req->rdf_desc.desc_tag_3 = ocs_htobe32(OCS_FPIN_NOTIFY_PEER_CGN);
+		req->rdf_desc.desc_tag_4 = ocs_htobe32(OCS_FPIN_NOTIFY_CGN);
+		req->rdf_desc.decs_tag_count = ocs_htobe32(4);
+		els->hio_type = OCS_HAL_ELS_REQ;
+		els->iparam.els.timeout = timeout_sec;
+
+		node_printf(node, "Sending RDF req to fabric controller\n");
+		ocs_io_transition(els, __ocs_els_init, NULL);
+	}
+
+	return els;
+}
+
+/**
+ * ocs_fpin_display_wwpn - Display WWPNs accessible by the attached port
+ * ocs: Pointer to OCS object.
+ * wwnp: Pointer to list of WWPNs in FPIN payload
+ * cnt: count of WWPNs in FPIN payload
+ *
+ * This routine is called by LI and PC descriptors.
+ * Limit the number of WWPNs displayed to 6 log messages, 6 per log message
+ */
+static void
+ocs_fpin_display_wwpn(ocs_t *ocs, uint64_t *wwnlist, uint32_t cnt)
+{
+#define OCS_FPIN_WWPN_LINE_SZ 128
+#define OCS_FPIN_WWPN_LINE_CNT 6
+#define OCS_FPIN_WWPN_NUM_LINE 6
+
+	char buf[OCS_FPIN_WWPN_LINE_SZ];
+	uint64_t wwn, wwpn;
+	uint32_t i, len;
+	int line = 0;
+	int wcnt = 0;
+	bool endit = false;
+
+	len = ocs_scnprintf(buf, OCS_FPIN_WWPN_LINE_SZ, "Accessible WWPNs:");
+	for (i = 0; i < cnt; i++) {
+		/* Are we on the last WWPN */
+		if (i == (cnt - 1))
+			endit = true;
+
+		/* Extract the next WWPN from the payload */
+		wwn = *wwnlist++;
+		wwpn = ocs_be64toh(wwn);
+		len += ocs_scnprintf(buf + len, OCS_FPIN_WWPN_LINE_SZ - len,
+				 " %016llx", wwpn);
+
+		/* Log a message if we are on the last WWPN
+		 * or if we hit the max allowed per message.
+		 */
+		wcnt++;
+		if (wcnt == OCS_FPIN_WWPN_LINE_CNT || endit) {
+			buf[len] = 0;
+			ocs_log_info(ocs, "%s \n", buf);
+			/* Check if we reached the last WWPN */
+			if (endit)
+				return;
+
+			/* Limit the number of log message displayed per FPIN */
+			line++;
+			if (line == OCS_FPIN_WWPN_NUM_LINE) {
+				ocs_log_info_ratelimited(ocs, "%d WWPNs Truncated\n",
+						cnt - i - 1);
+				return;
+			}
+
+			/* Start over with next log message */
+			wcnt = 0;
+			len = ocs_scnprintf(buf, OCS_FPIN_WWPN_LINE_SZ,
+					"Additional WWPNs:");
+		}
+	}
+}
+
+static const char *
+ocs_fpin_get_li_event_name(uint32_t event_type)
+{
+	switch (event_type) {
+	case FPIN_LI_LINK_FAILURE:
+		return "Link Failure";
+	case FPIN_LI_LOSS_OF_SYNC:
+		return "Loss of Synchronization";
+	case FPIN_LI_LOSS_OF_SIG:
+		return "Loss of Signal";
+	case FPIN_LI_PRIM_SEQ_ERR:
+		return "Primitive Sequence Protocol Err";
+	case FPIN_LI_INVALID_TX_WD:
+		return "Invalid Transmission Word";
+	case FPIN_LI_INVALID_CRC:
+		return "Invalid CRC";
+	case FPIN_LI_DEVICE_SPEC:
+		return "Device Specific";
+	case FPIN_LI_UNKNOWN:
+	default:
+		return "Unknown";
+	}
+}
+
+static const char *
+ocs_fpin_get_del_evt_reason_name(uint32_t event_type) 
+{
+	switch (event_type) {
+	case FPIN_DEL_TIMEOUT:
+		return "Delivery Timeout";
+	case FPIN_DEL_UNABLE_TO_ROUTE:
+		return "Delivery Routing Failure";
+	case FPIN_DEL_DEVICE_SPEC:
+		return "Device Specific";
+	default:
+		return "Unknown";
+	}
+}
+
+static const char *
+ocs_fpin_get_pc_evt_name(uint32_t event_type)
+{
+	switch (event_type) {
+	case FPIN_PC_LOST_CREDIT:
+		return "Lost Credit";
+	case FPIN_PC_CREDIT_STALL:
+		return "Credit Stall";
+	case FPIN_PC_OVERSUBSCRIPTION:
+		return "Oversubscription";
+	case FPIN_PC_DEVICE_SPEC:
+		return "Device Specific";
+	default:
+		return "Unknown";
+	}
+}
+
+static const char *
+ocs_fpin_get_cgn_evt_name(uint32_t event_type)
+{
+	switch (event_type) {
+	case FPIN_CGN_NONE:
+		return "None";
+	case FPIN_CGN_WARNING:
+		return "Warning";
+	case FPIN_CGN_ALARM:
+		return "Alarm";
+	default:
+		return "Unknown";
+	}
+}
+
+/**
+ * Brief: This function processes a link integrity FPIN event by
+ * logging a message
+ * ocs_fpin_recv_li - Process an FPIN Link Integrity Event.
+ * @ocs: Pointer to OCS object.
+ * @tlv:  Pointer to the Link Integrity Notification Descriptor.
+ *
+ **/
+static void
+ocs_fpin_recv_li(ocs_t *ocs, fc_fpin_tlv_desc_t *tlv)
+{
+	const char *li_evt_str;
+	uint32_t li_evt, cnt;
+	fc_fpin_li_evt_desc_t *li_evt_desc;
+
+	if (ocs_be32toh(tlv->desc_len) < FPIN_MIN_DESC_LEN(fc_fpin_li_evt_desc_t)) {
+		ocs_log_err_ratelimited(ocs, "Link event TLV is truncated\n");
+		return;
+	}
+
+	li_evt_desc = (fc_fpin_li_evt_desc_t *)tlv;
+
+	li_evt = ocs_be16toh(li_evt_desc->event_type);
+	li_evt_str = ocs_fpin_get_li_event_name(li_evt);
+	cnt = ocs_be32toh(li_evt_desc->pname_count);
+
+	ocs_log_info_ratelimited(ocs, "FPIN Link integrity evt_name: %s evt_type: x%x"
+			" Detecting PN: x%016llx Attached PN: x%016llx "
+			"Duration %d (ms) count %d port_cnt: %d\n",
+			li_evt_str, li_evt,
+			ocs_be64toh(li_evt_desc->detecting_wwpn),
+			ocs_be64toh(li_evt_desc->attached_wwpn),
+			ocs_be32toh(li_evt_desc->event_threshold),
+			ocs_be32toh(li_evt_desc->event_count), cnt);
+
+	if (ocs_be32toh(tlv->desc_len) == sizeof(fc_fpin_li_evt_desc_t) + sizeof(uint64_t) * cnt) {
+		ocs_fpin_display_wwpn(ocs, (uint64_t *)&li_evt_desc->pname_list, cnt);
+	}
+}
+
+/**
+ * Brief: This function processes a delivery FPIN event by
+ * logging a message.
+ * ocs_fpin_recv_del - Process an FPIN Delivery Event.
+ * @ocs: Pointer to OCS object.
+ * @del_not:  Pointer to the Delivery Notification Descriptor
+ **/
+static void
+ocs_fpin_recv_del(ocs_t *ocs, fc_fpin_tlv_desc_t *tlv)
+{
+	fc_fpin_del_evt_desc_t *del;
+	const char *del_rsn_str;
+	uint32_t del_rsn;
+	uint32_t *frame;
+
+	if (ocs_be32toh(tlv->desc_len) < FPIN_MIN_DESC_LEN(fc_fpin_del_evt_desc_t)) {
+		ocs_log_err_ratelimited(ocs, "Delivery event TLV is truncated\n");
+		return;
+	}
+
+	del = (fc_fpin_del_evt_desc_t *)tlv;
+
+	del_rsn = ocs_be16toh(del->reason_code);
+	del_rsn_str = ocs_fpin_get_del_evt_reason_name(del_rsn);
+
+	frame = (uint32_t *)&del->event_data;
+	ocs_log_info_ratelimited(ocs, "FPIN Delivery evt_name: %s (evt_type: x%x) "
+			"Detecting WWPN x%016llx Attached WWPN x%016llx "
+			"DiscHdr0  x%08x DiscHdr1 x%08x DiscHdr2 x%08x "
+			"DiscHdr3 x%08x DiscHdr4 x%08x DiscHdr5 x%08x\n",
+			del_rsn_str, del_rsn,
+			ocs_be64toh(del->detecting_wwpn), ocs_be64toh(del->attached_wwpn),
+			ocs_be32toh(frame[0]), ocs_be32toh(frame[1]),
+			ocs_be32toh(frame[2]), ocs_be32toh(frame[3]),
+			ocs_be32toh(frame[4]), ocs_be32toh(frame[5]));
+}
+
+/**
+ * Brief: This function processes a Peer Congestion FPIN event by
+ * logging a message.
+ * ocs_fpin_recv_peer_cgn - Process a FPIN Peer Congestion Event.
+ * @ocs: Pointer to OCS object.
+ * @peer_cgn_not:  Pointer to the Peer Congestion Notification Descriptor
+ *
+ **/
+static void
+ocs_fpin_recv_peer_cgn(ocs_t *ocs, fc_fpin_tlv_desc_t *tlv)
+{
+	fc_fpin_pc_evt_desc_t *pc;
+	const char *pc_evt_str;
+	uint32_t pc_evt, cnt;
+
+	if (ocs_be32toh(tlv->desc_len) < FPIN_MIN_DESC_LEN(fc_fpin_pc_evt_desc_t)) {
+		ocs_log_err_ratelimited(ocs, "Peer Congestion event TLV is truncated\n");
+		return;
+	}
+
+	pc = (fc_fpin_pc_evt_desc_t *)tlv;
+
+	pc_evt = ocs_be16toh(pc->event_type);
+	pc_evt_str = ocs_fpin_get_pc_evt_name(pc_evt);
+	cnt = ocs_be32toh(pc->pname_count);
+
+	ocs_log_info_ratelimited(ocs, "FPIN Peer Congestion %s (x%x) Duration %d mSecs "
+		     "Detecting PN x%016llx Attached PN x%016llx Impacted Port Cnt %d\n",
+		     pc_evt_str, pc_evt, ocs_be32toh(pc->event_period),
+		     ocs_be64toh(pc->detecting_wwpn), ocs_be64toh(pc->attached_wwpn), cnt);
+
+	if (ocs_be32toh(tlv->desc_len) == sizeof(fc_fpin_pc_evt_desc_t) + sizeof(uint64_t) * cnt) {
+		ocs_fpin_display_wwpn(ocs, (uint64_t *)&pc->pname_list, cnt);
+	}
+}
+
+/*
+ * Brief: This function processes an FPIN Congestion Notifiction.  The notification
+ * could be an Alarm or Warning.  This routine feeds that data into driver's
+ * running congestion algorithm. It also processes the FPIN by
+ * logging a message.
+ *
+ * ocs_fpin_recv_cgn - Process an FPIN Congestion notification
+ * @ocs: Pointer to OCS object.
+ * @credit_not:  Pointer to the Congestion Notification Descriptor
+ */
+static void
+ocs_fpin_recv_cgn(ocs_t *ocs, fc_fpin_tlv_desc_t *tlv)
+{
+	fc_fpin_cgn_evt_desc_t *cgn;
+	const char *cgn_evt_str, *cgn_sev_str;
+	uint32_t cgn_evt, cgn_sev;
+
+	if (ocs_be32toh(tlv->desc_len) < FPIN_MIN_DESC_LEN(fc_fpin_cgn_evt_desc_t)) {
+		ocs_log_err_ratelimited(ocs, "Congestion notification event TLV is truncated\n");
+		return;
+	}
+
+	cgn = (fc_fpin_cgn_evt_desc_t *)tlv;
+
+	cgn_evt = ocs_be16toh(cgn->event_type);
+	cgn_evt_str = ocs_fpin_get_pc_evt_name(cgn_evt);
+	cgn_sev = cgn->severity;
+	cgn_sev_str = ocs_fpin_get_cgn_evt_name(cgn_sev);
+
+	if ((cgn_evt == FPIN_PC_LOST_CREDIT) ||
+	    (cgn_evt == FPIN_PC_CREDIT_STALL)) {
+		ocs_log_warn_ratelimited(ocs, "FPIN CONGESTION %s type %s (x%x) Event Duration %d(msec)\n",
+				cgn_sev_str, cgn_evt_str, cgn_evt, ocs_be32toh(cgn->event_period));
+	} else {
+		ocs_log_debug_ratelimited(ocs, "FPIN CONGESTION %s type %s (x%x) Event Duration %d(msec)\n",
+				cgn_sev_str, cgn_evt_str, cgn_evt, ocs_be32toh(cgn->event_period));
+	}
+}
+
+void
+ocs_els_process_fpin_rcvd(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	fc_fpin_payload_t *fpin = cbdata->payload;
+	fc_fpin_tlv_desc_t *tlv;
+	uint32_t	bytes_remain;
+	uint32_t	fpin_length = cbdata->payload_len;
+	uint32_t	tag_type;
+
+	/* make sure there is the full fpin header */
+	if (fpin_length < sizeof(fc_fpin_payload_t)) {
+		ocs_log_err_ratelimited(node->ocs, "Truncated FPIN header (0x%x bytes)", fpin_length);
+		return;
+	}
+
+	if (fpin_length != sizeof(fc_fpin_payload_t) + ocs_be32toh(fpin->desc_len)) {
+		ocs_log_err_ratelimited(node->ocs, "Unexpected FPIN len 0x%x != 0x%lx", fpin_length,
+				sizeof(fc_fpin_payload_t)  + ocs_be32toh(fpin->desc_len));
+		return;
+	}
+
+	tlv = (fc_fpin_tlv_desc_t *)&fpin->fpin_desc[0];
+	bytes_remain = fpin_length - offsetof(fc_fpin_payload_t, fpin_desc);
+	bytes_remain = MIN(bytes_remain, ocs_be32toh(fpin->desc_len));
+
+	/* process each descriptor */
+	while (bytes_remain >= FC_FPIN_TLV_DESC_HDR_SZ &&
+	       bytes_remain >= FC_FPIN_TLV_DESC_SZ_FROM_LENGTH(tlv)) {
+		tag_type = ocs_be32toh(tlv->desc_tag);
+		switch (tag_type) {
+		case OCS_FPIN_NOTIFY_LINK_INTEG:
+			ocs_fpin_recv_li(node->ocs, tlv);
+			break;
+		case OCS_FPIN_NOTIFY_DELIVERY:
+			ocs_fpin_recv_del(node->ocs, tlv);
+			break;
+		case OCS_FPIN_NOTIFY_PEER_CGN:
+			ocs_fpin_recv_peer_cgn(node->ocs, tlv);
+			break;
+		case OCS_FPIN_NOTIFY_CGN:
+			ocs_fpin_recv_cgn(node->ocs, tlv);
+			break;
+		default:
+			ocs_log_err(node->ocs, "unknown FPIN descriptor tag_type: %d", tag_type);
+		}
+
+		bytes_remain -= FC_FPIN_TLV_DESC_SZ_FROM_LENGTH(tlv);
+		tlv = ocs_fc_tlv_next_desc(tlv);
+	}
+}
+
+/**
+ * @Brief: send FPIN link event to switch
+ * @args input: node pointer
+ * @args input: ocs_fpin_evt_args_t event descriptior arguments
+ *
+ * @return : 0 success -1 failure
+ **/
+int
+ocs_els_fpin_send_li(ocs_node_t *node, ocs_fpin_evt_args_t *desc_args)
+{
+	ocs_t *ocs = node->ocs;
+	fc_fpin_payload_t *req;
+	fc_fpin_li_evt_desc_t *li_evt_desc;
+	uint32_t length = 0;
+	ocs_sframe_args_t sframe_args = {0};
+	int rc = 0;
+	uint32_t n;
+	void *payload_buf;
+
+	payload_buf = ocs_malloc(ocs, OCS_FPIN_SEND_EVENT_MAX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!payload_buf) {
+		ocs_log_err(ocs, "failed to allocate memory\n");
+		return -1;
+	}
+	req = payload_buf;
+
+	li_evt_desc = (fc_fpin_li_evt_desc_t *)&req->fpin_desc[0];
+	req->fpin_cmd = FC_ELS_CMD_FPIN;
+	length = sizeof(fc_fpin_li_evt_desc_t) - FC_FPIN_TLV_DESC_HDR_SZ;
+	li_evt_desc->desc_tag = ocs_htobe32(OCS_FPIN_NOTIFY_LINK_INTEG);
+	li_evt_desc->detecting_wwpn = ocs_htobe64(node->sport->wwpn);
+	li_evt_desc->attached_wwpn = desc_args->attached_wwpn;
+	li_evt_desc->event_type	= ocs_htobe16(FPIN_LI_LINK_FAILURE);
+	li_evt_desc->event_modifier = desc_args->event_modifier;
+	li_evt_desc->event_threshold = desc_args->event_threshold;
+	li_evt_desc->event_count = desc_args->event_count;
+	for (n = 0; n < desc_args->pname_count; n++) {
+		li_evt_desc->pname_list[n] = desc_args->pname[n];
+		length += 8;
+		/* continue only if buffer has room to accommodate next port name */
+		if ((length + 8) > (OCS_FPIN_SEND_EVENT_MAX_SIZE - (FC_FPIN_TLV_DESC_HDR_SZ + FC_FPIN_HDR_SZ))) {
+			ocs_log_err(ocs, "FPIN data is truncated\n");
+			break;
+		}
+	}
+
+	li_evt_desc->pname_count = ocs_htobe32(n);
+	li_evt_desc->desc_len = ocs_htobe32(length);
+
+	length += FC_FPIN_TLV_DESC_HDR_SZ;
+
+	req->desc_len = ocs_htobe32(length);
+
+	sframe_args.r_ctl = FC_RCTL_ELS;
+	sframe_args.info  = FC_RCTL_INFO_UNSOL_CTRL;
+	sframe_args.f_ctl = FC_FCTL_FIRST_SEQUENCE | FC_FCTL_SEQUENCE_INITIATIVE |
+			    FC_FCTL_LAST_SEQUENCE | FC_FCTL_END_SEQUENCE;
+	sframe_args.type  = FC_TYPE_EXT_LINK;
+	sframe_args.payload = req;
+	sframe_args.payload_len = length + sizeof(fc_fpin_payload_t);
+
+	sframe_args.s_id = FC_ADDR_CONTROLLER;
+	sframe_args.d_id = desc_args->fc_id;
+	sframe_args.ox_id = 0xFFFF;
+	sframe_args.rx_id = 0xFFFF;
+
+	if (ocs_sframe_common_send(node, &sframe_args)) {
+		ocs_log_err(ocs, "failed to send FPIN request\n");
+		rc = -1;
+	}
+
+	ocs_free(ocs, req, sizeof(*req));
+
+	return rc;
 }
 
 /**
@@ -1312,7 +1930,7 @@ ocs_send_rrq(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 		ocs_memset(req, 0, sizeof(*req));
 		req->command_code = FC_ELS_CMD_RRQ;
-		req->function = FC_SCR_REG_FULL;
+		req->function = FC_SCR_REG_DFLT;
 
 		els->hio_type = OCS_HAL_ELS_REQ;
 		els->iparam.els.timeout = timeout_sec;
@@ -1456,12 +2074,12 @@ ocs_send_plogi_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 	ocs_t *ocs = node->ocs;
 	fc_plogi_payload_t *plogi;
 	fc_plogi_payload_t *req = (fc_plogi_payload_t *)node->service_params;
+	uint8_t ls_cmd_code = io->els_info->ls_cmd_code;
 
 	node_els_trace();
 
 	io->els_info->els_callback = cb;
 	io->els_info->els_callback_arg = cbarg;
-	io->display_name = "plog_acc";
 	io->init_task_tag = ox_id;
 
 	ocs_memset(&io->iparam, 0, sizeof(io->iparam));
@@ -1502,7 +2120,21 @@ ocs_send_plogi_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 	if (req->common_service_parameters[1] & ocs_htobe32(1U << 23))
 		plogi->common_service_parameters[1] |= ocs_htobe32(1U << 23);
 
-	ocs_display_sparams(node->display_name, "plogi send resp", 0, NULL, plogi->common_service_parameters);
+	switch (ls_cmd_code) {
+	case FC_ELS_CMD_PDISC:
+		io->display_name = "pdisc_acc";
+		ocs_display_sparams(node->display_name, "pdisc send resp", 0,
+				    NULL, plogi->common_service_parameters);
+		break;
+	case FC_ELS_CMD_PLOGI:
+		io->display_name = "plogi_acc";
+		ocs_display_sparams(node->display_name, "plogi send resp", 0,
+				    NULL, plogi->common_service_parameters);
+		break;
+	default:
+		ocs_els_io_free(io);
+		ocs_assert(FALSE, NULL);
+	}
 
 	io->hio_type = OCS_HAL_ELS_RSP;
 	if ((rc = ocs_els_send_rsp(io, sizeof(*plogi)))) {
@@ -1510,10 +2142,11 @@ ocs_send_plogi_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 		io = NULL;
 	}
 
-	ocs_log_info(ocs, "ELS PLOGI (0x%x) ACK sent %s; OX_ID: %04x, " \
-		     "D_ID: %06x, WWPN: %016" PRIX64"\n",
-		     FC_ELS_CMD_PLOGI, rc ? "failed" : "successfully",
+	node_printf(node, "ELS PLOGI/PDISC (command code %#x) ACK send %s; "\
+		     "OX_ID: %04x, D_ID: %06x, WWPN: %016" PRIX64"\n",
+		     ls_cmd_code, rc ? "failed" : "successful",
 		     ox_id, node->rnode.fc_id, ocs_node_get_wwpn(node));
+
 	return io;
 }
 
@@ -1628,44 +2261,47 @@ ocs_send_flogi_acc(ocs_io_t *io, uint32_t ox_id, uint32_t is_fport, els_cb_t cb,
 	return io;
 }
 
-int32_t
-ocs_node_nsler_capable(ocs_node_t *node)
-{
-	return node->nvme_sler && node->nvme_conf;
-}
-
 static ocs_io_t *
 ocs_send_nvme_prli_acc(ocs_io_t *io)
 {
 	ocs_node_t *node = io->node;
-	int32_t rc;
-	uint16_t sparams = 0;
-	ocs_t *ocs = node->ocs;
 	fc_nvme_prli_payload_t *prli;
+	uint16_t flags = 0;
+	uint16_t sparams = 0;
 	uint32_t ox_id = io->init_task_tag;
+	int32_t rc;
 
 	prli = io->els_info->els_req.virt;
 	ocs_memset(prli, 0, sizeof(*prli));
 
-	if (ocs_tgt_nvme_enabled(node->ocs))
+	/**
+	 * Since we are responding to an incoming PRLI request, we need to
+	 * have target functionality enabled to establish an image pair.
+	 * As per the spec, if an image pair can't be established, we are
+	 * supposed to fill response code field with additional information.
+	 */
+	if (ocs_tgt_nvme_backend_enabled(node->ocs, node->sport)) {
+		flags = FC_PRLI_REQUEST_EXECUTED;
 		sparams = (FC_PRLI_TARGET_FUNCTION | FC_PRLI_NVME_DISC_FUNCTION);
+		if (ocs_node_nsler_negotiated(node)) {
+			sparams |= FC_PRLI_RETRY | FC_PRLI_CONFIRMED_COMPLETION;
+			node_printf(node, "NVMe SLER negotiated with initiator WWPN %s WWNN %s\n",
+				    node->wwpn, node->wwnn);
+		}
+	} else {
+		flags = FC_PRLI_SERVICE_PARAM_INVALID;
+	}
 
-#if 0
-	/* Fix LPFC and enable */
 	if (ocs_ini_nvme_enabled(node->ocs))
 		sparams |= FC_PRLI_INITIATOR_FUNCTION;
-#endif
-
-	if (ocs_node_nsler_capable(node) && ocs_nsler_capable(ocs))
-		sparams |= (FC_PRLI_RETRY | FC_PRLI_CONFIRMED_COMPLETION);
 
 	prli->command_code = FC_ELS_CMD_ACC;
-	prli->type = FC_TYPE_NVME;
-	prli->flags = ocs_htobe16(FC_PRLI_REQUEST_EXECUTED);
-	prli->service_params = ocs_htobe16(sparams);
-	prli->payload_length = ocs_htobe16(sizeof(*prli));
 	prli->page_length = FC_PRLI_ACC_NVME_PAGE_LENGTH;
+	prli->payload_length = ocs_htobe16(sizeof(*prli));
+	prli->type = FC_TYPE_NVME;
 	prli->type_ext = 0;
+	prli->flags = ocs_htobe16(flags);
+	prli->service_params = ocs_htobe16(sparams);
 
 	io->hio_type = OCS_HAL_ELS_RSP;
 	if ((rc = ocs_els_send_rsp(io, sizeof(*prli)))) {
@@ -1673,10 +2309,10 @@ ocs_send_nvme_prli_acc(ocs_io_t *io)
 		io = NULL;
 	}
 
-	ocs_log_info(ocs, "ELS NVMe PRLI (0x%x) ACK sent %s; OX_ID: %04x, " \
-		     "D_ID: %06x, WWPN: %016" PRIX64" sparams: %04x\n",
-		     FC_ELS_CMD_PRLI, rc ? "failed" : "successfully",
-		     ox_id, node->rnode.fc_id, ocs_node_get_wwpn(node), sparams);
+	node_printf(node, "ELS NVMe PRLI (0x%x) ACK sent %s; OX_ID: %04x, " \
+		    "WWPN: %016" PRIX64", flags: %04x, sparams: %04x\n",
+		    FC_ELS_CMD_PRLI, rc ? "failed" : "successfully",
+		    ox_id, ocs_node_get_wwpn(node), flags, sparams);
 	return io;
 }
 
@@ -1690,36 +2326,41 @@ static ocs_io_t *
 ocs_send_fcp_prli_acc(ocs_io_t *io)
 {
 	ocs_node_t *node = io->node;
-	int32_t rc;
-	int32_t first_burst = FALSE;
-	uint16_t sparams = 0;
-	ocs_t *ocs = node->ocs;
 	fc_prli_payload_t *prli;
+	uint16_t flags = 0;
+	uint16_t sparams = 0;
 	uint32_t ox_id = io->init_task_tag;
+	int32_t rc;
 
 	prli = io->els_info->els_req.virt;
 	ocs_memset(prli, 0, sizeof(*prli));
 
-	prli->type = FC_TYPE_FCP;
-	prli->command_code = FC_ELS_CMD_ACC;
-	prli->flags = ocs_htobe16(FC_PRLI_ESTABLISH_IMAGE_PAIR | FC_PRLI_REQUEST_EXECUTED);
-
-	/*
-	 * Determine node first_burst capability based on the support at both sides.
+	/**
+	 * Since we are responding to an incoming PRLI request, we need to
+	 * have target functionality enabled to establish an image pair.
+	 * As per the spec, if an image pair can't be established, we are
+	 * supposed to fill response code field with additional information.
 	 */
-	first_burst = ocs_node_first_burst_enabled(node) && ocs_first_burst_enabled(ocs);
-	if (first_burst)
-		ocs_log_info(ocs, "Negotiating first burst with initiator %06x: %016" PRIX64"\n",
-			     node->rnode.fc_id, ocs_node_get_wwpn(node));
+	if (ocs_tgt_scsi_backend_enabled(node->ocs, NULL)) {
+		flags = (FC_PRLI_ESTABLISH_IMAGE_PAIR | FC_PRLI_REQUEST_EXECUTED);
+		sparams = (FC_PRLI_TARGET_FUNCTION | FC_PRLI_READ_XRDY_DISABLED);
+	} else {
+		flags = FC_PRLI_SERVICE_PARAM_INVALID;
+	}
 
-	sparams = (FC_PRLI_READ_XRDY_DISABLED |
-		   (first_burst ? FC_PRLI_WRITE_XRDY_DISABLED : 0) |
-		   (ocs_ini_scsi_enabled(node->ocs) ? FC_PRLI_INITIATOR_FUNCTION : 0) |
-		   (ocs_tgt_scsi_enabled(node->ocs) ? FC_PRLI_TARGET_FUNCTION : 0));
-	prli->service_params = ocs_htobe16(sparams);
-	prli->payload_length = ocs_htobe16(sizeof(*prli));
+	if (ocs_ini_scsi_enabled(node->ocs))
+		sparams |= (FC_PRLI_INITIATOR_FUNCTION | FC_PRLI_READ_XRDY_DISABLED);
+
+	if (ocs_node_first_burst_enabled(node) && ocs_first_burst_enabled(node->ocs))
+		sparams |= FC_PRLI_WRITE_XRDY_DISABLED;
+
+	prli->command_code = FC_ELS_CMD_ACC;
 	prli->page_length = FC_PRLI_ACC_FCP_PAGE_LENGTH;
+	prli->payload_length = ocs_htobe16(sizeof(*prli));
+	prli->type = FC_TYPE_FCP;
 	prli->type_ext = 0;
+	prli->flags = ocs_htobe16(flags);
+	prli->service_params = ocs_htobe16(sparams);
 
 	io->hio_type = OCS_HAL_ELS_RSP;
 	if ((rc = ocs_els_send_rsp(io, sizeof(*prli)))) {
@@ -1727,10 +2368,10 @@ ocs_send_fcp_prli_acc(ocs_io_t *io)
 		io = NULL;
 	}
 
-	ocs_log_info(ocs, "ELS FCP PRLI (0x%x) ACK sent %s; OX_ID: %04x, " \
-		     "D_ID: %06x, WWPN: %016" PRIX64" sparams: %04x\n",
-		     FC_ELS_CMD_PRLI, rc ? "failed" : "successfully",
-		     ox_id, node->rnode.fc_id, ocs_node_get_wwpn(node), sparams);
+	node_printf(node, "ELS FCP PRLI (0x%x) ACK sent %s; OX_ID: %04x, " \
+		    "WWPN: %016" PRIX64", flags: %04x, sparams: %04x\n",
+		    FC_ELS_CMD_PRLI, rc ? "failed" : "successfully",
+		    ox_id, ocs_node_get_wwpn(node), flags, sparams);
 	return io;
 }
 
@@ -1769,8 +2410,10 @@ ocs_send_prli_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, vo
 
 	if (fc_type == FC_TYPE_NVME)
 		return ocs_send_nvme_prli_acc(io);
+	else if (fc_type == FC_TYPE_FCP)
+		return ocs_send_fcp_prli_acc(io);
 
-	return ocs_send_fcp_prli_acc(io);
+	ocs_assert(FALSE, NULL);
 }
 
 /**
@@ -1811,11 +2454,7 @@ ocs_send_prlo_acc(ocs_io_t *io, uint32_t ox_id, uint8_t fc_type, els_cb_t cb, vo
 	prlo_acc = io->els_info->els_req.virt;
 	ocs_memset(prlo_acc, 0, sizeof(*prlo_acc));
 
-	if (fc_type == FC_TYPE_NVME)
-		prlo_acc->type = FC_TYPE_NVME;
-	else
-		prlo_acc->type = FC_TYPE_FCP;
-
+	prlo_acc->type = fc_type;
 	prlo_acc->command_code = FC_ELS_CMD_ACC;
 	prlo_acc->page_length = 16;
 	prlo_acc->payload_length = ocs_htobe16(sizeof(fc_prlo_acc_payload_t));
@@ -1852,7 +2491,7 @@ ocs_send_ls_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 	ocs_node_t *node = io->node;
 	int32_t rc;
 	ocs_t *ocs = node->ocs;
-	fc_acc_payload_t *acc;
+	fc_ls_acc_payload_t *acc;
 
 	node_els_trace();
 
@@ -1899,7 +2538,7 @@ ocs_send_logo_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, void *cbarg)
 	ocs_node_t *node = io->node;
 	int32_t rc;
 	ocs_t *ocs = node->ocs;
-	fc_acc_payload_t *logo;
+	fc_ls_acc_payload_t *logo;
 
 	node_els_trace();
 
@@ -2040,6 +2679,9 @@ ocs_ns_send_rftid(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 		if (ocs_tgt_scsi_enabled(node->ocs) || ocs_ini_scsi_enabled(node->ocs))
 			rftid->fc4_types[FC_GS_TYPE_WORD(FC_TYPE_FCP)] = ocs_htobe32(1 << FC_GS_TYPE_BIT(FC_TYPE_FCP));
 
+		if (sli_feature_enabled(&ocs->hal.sli, SLI4_FEATURE_ASHDR))
+			rftid->fc4_types[FC_GS_TYPE_WORD(FC_TYPE_APP_SERVER)] = ocs_htobe32(1 << FC_GS_TYPE_BIT(FC_TYPE_APP_SERVER));
+
 		els->hio_type = OCS_HAL_FC_CT;
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
@@ -2095,22 +2737,28 @@ ocs_ns_send_rffid(ocs_node_t *node, uint8_t fc_type, uint32_t timeout_sec, uint3
 		rffid->port_id = ocs_htobe32(node->rnode.sport->fc_id);
 		if (fc_type == FC_TYPE_NVME) {
 			rffid->type = FC_TYPE_NVME;
-			if (ocs_tgt_nvme_enabled(node->ocs)) {
+			if (ocs_tgt_nvme_backend_enabled(node->ocs, node->sport)) {
 				rffid->fc4_feature_bits |= FC4_FEATURE_TARGET;
 				rffid->fc4_feature_bits |= FC4_FEATURE_NVME_DISC;
-			}
+			} else
+				ocs_log_info(ocs, "nvme target not enabled by backend,"
+						" not advertising target capability\n");
 
-			if (ocs_ini_nvme_enabled(node->ocs))
+			if (ocs_ini_nvme_backend_enabled(node->ocs, node->sport))
 				rffid->fc4_feature_bits |= FC4_FEATURE_INITIATOR;
-		} else {
+		} else if (fc_type == FC_TYPE_FCP) {
 			rffid->type = FC_TYPE_FCP;
-			if (ocs_ini_scsi_enabled(node->ocs))
-				rffid->fc4_feature_bits |= FC4_FEATURE_INITIATOR;
+			if (ocs_ini_scsi_backend_enabled(node->ocs, node->sport))
+					rffid->fc4_feature_bits |= FC4_FEATURE_INITIATOR;
 
-			if (ocs_tgt_scsi_enabled(node->ocs))
+			if (ocs_tgt_scsi_backend_enabled(node->ocs, node->sport))
 				rffid->fc4_feature_bits |= FC4_FEATURE_TARGET;
+			else
+				ocs_log_info(ocs, "scsi target not enabled by backend,"
+						" not advertising target capability\n");
 		}
 
+		ocs_assert(rffid->fc4_feature_bits, NULL);
 		els->hio_type = OCS_HAL_FC_CT;
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
@@ -2175,6 +2823,60 @@ ocs_ns_send_gidpt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 	return els;
 }
 
+/**
+ * @ingroup els_api
+ * @brief Send a GFFID CT request.
+ *
+ * <h3 class="desc">Description</h3>
+ * Construct a GFFID CT request, and send to the \c node.
+ *
+ * @param node Node to which the GFFID request is sent.
+ * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
+ * @param retries Number of times to retry errors before reporting a failure.
+ * @param cb Callback function.
+ * @param cbarg Callback function argument.
+ * @param port_id fc_id
+ *
+ * @return Returns pointer to IO object, or NULL if error.
+ */
+
+ocs_io_t *
+ocs_ns_send_gffid(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg, uint32_t port_id)
+{
+	ocs_io_t *els;
+	ocs_t *ocs = node->ocs;
+	fcct_gffid_req_t *gffid;
+
+	node_els_trace();
+
+	els = ocs_els_io_alloc(node, sizeof(*gffid), OCS_ELS_ROLE_ORIGINATOR);
+	if (els == NULL) {
+		ocs_log_err(ocs, "IO alloc failed\n");
+	} else {
+
+		els->iparam.fc_ct.r_ctl = FC_RCTL_ELS;
+		els->iparam.fc_ct.type = FC_TYPE_GS;
+		els->iparam.fc_ct.df_ctl = 0;
+		els->iparam.fc_ct.timeout = timeout_sec;
+
+		els->els_info->els_callback = cb;
+		els->els_info->els_callback_arg = cbarg;
+		els->display_name = "gffid";
+
+		gffid = els->els_info->els_req.virt;
+
+		ocs_memset(gffid, 0, sizeof(*gffid));
+		fcct_build_req_header(&gffid->hdr, FC_GS_NAMESERVER_GFF_ID, FC_GS_TYPE_DIRECTORY_SERVICE,
+					FC_GS_SUBTYPE_NAME_SERVER,
+					(OCS_ELS_RSP_LEN - sizeof(gffid->hdr)) );
+		gffid->port_id = port_id;
+
+		els->hio_type = OCS_HAL_FC_CT;
+
+		ocs_io_transition(els, __ocs_els_init, NULL);
+	}
+	return els;
+}
 
 ocs_io_t *
 ocs_ns_send_loopback_frame(ocs_node_t *node, void *buf, uint32_t size, void *rx_buf, uint32_t rx_buf_size,
@@ -2215,10 +2917,9 @@ ocs_ns_send_loopback_frame(ocs_node_t *node, void *buf, uint32_t size, void *rx_
 		els->els_info->loopback_evt_data.is_loopback_frame = 1;
 		els->els_info->loopback_evt_data.loopback_rx_data = rx_buf;
 		els->els_info->loopback_evt_data.loopback_rx_data_len = rx_buf_size;
-		ocs_sem_init(&els->els_info->loopback_evt_data.wait_io_sem, 0, "loopback_frame_sem");
 
 		ocs_memset(fcct_header, 0, sizeof(*fcct_header));
-		fcct_loopback_build_req_header(fcct_header, FC_ELX_LOOPBACK_DATA, 0);
+		fcct_build_req_header(fcct_header, FC_ELX_LOOPBACK_DATA, FC_GS_TYPE_LOOPBACK, 0, 0);
 		ptr = (uint8_t *)ptr + sizeof(fcct_iu_header_t);
 		ocs_memcpy(ptr, buf, size);
 
@@ -2237,7 +2938,7 @@ ocs_ns_send_loopback_frame(ocs_node_t *node, void *buf, uint32_t size, void *rx_
  * <h3 class="desc">Description</h3>
  * Construct a GA_NEXT CT request, and send to the \c node.
  *
- * @param node Node to which the GIDFT request is sent.
+ * @param node Node to which the GIDPT request is sent.
  * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
  * @param retries Number of times to retry errors before reporting a failure.
  * @param cb Callback function.
@@ -2274,10 +2975,166 @@ ocs_ns_send_ganxt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 		fcct_build_req_header(&ganxt->hdr, FC_GS_NAMESERVER_GA_NXT, FC_GS_TYPE_DIRECTORY_SERVICE,
 				      FC_GS_SUBTYPE_NAME_SERVER, (OCS_ELS_RSP_LEN - sizeof(ganxt->hdr)));
 		if (!port_id)
-			port_id = fc_htobe24(node->sport->fc_id);
-
-		ganxt->port_id = port_id;
+			port_id = node->sport->fc_id;
+		
+		ganxt->port_id = fc_htobe24(port_id);
+		ocs_log_info(ocs, "send ganxt els request for port: 0x%x \n", ganxt->port_id);
 		els->hio_type = OCS_HAL_FC_CT;
+		ocs_io_transition(els, __ocs_els_init, NULL);
+	}
+
+	return els;
+}
+
+static inline void
+ocs_tdz_fill_name(fcct_tdz_name_t *zone, char *user_zone_name)
+{
+	/*
+	 * Please note that the incoming 'user_zone_name' is already null-terminated.
+	 * The field 'zone->length' specifies the length in bytes of 'zone->name',
+	 * without the terminating null character, plus any required fill bytes in
+	 * multiples of 4. Hence, the roundup.
+	 */
+	zone->length = ocs_roundup(ocs_strlen(user_zone_name), 4);
+	ocs_snprintf(zone->name, MIN(sizeof(zone->name), (ocs_strlen(user_zone_name) + 1)), "%s", user_zone_name);
+}
+
+static inline void
+ocs_tdz_fill_attr_block(fcct_tdz_attr_block_t *zone_attr_block, ocs_tdz_attr_block_t *user_attr_block)
+{
+	uint32_t i;
+	uint64_t port_name = 0;
+
+	zone_attr_block->num_attr_entries = ocs_htobe32(user_attr_block->num_principal_members);
+	for (i = 0; i < user_attr_block->num_principal_members; i++) {
+		zone_attr_block->attr_entry[i].type = ocs_htobe16(FCCT_ZONE_ATTR_TYPE_PEER_ZONE);
+		zone_attr_block->attr_entry[i].length = ocs_htobe16(OCS_TDZ_MEM_NPORT_LEN);
+		parse_wwn(user_attr_block->principal_member[i].name, &port_name);
+		zone_attr_block->attr_entry[i].port_name = ocs_htobe64(port_name);
+	}
+}
+
+static inline void
+ocs_tdz_fill_peer_block(fcct_tdz_peer_block_t *zone_peer_block, ocs_tdz_peer_block_t *user_peer_block)
+{
+	uint32_t i;
+	uint64_t port_name = 0;
+	size_t peer_member_size = sizeof(uint32_t);
+	fcct_tdz_peer_member_t *zone_peer_member;
+
+	zone_peer_block->num_peer_members = ocs_htobe32(user_peer_block->num_peer_members);
+	for (i = 0; i < user_peer_block->num_peer_members; i++) {
+		zone_peer_member = (fcct_tdz_peer_member_t *)((uint8_t *)zone_peer_block + peer_member_size);
+
+		if (ocs_strchr(user_peer_block->peer_member[i].name, ':')) {
+			zone_peer_member->type = FCCT_ZONE_IDENT_TYPE_NPORT_NAME;
+			parse_wwn(user_peer_block->peer_member[i].name, &port_name);
+			zone_peer_member->value.port_name = ocs_htobe64(port_name);
+			peer_member_size += OCS_TDZ_MEM_NPORT_LEN;
+		} else {
+			zone_peer_member->type = FCCT_ZONE_IDENT_TYPE_ALIAS_NAME;
+			ocs_tdz_fill_name(&zone_peer_member->value.alias_name, user_peer_block->peer_member[i].name);
+			peer_member_size += OCS_TDZ_MEM_ALIAS_LEN(zone_peer_member->value.alias_name.length);
+		}
+	}
+}
+
+/**
+ * @ingroup els_api
+ * @brief Send a TDZ CT request.
+ *
+ * <h3 class="desc">Description</h3>
+ * Construct a TDZ CT request, and send to the mgmt server node.
+ *
+ * @param node Node to which the TDZ request is sent.
+ * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
+ * @param retries Number of times to retry errors before reporting a failure.
+ * @param cb Callback function.
+ * @param cbarg Callback function argument.
+ * @param tdz_req TDZ command request that has to be sent out to the switch.
+ *
+ * @return Returns pointer to IO object, or NULL if error.
+ */
+ocs_io_t *
+ocs_tdz_send_cmd(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
+		 els_cb_t cb, void *cbarg, ocs_tdz_req_info_t *tdz_req)
+{
+	ocs_io_t *els;
+	ocs_t *ocs = node->ocs;
+	fcct_iu_header_t *fcct_header = NULL;
+
+	node_els_trace();
+
+	els = ocs_els_io_alloc_size(node, tdz_req->cmd_req_size, tdz_req->cmd_rsp_size, OCS_ELS_ROLE_ORIGINATOR);
+	if (els == NULL) {
+		ocs_log_err(ocs, "ELS IO alloc failed\n");
+	} else {
+		els->iparam.fc_ct.r_ctl = FC_RCTL_ELS;
+		els->iparam.fc_ct.type = FC_TYPE_GS;
+		els->iparam.fc_ct.df_ctl = 0;
+		els->iparam.fc_ct.timeout = timeout_sec;
+
+		els->els_info->els_callback = cb;
+		els->els_info->els_callback_arg = cbarg;
+		els->els_info->els_retries_remaining = retries;
+
+		ocs_memset(els->els_info->els_req.virt, 0, tdz_req->cmd_req_size);
+		ocs_memset(els->els_info->els_rsp.virt, 0, tdz_req->cmd_rsp_size);
+
+		fcct_header = (fcct_iu_header_t *)els->els_info->els_req.virt;
+		fcct_build_req_header(fcct_header, tdz_req->cmd_code, FC_GS_TYPE_MANAGEMENT_SERVICE,
+				      FC_GS_SUBTYPE_ZONE_SERVER, (tdz_req->cmd_rsp_size - sizeof(fcct_iu_header_t)));
+
+		els->hio_type = OCS_HAL_FC_CT;
+
+		switch (tdz_req->cmd_code) {
+		case FC_GS_TDZ_GFEZ:
+			els->display_name = "gfez";
+			break;
+
+		case FC_GS_TDZ_GAPZ: {
+			fcct_tdz_gapz_req_t *gapz_req = (fcct_tdz_gapz_req_t *)els->els_info->els_req.virt;
+
+			ocs_tdz_fill_name(&gapz_req->zone_name, tdz_req->zone_info.zone.name);
+			els->display_name = "gapz";
+			break;
+		}
+
+		case FC_GS_TDZ_AAPZ: {
+			fcct_tdz_name_t *zone_name;
+			fcct_tdz_attr_block_t *zone_attr_block;
+			fcct_tdz_peer_block_t *zone_peer_block;
+			fcct_tdz_aapz_req_t *aapz_req = (fcct_tdz_aapz_req_t *)els->els_info->els_req.virt;
+
+			zone_name = (fcct_tdz_name_t *)((uint8_t *)aapz_req + sizeof(fcct_iu_header_t));
+			ocs_tdz_fill_name(zone_name, tdz_req->zone_info.zone.name);
+
+			zone_attr_block = (fcct_tdz_attr_block_t *)((uint8_t *)zone_name +
+					   OCS_TDZ_NAME_LEN(zone_name->length));
+			ocs_tdz_fill_attr_block(zone_attr_block, &tdz_req->zone_info.attr_block);
+
+			zone_peer_block = (fcct_tdz_peer_block_t *)((uint8_t *)zone_attr_block +
+					   OCS_TDZ_ATTR_BLOCK_LEN(tdz_req->zone_info.attr_block.num_principal_members));
+			ocs_tdz_fill_peer_block(zone_peer_block, &tdz_req->zone_info.peer_block);
+
+			els->display_name = "aapz";
+			break;
+		}
+
+		case FC_GS_TDZ_RAPZ: {
+			fcct_tdz_rapz_req_t *rapz_req = (fcct_tdz_rapz_req_t *)els->els_info->els_req.virt;
+
+			ocs_tdz_fill_name(&rapz_req->zone_name, tdz_req->zone_info.zone.name);
+			els->display_name = "rapz";
+			break;
+		}
+
+		default:
+			ocs_log_err(ocs, "Unhandled TDZ cmd code: 0x%x\n", tdz_req->cmd_code);
+			ocs_ref_put(&els->ref);
+			return NULL;
+		}
+
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
 
@@ -2286,7 +3143,7 @@ ocs_ns_send_ganxt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 /**
  * @ingroup els_api
- * @brief Send a RHBA CT request.
+ * @brief Send an RHBA CT request.
  *
  * <h3 class="desc">Description</h3>
  * Construct an RHBA CT request, and send to the \c node.
@@ -2300,8 +3157,7 @@ ocs_ns_send_ganxt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
  * @return Returns pointer to IO object, or NULL if error.
  */
 ocs_io_t *
-ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
-	els_cb_t cb, void *cbarg)
+ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg)
 {
 	ocs_io_t *els;
 	ocs_t *ocs = node->ocs;
@@ -2332,8 +3188,7 @@ ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 		ocs_memset(rhba, 0, sizeof(*rhba));
 		fcct_build_req_header(&rhba->hdr, FC_GS_FDMI_RHBA, FC_GS_TYPE_MANAGEMENT_SERVICE,
-					FC_GS_SUBTYPE_FDMI,
-					(OCS_ELS_FDMI_REG_LEN - sizeof(rhba->hdr)));
+				      FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_REG_LEN - sizeof(rhba->hdr)));
 		size += sizeof(rhba->hdr);
 
 		/* HBA identifier */
@@ -2343,6 +3198,7 @@ ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 		rhba->port_list.entry_count = ocs_htobe32(num_port_entries);
 		ocs_memcpy(&rhba->port_list.port_entry[0], &node->sport->sli_wwpn, sizeof(node->sport->sli_wwpn));
 		size += sizeof(rhba->port_list) + num_port_entries * sizeof(node->sport->sli_wwpn);
+
 		/* point to the HBA attribute block */
 		ab = (ocs_fdmi_attr_block_t *)((uint8_t *)rhba + size);
 		ab->num_entries = 0;
@@ -2350,6 +3206,7 @@ ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 
 		func = ocs_fdmi_hba_action[index];
 		mask = node->sport->fdmi_hba_mask;
+
 		/* Build all required HBA info in the request */
 		while (func && mask) {
 			if (mask & 0x1) {
@@ -2358,9 +3215,11 @@ ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 				if ((size + MAX_FDMI_ATTRIBUTE_SIZE) > OCS_ELS_FDMI_REG_LEN)
 					goto hba_reg_exit;
 			}
+
 			mask = mask >> 1;
 			func = ocs_fdmi_hba_action[++index];
 		}
+
 hba_reg_exit:
 		ab->num_entries = ocs_htobe32(ab->num_entries);
 		els->hio_type = OCS_HAL_FC_CT;
@@ -2373,12 +3232,13 @@ hba_reg_exit:
 
 /**
  * @ingroup els_api
- * @brief Send a FDMI dereg CT request.
+ * @brief Send an FDMI dereg CT request.
  *
  * <h3 class="desc">Description</h3>
- * Construct an DHBA/DPRT CT request, and send to the \c node.
+ * Construct an DHBA/DPRT CT request, and send to the mgmt server node.
  *
  * @param node Node to which the dereg request is sent.
+ * @param dereg_code command code(DHBA/DPRT).
  * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
  * @param retries Number of times to retry errors before reporting a failure.
  * @param cb Callback function.
@@ -2388,7 +3248,7 @@ hba_reg_exit:
  */
 ocs_io_t *
 ocs_fdmi_send_dereg_cmd(ocs_node_t *node, uint16_t dereg_code, uint32_t timeout_sec,
-		  uint32_t retries, els_cb_t cb, void *cbarg)
+			uint32_t retries, els_cb_t cb, void *cbarg)
 {
 	ocs_io_t *els;
 	ocs_t *ocs = node->ocs;
@@ -2415,8 +3275,8 @@ ocs_fdmi_send_dereg_cmd(ocs_node_t *node, uint16_t dereg_code, uint32_t timeout_
 
 		ocs_memset(dereg_req, 0, sizeof(*dereg_req));
 		fcct_build_req_header(&dereg_req->hdr, dereg_code, FC_GS_TYPE_MANAGEMENT_SERVICE,
-					FC_GS_SUBTYPE_FDMI,
-					(OCS_ELS_FDMI_RSP_LEN - sizeof(dereg_req->hdr)));
+				      FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_RSP_LEN - sizeof(dereg_req->hdr)));
+
 		/* HBA identifier */
 		dereg_req->identifier = node->sport->sli_wwpn;
 		els->hio_type = OCS_HAL_FC_CT;
@@ -2428,13 +3288,13 @@ ocs_fdmi_send_dereg_cmd(ocs_node_t *node, uint16_t dereg_code, uint32_t timeout_
 
 /**
  * @ingroup els_api
- * @brief Send a RPRT/RPA CT request.
+ * @brief Send an RPRT/RPA CT request.
  *
  * <h3 class="desc">Description</h3>
- * Construct an RPRT/RPA CT request, and send to the \c node.
+ * Construct an RPRT/RPA CT request, and send to the mgmt server node.
  *
  * @param node Node to which the RPRT/RPA request is sent.
- * @req_code command code(RPRT/RPA)
+ * @req_code command code(RPRT/RPA).
  * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
  * @param retries Number of times to retry errors before reporting a failure.
  * @param cb Callback function.
@@ -2467,6 +3327,7 @@ ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
 		els->els_info->els_callback = cb;
 		els->els_info->els_callback_arg = cbarg;
 		els->els_info->els_retries_remaining = retries;
+
 		if (req_code == FC_GS_FDMI_RPRT) {
 			fcct_fdmi_rprt_req_t *rprt;
 
@@ -2474,17 +3335,17 @@ ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
 			rprt = (fcct_fdmi_rprt_req_t *)els->els_info->els_req.virt;
 			ocs_memset(rprt, 0, sizeof(*rprt));
 			fcct_build_req_header(&rprt->hdr, req_code, FC_GS_TYPE_MANAGEMENT_SERVICE,
-					FC_GS_SUBTYPE_FDMI,
-					(OCS_ELS_FDMI_REG_LEN - sizeof(rprt->hdr)));
+					      FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_REG_LEN - sizeof(rprt->hdr)));
 			size += sizeof(rprt->hdr);
+
 			/* Physical port HBA identifier */
 			ocs_memcpy(&rprt->hba_identifier, &ocs->domain->sport->sli_wwpn,
-				sizeof(ocs->domain->sport->sli_wwpn));
+				   sizeof(ocs->domain->sport->sli_wwpn));
 			size += sizeof(ocs->domain->sport->sli_wwpn);
 
 			/* Port name */
 			ocs_memcpy(&rprt->port_name, &node->sport->sli_wwpn,
-				sizeof(node->sport->sli_wwpn));
+				   sizeof(node->sport->sli_wwpn));
 			size += sizeof(node->sport->sli_wwpn);
 		} else {
 			fcct_fdmi_rpa_req_t *rpa;
@@ -2493,11 +3354,12 @@ ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
 			rpa = (fcct_fdmi_rpa_req_t *)els->els_info->els_req.virt;
 			ocs_memset(rpa, 0, sizeof(*rpa));
 			fcct_build_req_header(&rpa->hdr, req_code, FC_GS_TYPE_MANAGEMENT_SERVICE,
-					FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_REG_LEN - sizeof(rpa->hdr)));
+					      FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_REG_LEN - sizeof(rpa->hdr)));
 			size += sizeof(rpa->hdr);
+
 			/* Port name */
 			ocs_memcpy(&rpa->port_name[0], &node->sport->sli_wwpn,
-				sizeof(node->sport->sli_wwpn));
+				   sizeof(node->sport->sli_wwpn));
 			size += sizeof(node->sport->sli_wwpn);
 		}
 
@@ -2509,6 +3371,7 @@ ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
 
 		func = ocs_fdmi_port_action[index];
 		mask = node->sport->fdmi_port_mask;
+
 		/* Mask will dictate what attributes to build in the request */
 		while (func && mask) {
 			size += func(node->sport, (ocs_fdmi_attr_def_t *)
@@ -2516,9 +3379,11 @@ ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
 			pab->num_entries++;
 			if ((size + MAX_FDMI_ATTRIBUTE_SIZE) > OCS_ELS_FDMI_REG_LEN)
 				goto reg_port_exit;
+
 			mask = mask >> 1;
 			func = ocs_fdmi_port_action[++index];
 		}
+
 reg_port_exit:
 		pab->num_entries = ocs_htobe32(pab->num_entries);
 		els->hio_type = OCS_HAL_FC_CT;
@@ -2531,28 +3396,28 @@ reg_port_exit:
 
 /**
  * @ingroup els_api
- * @brief Send a GHRL CT request.
+ * @brief Send an FDMI CT request.
  *
  * <h3 class="desc">Description</h3>
- * Construct a GHRL CT request, and send to the \c node.
+ * Construct an FDMI CT request, and send to the mgmt server node.
  *
- * @param node Node to which the GHRL request is sent.
+ * @param node Node to which the FDMI request is sent.
  * @param timeout_sec Time, in seconds, to wait before timing out the ELS.
  * @param retries Number of times to retry errors before reporting a failure.
  * @param cb Callback function.
  * @param cbarg Callback function argument.
+ * @param req_info FDMI command request that has to be sent out to the switch.
  *
  * @return Returns pointer to IO object, or NULL if error.
  */
-
 ocs_io_t *
-ocs_fdmi_send_get_cmd(ocs_node_t *node, uint32_t timeout_sec,
-		uint32_t retries, els_cb_t cb,
-		void *cbarg, ocs_fdmi_get_cmd_req_info_t *req_info)
+ocs_fdmi_send_get_cmd(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
+		      els_cb_t cb, void *cbarg, ocs_fdmi_get_cmd_req_info_t *req_info)
 {
 	ocs_io_t *els;
 	ocs_t *ocs = node->ocs;
 	fcct_iu_header_t *fcct_header = NULL;
+
 	node_els_trace();
 
 	els = ocs_els_io_alloc_size(node, req_info->ct_cmd_req_size,
@@ -2570,42 +3435,46 @@ ocs_fdmi_send_get_cmd(ocs_node_t *node, uint32_t timeout_sec,
 		els->els_info->els_retries_remaining = retries;
 
 		fcct_header = (fcct_iu_header_t *)els->els_info->els_req.virt;
-
 		fcct_build_req_header(fcct_header, req_info->cmd_code, FC_GS_TYPE_MANAGEMENT_SERVICE,
-					FC_GS_SUBTYPE_FDMI,
-					(OCS_ELS_FDMI_RSP_LEN - sizeof(fcct_iu_header_t)));
+				      FC_GS_SUBTYPE_FDMI, (OCS_ELS_FDMI_RSP_LEN - sizeof(fcct_iu_header_t)));
 
 		els->hio_type = OCS_HAL_FC_CT;
+
 		switch (req_info->cmd_code) {
 		case FC_GS_FDMI_GRHL:
 			els->display_name = "grhl";
 			break;
+
 		case FC_GS_FDMI_GRPL: {
-				fcct_fdmi_grpl_req_t *grpl_req = els->els_info->els_req.virt;
+			fcct_fdmi_grpl_req_t *grpl_req = els->els_info->els_req.virt;
 
-				els->display_name = "grpl";
-				grpl_req->hba_identifier = ocs_htobe64(req_info->identifier);
-			}
+			els->display_name = "grpl";
+			grpl_req->hba_identifier = ocs_htobe64(req_info->identifier);
 			break;
+		}
+
 		case FC_GS_FDMI_GHAT: {
-				fcct_fdmi_ghat_req_t *ghat_req = els->els_info->els_req.virt;
+			fcct_fdmi_ghat_req_t *ghat_req = els->els_info->els_req.virt;
 
-				els->display_name = "ghat";
-				ghat_req->hba_identifier = ocs_htobe64(req_info->identifier);
-			}
+			els->display_name = "ghat";
+			ghat_req->hba_identifier = ocs_htobe64(req_info->identifier);
 			break;
+		}
+
 		case FC_GS_FDMI_GPAT: {
-				fcct_fdmi_gpat_req_t *gpat_req = els->els_info->els_req.virt;
+			fcct_fdmi_gpat_req_t *gpat_req = els->els_info->els_req.virt;
 
-				els->display_name = "gpat";
-				gpat_req->port_identifier = ocs_htobe64(req_info->identifier);
-			}
+			els->display_name = "gpat";
+			gpat_req->port_identifier = ocs_htobe64(req_info->identifier);
 			break;
+		}
+
 		default:
 			ocs_log_err(ocs, "Unhandled FDMI cmd code: 0x%x\n", req_info->cmd_code);
 			ocs_ref_put(&els->ref);
 			return NULL;
 		}
+
 		ocs_io_transition(els, __ocs_els_init, NULL);
 	}
 
@@ -3142,7 +4011,7 @@ ocs_get_rdp_info_cb(ocs_t *ocs, ocs_rdp_context_t *rdp_context)
 	}
 
 	sport = ocs_sport_find(domain, rdp_context->d_id);
-	if (sport == NULL) {
+	if (sport == NULL || (sport->async_flush_state != 0)) {
 		ocs_log_err(ocs, "Sport is NULL, dropping frame\n");
 		goto error;
 	}
@@ -3188,7 +4057,7 @@ ocs_rdp_sfp_a2_cb(void *os, int32_t status, uint32_t bytes_read, uint32_t *data,
 		goto error;
 	}
 
-	ocs_memcpy(&rdp_context->page_a2, data, SFP_PAGE_SIZE);
+	ocs_memcpy(&rdp_context->page_a2, data, SFP_PAGE_A2_SIZE);
 error:
 	rdp_context->status = rc;
 	ocs_get_rdp_info_cb(ocs, rdp_context);
@@ -3206,7 +4075,7 @@ ocs_rdp_sfp_a0_cb(void *os, int32_t status, uint32_t bytes_read, uint32_t *data,
 		goto error;
 	}
 
-	ocs_memcpy(&rdp_context->page_a0, data, SFP_PAGE_SIZE);
+	ocs_memcpy(&rdp_context->page_a0, data, SFP_PAGE_A0_SIZE);
 
 	rc = ocs_hal_get_sfp(&ocs->hal, SFP_PAGE_A2, ocs_rdp_sfp_a2_cb, rdp_context);
 	if (rc) {
@@ -3232,10 +4101,13 @@ error:
  *
  * @param io Pointer to a SCSI IO object.
  * @param hdr Pointer to the FC header.
- * @param req Pointer to the FC request payload.
+ * @param fcfi FCFI associated with the sequence.
+ *
+ * @return None.
  */
 
-void ocs_rdp_defer_response(ocs_t *ocs, fc_header_t *hdr, uint32_t fcfi)
+void
+ocs_rdp_defer_response(ocs_t *ocs, fc_header_t *hdr, uint32_t fcfi)
 {
 	ocs_rdp_context_t *rdp_context;
 	int rc = 0;
@@ -3264,6 +4136,130 @@ void ocs_rdp_defer_response(ocs_t *ocs, fc_header_t *hdr, uint32_t fcfi)
 error:
 	rdp_context->status = 1;
 	ocs_get_rdp_info_cb(ocs, rdp_context);
+}
+
+static void
+ocs_els_send_lcb_resp(void *os, int32_t status, void *arg)
+{
+	fc_lcb_payload_t *lcb;
+	ocs_lcb_ctx_t *lcb_ctx = (ocs_lcb_ctx_t *)arg;
+	ocs_io_t *io = NULL;
+	ocs_t *ocs = (ocs_t *)os;
+	uint32_t rjt_rsn;
+	uint32_t rjt_expl;
+
+	ocs_assert(lcb_ctx);
+	ocs_assert(lcb_ctx->io);
+
+	io = lcb_ctx->io;
+
+	if (status) {
+		ocs_log_err(ocs, "lcb v1 mbox cmd failed (rc: %d), sending LS_RJT\n", status);
+		rjt_rsn = FC_REASON_UNABLE_TO_PERFORM;
+		rjt_expl = FC_EXPL_NO_ADDITIONAL;
+		goto send_ls_rjt;
+	}
+
+	lcb = io->els_info->els_req.virt;
+	ocs_memset(lcb, 0, sizeof(*lcb));
+
+	lcb->command_code = FC_ELS_CMD_ACC;
+	lcb->sub_cmd = lcb_ctx->sub_cmd;
+	lcb->capability = FC_LCB_CAP_DURATION; /* SLI FW supports only duration, not frequency; indicate the same */
+	lcb->status = lcb_ctx->cmd_status;
+	lcb->frequency = lcb_ctx->frequency;
+	lcb->duration = ocs_htobe16(lcb_ctx->duration);
+
+	io->els_info->els_callback = NULL;
+	io->els_info->els_callback_arg = NULL;
+	io->display_name = "lcb_acc";
+	io->init_task_tag = lcb_ctx->ox_id;
+
+	/* Go ahead and send the ELS_ACC */
+	ocs_memset(&io->iparam, 0, sizeof(io->iparam));
+	io->iparam.els.ox_id = lcb_ctx->ox_id;
+	io->hio_type = OCS_HAL_ELS_RSP;
+
+	if (ocs_els_send_rsp(io, sizeof(*lcb))) {
+		ocs_els_io_free(io);
+		io = NULL;
+	}
+
+	ocs_free(ocs, lcb_ctx, sizeof(*lcb_ctx));
+	return;
+
+send_ls_rjt:
+	ocs_send_ls_rjt(io, lcb_ctx->ox_id, rjt_rsn, rjt_expl, 0, NULL, NULL);
+	ocs_free(ocs, lcb_ctx, sizeof(*lcb_ctx));
+}
+
+/**
+ * @brief Process an unsolicited LCB ELS.
+ *
+ * <h3 class="desc">Description</h3>
+ * This routine processes an unsolicited LCB (Link Cable Beaconing) ELS request.
+ * 1) Check for COMMON_SET_BEACON_CONFIG_V1 support and issue the mbox cmd.
+ * 2) Process the mbox completion and send LCB response accordingly.
+ *
+ * @param node Node to which the LCB request is sent.
+ * @param cbdata Callback data to pass forward.
+ *
+ * @return None.
+ */
+
+void
+ocs_els_process_lcb_rcvd(ocs_node_t *node, ocs_node_cb_t *cbdata)
+{
+	fc_lcb_payload_t *payload = (fc_lcb_payload_t *)cbdata->payload;
+	fc_header_t *hdr = cbdata->header;
+	ocs_lcb_ctx_t *lcb_ctx = NULL;
+	ocs_t *ocs = node->ocs;
+	uint32_t rjt_rsn;
+	uint32_t rjt_expl;
+	int32_t rc = 0;
+
+	if (!ocs->hal.sli.config.lcb_supported) {
+		ocs_log_err(ocs, "lcb v1 mbox cmd not supported, sending LS_RJT\n");
+		rjt_rsn = FC_REASON_COMMAND_NOT_SUPPORTED;
+		rjt_expl = FC_EXPL_NO_ADDITIONAL;
+		goto send_ls_rjt;
+	}
+
+	lcb_ctx = ocs_malloc(ocs, sizeof(*lcb_ctx), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!lcb_ctx) {
+		ocs_log_err(ocs, "lcb_ctx alloc failed, sending LS_RJT\n");
+		rjt_rsn = FC_REASON_UNABLE_TO_PERFORM;
+		rjt_expl = FC_EXPL_INSUFFICIENT_RESOURCES;
+		goto send_ls_rjt;
+	}
+
+	lcb_ctx->io = cbdata->io;
+
+	lcb_ctx->ox_id = ocs_be16toh(hdr->ox_id);
+	lcb_ctx->rx_id = ocs_be16toh(hdr->rx_id);
+	lcb_ctx->s_id = fc_be24toh(hdr->s_id);
+	lcb_ctx->d_id = fc_be24toh(hdr->d_id);
+
+	lcb_ctx->sub_cmd = payload->sub_cmd;
+	lcb_ctx->capability = payload->capability;
+	lcb_ctx->cmd_status = payload->status;
+	lcb_ctx->frequency = payload->frequency;
+	lcb_ctx->duration = ocs_be16toh(payload->duration);
+
+	rc = ocs_hal_set_beacon_config(&ocs->hal, lcb_ctx->sub_cmd, lcb_ctx->duration, ocs_els_send_lcb_resp, lcb_ctx);
+	if (rc) {
+		ocs_log_err(ocs, "Failed to set beacon config (rc: %d), sending LS_RJT\n", rc);
+		rjt_rsn = FC_REASON_UNABLE_TO_PERFORM;
+		rjt_expl = FC_EXPL_NO_ADDITIONAL;
+		goto send_ls_rjt;
+	}
+
+	return;
+
+send_ls_rjt:
+	ocs_send_ls_rjt(cbdata->io, ocs_be16toh(hdr->ox_id), rjt_rsn, rjt_expl, 0, NULL, NULL);
+	if (lcb_ctx)
+		ocs_free(ocs, lcb_ctx, sizeof(*lcb_ctx));
 }
 
 /**
@@ -3392,7 +4388,7 @@ ocs_bls_send_rjt_hdr(ocs_io_t *io, fc_header_t *hdr)
  * @return Returns pointer to IO object, or NULL if error.
  */
 
-static ocs_io_t *
+ocs_io_t *
 ocs_bls_send_rjt(ocs_io_t *io, uint32_t s_id, uint16_t ox_id, uint16_t rx_id)
 {
 	ocs_node_t *node = io->node;
@@ -3526,7 +4522,7 @@ ocs_els_abort_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, i
 	 * Send the completion event to indicate that the abort process is complete.
 	 * Note: The ELS SM will already be receiving ELS_REQ_OK/FAIL/RJT/ABORTED.
 	 */
-	ocs_els_post_event(els, OCS_EVT_ELS_ABORT_CMPL, NULL);
+	ocs_els_post_event(els, OCS_EVT_ELS_ABORT_CMPL, false, NULL);
 
 	/* Done with the original ELS IO */
 	ocs_ref_put(&els->ref); /* ocs_ref_get(): ocs_els_abort_io() */
@@ -3579,6 +4575,15 @@ ocs_els_abort_io(ocs_io_t *els, bool send_abts)
 /*
  * ELS IO State Machine
  */
+#define els_sm_prologue() \
+	if (evt == OCS_EVT_ENTER) { \
+		ocs_strncpy(els->els_info->current_state_name, __func__, sizeof(els->els_info->current_state_name)); \
+	} else if (evt == OCS_EVT_EXIT) { \
+		ocs_strncpy(els->els_info->prev_state_name, els->els_info->current_state_name, sizeof(els->els_info->prev_state_name)); \
+		ocs_strncpy(els->els_info->current_state_name, "invalid", sizeof(els->els_info->current_state_name)); \
+	} \
+	els->els_info->prev_evt = els->els_info->current_evt; \
+	els->els_info->current_evt = evt;
 
 #define std_els_state_decl(...) \
 	ocs_io_t *els = NULL; \
@@ -3590,7 +4595,9 @@ ocs_els_abort_io(ocs_io_t *els, bool send_abts)
 	node = els->node; \
 	ocs_assert(node != NULL, NULL); \
 	ocs = node->ocs; \
-	ocs_assert(ocs != NULL, NULL);
+	ocs_assert(ocs != NULL, NULL); \
+	ocs_assert(els->els_info != NULL, NULL); \
+	els_sm_prologue();
 
 #define els_sm_trace(...) \
 	do { \
@@ -3632,6 +4639,52 @@ ocs_els_io_cleanup(ocs_io_t *els, ocs_sm_event_t node_evt, void *arg)
 	els->els_info->els_req_free = 1;
 }
 
+static inline bool
+ocs_retry_flogi(ocs_io_t *els, uint8_t rsn, uint8_t rsn_expl)
+{
+	fc_plogi_payload_t *flogi = els->els_info->els_req.virt;
+
+	if ((FC_REASON_LOGICAL_ERROR == rsn) && (FC_EXPL_NO_ADDITIONAL == rsn_expl) &&
+	    (flogi->common_service_parameters[1] & ocs_htobe32(~FC_PLOGI_CSP_W1_BBSCN_CLEAR_MASK))) {
+		/*
+		 * Disable BBCR by setting the BB_SC_N field in the Common Service
+		 * Parameters to zero while retrying the FLOGI. Keep the BB_SC_N field
+		 * set to zero for any additional retries while the link remains up.
+		 * This is to work around a bug in the older Brocade switch firmware
+		 * (FOS versions prior to 7.1.0). During subsequent linkup processing,
+		 * if BBCR is enabled, attempt to enable BBCR again.
+		 */
+		els_io_printf(els, "LS_RJT Logical Error response, retry with BBCR disabled\n");
+
+		/* Zero-out the BB_SC_N field (word 1, bits 15:12) */
+		flogi->common_service_parameters[1] &= ocs_htobe32(FC_PLOGI_CSP_W1_BBSCN_CLEAR_MASK);
+
+		ocs_io_transition(els, __ocs_els_retry, NULL);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static inline bool
+ocs_retry_scr(ocs_io_t *els, uint8_t rsn, uint8_t rsn_expl)
+{
+	fc_scr_payload_t *scr = els->els_info->els_req.virt;
+
+	if ((FC_REASON_LOGICAL_BUSY != rsn) && (scr->function & FC_SCR_REG_PEER_ZONE)) {
+		/* All switches might not support Peer Zone enabled SCR */
+		els_io_printf(els, "LS_RJT Error response (rsn x%x rsn_expl x%x), "
+			      "retry with Peer Zone registration disabled\n", rsn, rsn_expl);
+
+		/* Clear the Peer Zone registration bit */
+		scr->function &= ~FC_SCR_REG_PEER_ZONE;
+
+		ocs_io_transition(els, __ocs_els_retry, NULL);
+		return TRUE;
+	}
+
+	return FALSE;
+}
 
 /**
  * @brief Common event handler for the ELS IO state machine.
@@ -3665,6 +4718,10 @@ __ocs_els_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, vo
 		ocs_log_warn(els->node->ocs, "[%s] %-20s %-20s not handled - terminating ELS\n", node->display_name, funcname,
 			ocs_sm_event_name(evt));
 		ocs_els_io_cleanup(els, OCS_EVT_SRRS_ELS_REQ_FAIL, arg);
+		break;
+	case OCS_EVT_ELS_DONT_RETRY:
+		els_io_printf(els, "ELS dont retry in case of timeout\n");
+		els->els_info->els_retries_remaining = 0;
 		break;
 	default:
 		ocs_log_warn(els->node->ocs, "[%s] %-20s %-20s not handled\n", node->display_name, funcname,
@@ -3751,6 +4808,14 @@ __ocs_els_wait_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	}
 
 	case OCS_EVT_ELS_REQ_TIMEOUT: {
+		fc_els_gen_t *buf = els->els_info->els_req.virt;
+
+		if (((FC_ELS_CMD_FLOGI == buf->command_code) || (FC_ELS_CMD_FDISC == buf->command_code)) &&
+		    (els->els_info->els_timeout_sec < OCS_FC_FLOGI_TIMEOUT_SEC_MAX)) {
+			/*Increment the ELS timeout for every retry till maximum limit*/
+			els->els_info->els_timeout_sec = els->els_info->els_timeout_sec * 2;
+			els->iparam.els.timeout = els->els_info->els_timeout_sec;
+		}
 		els_io_printf(els, "Timed out, retry (%d tries remaining)\n",
 			      els->els_info->els_retries_remaining-1);
 		ocs_io_transition(els, __ocs_els_retry, NULL);
@@ -3759,40 +4824,34 @@ __ocs_els_wait_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	case OCS_EVT_SRRS_ELS_REQ_RJT: {
 		ocs_node_cb_t *cbdata = arg;
-		uint8_t reason_code = (cbdata->ext_status >> 16) & 0xFF;
-		uint8_t reason_code_expl = (cbdata->ext_status >> 8) & 0xFF;
 		fc_els_gen_t *buf = els->els_info->els_req.virt;
+		uint8_t rsn = ((cbdata->ext_status >> 16) & 0xFF);
+		uint8_t rsn_expl = ((cbdata->ext_status >> 8) & 0xFF);
+
+		/* Handle special cases seperately */
+		if (FC_ELS_CMD_FLOGI == buf->command_code) {
+			if (ocs_retry_flogi(els, rsn, rsn_expl))
+				break; /* from OCS_EVT_SRRS_ELS_REQ_RJT */
+		}
+
+		if (FC_ELS_CMD_SCR == buf->command_code) {
+			if (ocs_retry_scr(els, rsn, rsn_expl))
+				break; /* from OCS_EVT_SRRS_ELS_REQ_RJT */
+		}
 
 		/* delay and retry if reason code is Logical Busy */
-		switch (reason_code) {
+		switch (rsn) {
 		case FC_REASON_LOGICAL_BUSY:
-			els->node->els_req_cnt--;
-			els_io_printf(els, "LS_RJT Logical Busy response, delay and retry\n");
+		case FC_REASON_UNABLE_TO_PERFORM:
+			els_io_printf(els, "ELS RJT reason code: 0x%x explanation code: 0x%x response, delay and retry\n", rsn, rsn_expl);
 			ocs_io_transition(els, __ocs_els_delay_retry, NULL);
 			break;
-		case FC_REASON_LOGICAL_ERROR:
-			if (FC_ELS_CMD_FLOGI == buf->command_code && FC_EXPL_NO_ADDITIONAL == reason_code_expl) {
-				/**
-				 * Disable BBCR by setting the BB_SC_N field in the Common Service
-				 * Parameters to zero while retrying the FLOGI. Keep the BB_SC_N field
-				 * set to zero for any additional retries while the link remains up.
-				 * This is to work around a bug in the older Brocade switch firmware
-				 * (FOS versions prior to 7.1.0). During subsequent linkup processing,
-				 * if BBCR is enabled, attempt to enable BBCR again.
-				 */
-				fc_plogi_payload_t *flogi = els->els_info->els_req.virt;
 
-				/* Zero-out the BB_SC_N field (word 1, bits 15:12) */
-				flogi->common_service_parameters[1] &= ocs_htobe32(FC_PLOGI_CSP_W1_BBSCN_CLEAR_MASK);
-				els_io_printf(els, "BBCR disabled until the next link toggle\n");
-			}
-
-			/* For now, fall through since we are not retrying this ELS request */
-			FALL_THROUGH;
 		default:
 			ocs_els_io_cleanup(els, evt, arg);
 			break;
 		}
+
 		break;
 	}
 
@@ -3802,13 +4861,20 @@ __ocs_els_wait_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		/* request to abort this ELS without an ABTS */
 		els_io_printf(els, "ELS abort requested\n");
 		els->els_info->els_retries_remaining = 0;		/* Set retries to zero, we are done */
+
+		ocs_io_transition(els, __ocs_els_aborting, NULL);
 		rc = ocs_els_abort_io(els, FALSE);
 		if (rc) {
 			ocs_log_err(ocs, "ocs_els_abort_io() failed\n");
 			ocs_els_io_cleanup(els, OCS_EVT_SRRS_ELS_REQ_FAIL, arg);
-		} else {
-			ocs_io_transition(els, __ocs_els_aborting, NULL);
 		}
+
+		break;
+	}
+
+	case OCS_EVT_ELS_DONT_RETRY: {
+		els_io_printf(els, "ELS dont retry in case of timeout.\n");
+		els->els_info->els_retries_remaining = 0;
 		break;
 	}
 
@@ -3816,6 +4882,7 @@ __ocs_els_wait_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		__ocs_els_common(__func__, ctx, evt, arg);
 		break;
 	}
+
 	return NULL;
 }
 
@@ -3864,8 +4931,6 @@ __ocs_els_retry(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			els->hio = NULL;
 
 			/* result isn't propagated up to node sm, need to decrement req cnt */
-			ocs_assert(els->node->els_req_cnt, NULL);
-			els->node->els_req_cnt--;
 			rc = ocs_els_send(els, els->els_info->els_req.size, els->els_info->els_timeout_sec, ocs_els_req_cb);
 			if (rc) {
 				ocs_log_err(ocs, "ocs_els_send failed: %d\n", rc);
@@ -3913,7 +4978,6 @@ __ocs_els_aborted_delay_retry(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	case OCS_EVT_TIMER_EXPIRED:
 		/* Cancel the timer, skip post node event, and free the io */
-		node->els_req_cnt++;
 		ocs_els_io_cleanup(els, OCS_EVT_SRRS_ELS_REQ_FAIL, arg);
 		break;
 	default:
@@ -3945,16 +5009,25 @@ __ocs_els_delay_retry(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 
 	switch(evt) {
 	case OCS_EVT_ENTER:
-		ocs_setup_timer(ocs, &els->delay_timer, ocs_els_delay_timer_cb, els, 5000, false);
-		break;
-	case OCS_EVT_TIMER_EXPIRED:
-		/* Retry delay timer expired, retry the ELS request, Free the HAL IO so
-		 * that a new oxid is used.
-		 */
-		if (els->hio != NULL) {
+		ocs_assert(els->hio != NULL, NULL);
+
+		if (els->els_info->els_retries_remaining && --els->els_info->els_retries_remaining) {
+			/* Free the HAL IO so that a new OXID will be used when ELS retried after delay */
 			ocs_hal_io_free(&ocs->hal, els->hio);
 			els->hio = NULL;
+
+			ocs_setup_timer(ocs, &els->delay_timer, ocs_els_delay_timer_cb, els, 5000, false);
+		} else {
+			ocs_node_cb_t node_cbdata;
+			node_cbdata.status = node_cbdata.ext_status = (~0);
+			node_cbdata.els = els;
+
+			els_io_printf(els, "ELS delay retry: Retries exhausted\n");
+			ocs_els_io_cleanup(els, OCS_EVT_SRRS_ELS_REQ_FAIL, &node_cbdata);
 		}
+		break;
+	case OCS_EVT_TIMER_EXPIRED:
+		ocs_assert(els->hio == NULL, NULL);
 		ocs_io_transition(els, __ocs_els_init, NULL);
 		break;
 	case OCS_EVT_ABORT_ELS:
@@ -4014,6 +5087,7 @@ __ocs_els_aborting(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		__ocs_els_common(__func__, ctx, evt, arg);
 		break;
 	}
+
 	return NULL;
 }
 
@@ -4033,7 +5107,7 @@ ocs_els_abort_cleanup(ocs_io_t *els)
 	 * to node state machine in lieu of OCS_EVT_SRRS_ELS_* event
 	 */
 	ocs_node_cb_t cbdata;
-	cbdata.status = cbdata.ext_status = 0;
+	cbdata.status = cbdata.ext_status = (~0);
 	cbdata.els = els;
 	els_io_printf(els, "Request aborted\n");
 	ocs_els_io_cleanup(els, OCS_EVT_ELS_REQ_ABORTED, &cbdata);
@@ -4140,6 +5214,10 @@ ocs_ddump_els(ocs_textbuf_t *textbuf, ocs_io_t *els)
 	ocs_ddump_value(textbuf, "evtdepth", "%d", els->els_info->els_evtdepth);
 	ocs_ddump_value(textbuf, "pend", "%d", els->els_info->els_pend);
 	ocs_ddump_value(textbuf, "active", "%d", els->els_info->els_active);
+	ocs_ddump_value(textbuf, "current_state", "%s", els->els_info->current_state_name);
+	ocs_ddump_value(textbuf, "prev_state", "%s", els->els_info->prev_state_name);
+	ocs_ddump_value(textbuf, "current_evt", "%s", ocs_sm_event_name(els->els_info->current_evt));
+	ocs_ddump_value(textbuf, "prev_evt", "%s", ocs_sm_event_name(els->els_info->prev_evt));
 	ocs_ddump_io(textbuf, els);
 	ocs_ddump_endsection(textbuf, "els", -1);
 }
@@ -4253,26 +5331,19 @@ static void
 ocs_els_delay_timer_cb(void *arg)
 {
 	ocs_io_t *els = arg;
-	ocs_node_t *node;
 
-	if (els && ocs_io_busy(els) && (OCS_IO_TYPE_ELS == els->io_type)) {
-		node = els->node;
-	} else {
+	if (!els || !ocs_io_busy(els) || (OCS_IO_TYPE_ELS != els->io_type)) {
 		return;
 	}
 
 	/*
 	 * There is a potential deadlock here since is Linux executes timers
 	 * in a soft IRQ context. The lock may be aready locked by the interrupt
-	 * thread. Handle this case by attempting to take the node lock and reset the
-	 * timer if we fail to acquire the lock.
-	 *
-	 * Note: This code relies on the fact that the node lock is recursive.
+	 * thread. So make sure we request ocs_els_post_event to return failure in
+	 * case node lock is not available by setting dont_block arg to true.
 	 */
-	if (ocs_node_lock_try(node)) {
-		ocs_els_post_event(els, OCS_EVT_TIMER_EXPIRED, NULL);
-		ocs_node_unlock(node);
-	} else {
+
+	if (ocs_els_post_event(els, OCS_EVT_TIMER_EXPIRED, true, NULL)) {
 		ocs_setup_timer(els->ocs, &els->delay_timer, ocs_els_delay_timer_cb, els, 1, false);
 	}
 }

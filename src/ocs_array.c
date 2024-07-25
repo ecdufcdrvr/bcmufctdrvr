@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -88,6 +90,10 @@ ocs_array_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count)
 {
 	ocs_array_t *array = NULL;
 	uint32_t i;
+	uint32_t flags = OCS_M_ZERO;
+#if !defined(OCS_USPACE)
+	ocs_os_t *ocs_os = os;
+#endif
 
 	/* Fail if the item size exceeds slab_len - caller should increase slab_size,
 	 * or not use this API.
@@ -97,7 +103,12 @@ ocs_array_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count)
 		return NULL;
 	}
 
-	array = ocs_malloc(os, sizeof(*array), OCS_M_ZERO);
+#if !defined(OCS_USPACE)
+	if ((ocs_os == NULL) || (ocs_os->hw_cmpl_context != OCS_HW_CMPL_CONTEXT_THREAD))
+		flags |= OCS_M_NOWAIT;
+#endif
+
+	array = ocs_malloc(os, sizeof(*array), flags);
 	if (array == NULL) {
 		return NULL;
 	}
@@ -110,13 +121,13 @@ ocs_array_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count)
 	array->bytes_per_row = array->elems_per_row * array->size;
 
 	array->array_rows_len = array->n_rows * sizeof(*array->array_rows);
-	array->array_rows = ocs_malloc(os, array->array_rows_len, OCS_M_ZERO);
+	array->array_rows = ocs_malloc(os, array->array_rows_len, flags);
 	if (array->array_rows == NULL) {
 		ocs_array_free(array);
 		return NULL;
 	}
 	for (i = 0; i < array->n_rows; i++) {
-		array->array_rows[i] = ocs_malloc(os, array->bytes_per_row, OCS_M_ZERO);
+		array->array_rows[i] = ocs_malloc(os, array->bytes_per_row, flags);
 		if (array->array_rows[i] == NULL) {
 			ocs_array_free(array);
 			return NULL;
@@ -246,7 +257,7 @@ ocs_varray_alloc(ocs_os_handle_t os, uint32_t array_count)
 		va->array = ocs_malloc(os, sizeof(*va->array) * va->array_count, OCS_M_ZERO);
 		if (va->array != NULL) {
 			va->next_index = 0;
-			ocs_lock_init(os, &va->lock, "varray:%p", va);
+			ocs_lock_init(os, &va->lock, OCS_LOCK_ORDER_IGNORE, "varray:%p", va);
 		} else {
 			ocs_free(os, va, sizeof(*va));
 			va = NULL;

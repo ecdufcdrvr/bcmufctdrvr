@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -89,8 +91,15 @@ ocs_pool_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count, uint32_t use_l
 {
 	ocs_pool_t *pool;
 	uint32_t i;
+	uint32_t flags = OCS_M_ZERO;
 
-	pool = ocs_malloc(os, sizeof(*pool), OCS_M_ZERO);
+#if !defined(OCS_USPACE)
+	ocs_os_t *ocs_os = os;
+	if (ocs_os->hw_cmpl_context != OCS_HW_CMPL_CONTEXT_THREAD)
+		flags |= OCS_M_NOWAIT;
+#endif
+
+	pool = ocs_malloc(os, sizeof(*pool), flags);
 	if (pool == NULL) {
 		return NULL;
 	}
@@ -98,7 +107,7 @@ ocs_pool_alloc(ocs_os_handle_t os, uint32_t size, uint32_t count, uint32_t use_l
 	pool->os = os;
 	pool->use_lock = use_lock;
 	if (pool->use_lock) {
-		ocs_lock_init(os, &pool->lock, "ocs_pool:%p", pool);
+		ocs_lock_init(os, &pool->lock, OCS_LOCK_ORDER_IGNORE, "ocs_pool:%p", pool);
 	}
 
 	/* Allocate an array where each array item is the size of a pool_hdr_t plus
@@ -158,7 +167,9 @@ ocs_pool_reset(ocs_pool_t *pool)
 			ocs_list_assert(0);
 		}
 
-		ocs_memset(buf, 0, size - sizeof(pool_hdr_t));
+		if (size > sizeof(pool_hdr_t))
+			ocs_memset(buf, 0, size - sizeof(pool_hdr_t));
+
 		ocs_list_add_tail(&pool->freelist, ocs_array_get(pool->a, i));
 	}
 

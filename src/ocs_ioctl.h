@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,15 +40,22 @@
 #if !defined(__OCS_IOCTL_H__)
 #define __OCS_IOCTL_H__
 
+#include "ocs_uapi_interface.h"
+
+#define OCS_DDUMP_MAX_SIZE		(96*1024*1024)
+
 #define MAX_FDMI_HBA_COUNT		2048	/*Enough for 2K remote initiator nodes */
 #define MAX_FDMI_PORT_COUNT		256	/*Enough for 2K remote initiator nodes */
 
 /* FW dump status */
 #define OCS_FW_DUMP_STATUS_SUCCESS		0
-#define OCS_FW_DUMP_STATUS_IN_PROGRESS		1
-#define OCS_FW_DUMP_STATUS_SKIP			2
+#define OCS_FW_DUMP_STATUS_DD_PRESENT		1
+#define OCS_FW_DUMP_STATUS_FDB_PRESENT		2
 #define OCS_FW_DUMP_STATUS_ALREADY_PRESENT	3
-#define OCS_FW_DUMP_STATUS_DUMP_TYPE_INVALID	4
+#define OCS_FW_DUMP_STATUS_IN_PROGRESS		4
+#define OCS_FW_DUMP_STATUS_SKIP_DUMP		5
+#define OCS_FW_DUMP_STATUS_NOT_PRESENT		6
+#define OCS_FW_DUMP_STATUS_DUMP_TYPE_INVALID	7
 #define OCS_FW_DUMP_STATUS_FAILED		-1
 
 #define OCS_SRIOV_VFS_MAX 8
@@ -152,11 +161,10 @@ typedef enum {
 
 typedef struct {
 	dif_op_t dif_op;
-	uint32_t
-		check_ref_tag:1,	/* check reference tag on initiator writes */
-		check_app_tag:1,	/* check application tag on initiator writes */
-		check_guard:1,		/* check CRC on initiator writes */
-		dif_separate:1;		/* use DIF separate transfers */
+	uint8_t check_ref_tag;		/* check reference tag on initiator writes */
+	uint8_t check_app_tag;		/* check application tag on initiator writes */
+	uint8_t check_guard;		/* check CRC on initiator writes */
+	uint8_t dif_separate;		/* use DIF separate transfers */
 	uint32_t ref_tag;		/* DIF reference tag */
 	uint16_t app_tag;		/* DIF application tag */
 	uint32_t blocksize;		/* DIF blocksize */
@@ -180,7 +188,7 @@ typedef struct {
 
 	uint32_t directio;		/**< If set, DMA to and from user buffers */
 
-	uint32_t first_burst:1;		/**< If true send IO writes with first burst */
+	uint8_t first_burst;		/**< If true send IO writes with first burst */
 	uint32_t first_burst_size;	/**< If first burst is enabled, then this size */
 
 	int32_t wait_timeout_usec;	/**< Wait timeout (usec) for wait, wait_any */
@@ -240,14 +248,56 @@ typedef struct {
 } ocs_ioctl_ecd_helper_t;
 
 /**
+ * @brief config filter els types
+ */
+typedef enum {
+	OCS_CFG_FILTER_ELS_PLOGI,
+	OCS_CFG_FILTER_ELS_PRLI,
+	OCS_CFG_FILTER_ELS_ADISC
+} ocs_cfg_filter_elstype_t;
+
+/**
+ * @brief config filter action types
+ */
+typedef enum {
+	OCS_CFG_FILTER_ACTION_DROP,
+	OCS_CFG_FILTER_ACTION_RJT,
+	OCS_CFG_FILTER_ACTION_LOGO
+} ocs_cfg_filter_action_t;
+
+/**
+ * @brief config filter fcp type (for PRLI)
+ */
+typedef enum {
+	OCS_CFG_FILTER_TYPE_BOTH,
+	OCS_CFG_FILTER_TYPE_FCP,
+	OCS_CFG_FILTER_TYPE_NVME,
+} ocs_cfg_filter_fcp_type_t;;
+
+/**
+ * @brienf OCS_IOCTL_CMD_CFG_FILTER ioctl structure
+ */
+typedef struct {
+	uint64_t wwpn;
+	uint32_t domain_index;
+	uint8_t clear_filter;
+	uint8_t filter_req;
+	uint8_t elstype;
+	uint8_t fcptype;
+	uint8_t action;
+	uint8_t rsp_option;		/* related to modifying plogi/prli responses */
+	uint8_t once;
+} ocs_ioctl_cfg_filter_t;
+
+/**
  * @brief OCS_IOCTL_CMD_VPORT ioctl structure
  */
 
 typedef struct {
 	uint32_t domain_index;		/*<< domain instance index */
-	uint32_t req_create:1,		/*<< 1 = create vport, zero = remove vport */
-		 enable_ini:1,		/*<< 1 = enable vport as an initiator */
-		 enable_tgt:1;		/*<< 1 = enable vport as a target */
+	uint8_t req_create;		/*<< 1 = create vport, zero = remove vport */
+	uint8_t enable_ini;		/*<< 1 = enable vport as an initiator */
+	uint8_t enable_tgt;		/*<< 1 = enable vport as a target */
 	uint64_t wwpn;			/*<< wwpn to create or delete */
 	uint64_t wwnn;			/*<< wwnn to create or delete */
 	int status;			/*<< status of helper function request */
@@ -351,6 +401,7 @@ typedef struct {
 	uint8_t *user_buffer;		/*<< pointer to user space buffer */
 	uint32_t user_buffer_len;	/*<< length in bytes of user space buffer */
 	uint32_t bytes_written;		/*<< number of bytes written */
+	uint8_t get_all;		/*<< Get all mgmt-info */
 } ocs_ioctl_mgmt_buffer_t;
 
 typedef struct {
@@ -387,6 +438,42 @@ typedef struct {
 	uint8_t		sof;			/*<< SOF value */
 	uint8_t		eof;			/*<< EOF Value */
 } ocs_ioctl_send_frame_t;
+
+#define OCS_MAX_PRINCIPAL_MEMBERS	1
+#define OCS_MAX_ZONE_PEER_MEMBERS	254
+#define OCS_MAX_NUM_SWITCH_ENTRIES	255
+
+typedef struct ocs_tdz_status_s {
+	uint8_t fez_enabled;
+	uint8_t reason_code;
+	uint8_t reason_code_explanation;
+	uint8_t vendor_specific;
+} ocs_tdz_status_t;
+
+typedef struct ocs_tdz_name_s {
+	char name[64];
+} ocs_tdz_name_t;
+
+typedef struct ocs_tdz_attr_block_s {
+	uint32_t num_principal_members;
+	ocs_tdz_name_t principal_member[OCS_MAX_PRINCIPAL_MEMBERS];
+} ocs_tdz_attr_block_t;
+
+typedef struct ocs_tdz_peer_block_s {
+	uint32_t num_peer_members;
+	ocs_tdz_name_t peer_member[OCS_MAX_ZONE_PEER_MEMBERS];
+} ocs_tdz_peer_block_t;
+
+typedef struct ocs_tdz_peer_zone_info_s {
+	ocs_tdz_name_t zone;
+	ocs_tdz_attr_block_t attr_block;
+	ocs_tdz_peer_block_t peer_block;
+} ocs_tdz_peer_zone_info_t;
+
+typedef union ocs_tdz_get_peer_zone_rsp_u {
+	ocs_tdz_status_t status;
+	ocs_tdz_peer_zone_info_t zone_info;
+} ocs_tdz_get_peer_zone_rsp_t;
 
 typedef struct ocs_fdmi_hba_list_info_s {
 	uint32_t entry_count;
@@ -477,6 +564,37 @@ typedef struct ocs_fdmi_port_attr_info_s {
 	uint32_t port_identifier;
 } ocs_fdmi_port_attr_info_t;
 
+typedef struct ocs_ganxt_port_info_s {
+	uint32_t		port_type:8,
+				port_id:24;
+	uint64_t		port_name;
+	uint8_t			sym_port_name_len;
+	uint8_t			sym_port_name[255];
+	uint64_t		node_name;
+	uint8_t			sym_node_name_len;
+	uint8_t			sym_node_name[255];
+	uint8_t                 rsvd1[24];
+	uint32_t		class_of_serv;
+	uint8_t			protocol_types[32];
+	uint8_t                 rsvd2[16];
+	uint64_t		fabric_port_name;
+	uint32_t                rsvd3:8,
+				hard_address:24;
+} ocs_ganxt_port_info_t;
+
+#define MAX_FPIN_PNAME_CNT 1
+typedef struct ocs_fpin_evt_args_s {
+	uint32_t fc_id; /* Host order */
+	uint64_t detected_wwpn; /* Big endian order */
+	uint64_t attached_wwpn; /* Big endian order */
+	uint16_t event_type; /* Big endian order */
+	uint16_t event_modifier; /* Big endian order */
+	uint32_t event_threshold; /* Big endian order */
+	uint32_t event_count; /* Big endian order */
+	uint32_t pname_count; /* Host order */
+	uint64_t pname[MAX_FPIN_PNAME_CNT]; /* Big endian order */
+} ocs_fpin_evt_args_t;
+
 typedef struct ocs_rq_empty_gen_args_s {
 	int rq_empty_enable;
 	uint32_t drop_count;
@@ -488,7 +606,7 @@ typedef struct ocs_rq_empty_gen_args_s {
 typedef struct ocs_io_delay_args_s {
 	uint32_t delay_min_ms;
 	uint32_t delay_max_ms;
-	uint64_t delay_intervel_counter;
+	uint64_t delay_interval_counter;
 } ocs_io_delay_args_t;
 
 #define OCS_MAX_SLI4_ULP		8
@@ -609,6 +727,15 @@ typedef struct ocs_uefi_bios_struct_s {
 	uint8_t			reserved[49];
 } ocs_uefi_bios_struct_t;
 
+#define LOOPBACK_BUF_SIZE 512
+
+typedef struct ocs_gen_aborts_s {
+	uint8_t	duplicate_aborts;
+	uint8_t	enable;
+	uint8_t gen_single_abort;
+	uint64_t gen_abort_interval_msecs;
+} ocs_gen_aborts_t;
+
 /**
  * @brief linkcfg strings
  */
@@ -665,6 +792,139 @@ struct ocs_ioctl_dhchap_secret {
 	char		remote_pass[IOCTL_PSSWD_MAX_LEN + 1];
 };
 
+#define PCI_MAX_BAR 6
+typedef struct {
+	void *vaddr;
+	uintptr_t paddr;
+	size_t size;
+} ocs_memref_t;
+
+typedef struct {
+	uint16_t vendor;
+	uint16_t device;
+	uint32_t bar_count;
+	ocs_memref_t bars[PCI_MAX_BAR];
+	uint8_t bus;
+	uint8_t dev;
+	uint8_t func;
+	uint8_t num_msix;
+	int32_t numa_node;
+} ocs_ioctl_get_pci_config_t;
+
+enum ocs_mmoffset_type {
+	OCS_MMOFFSET_BAR = 1,
+	OCS_MMOFFSET_DMA,
+};
+
+typedef struct {
+	union {
+		struct {
+			uint64_t
+				:12,
+				/* Memory map type specific index */
+				mm_type_specific:44,
+				/* Memory map type i.e ocs_mmoffset_type */
+				mm_type:8;
+		} t;
+		uint64_t l;
+	} u;
+} ocs_mmoffset_t;
+
+/* USER API IOCTLS for Dual mode driver operations */
+typedef enum {
+	OCS_UAPI_SUCCESS = 0,
+	OCS_UAPI_ERR_INVALID_ARGS = 1,
+	OCS_UAPI_ERR_INTERNAL = 2,
+	OCS_UAPI_ERR_NOMEM = 3,
+	OCS_UAPI_ERR_NOT_READY = 4,
+	OCS_UAPI_ERR_MAX = OCS_UAPI_ERR_NOT_READY + 1,
+} ocs_uapi_status_t;
+
+typedef struct ocs_ioctl_get_uapi_req {
+	uint64_t ctx;
+	uint32_t type;
+	uint8_t message[sizeof(union ocs_uapi_generic_args)];
+} ocs_ioctl_get_uapi_req_t;
+
+typedef struct ocs_ioctl_set_uapi_resp {
+	uint64_t ctx;
+	uint32_t type;
+	ocs_uapi_status_t status;
+} ocs_ioctl_set_uapi_resp_t;
+
+typedef struct ocs_ioctl_uapi_hw_port_init_args {
+	uint8_t *user_buffer;
+	uint32_t user_buffer_len;
+} ocs_ioctl_uapi_hw_port_init_args_t;
+
+typedef struct ocs_ioctl_uapi_hw_port_unknown_frame {
+	uint32_t s_id;
+	uint32_t d_id;
+} ocs_ioctl_uapi_hw_port_unknown_frame_t;
+
+typedef struct ocs_ioctl_uapi_set_ready {
+	bool uapi_rdy;
+} ocs_ioctl_uapi_set_ready_t;
+
+typedef struct ocs_fw_write_status_s {
+	uint32_t	change_status;
+	uint32_t	status;
+	uint32_t	ext_status;
+	uint32_t	ext_status2;
+} ocs_fw_write_status_t;
+
+#define OCS_HBS_ALREADY_ENABLED 1
+#define OCS_HBS_BUFSIZE_INVALID 2
+
+#define OCS_HBS_BUFFER_CHUNK_4K 4096
+#define OCS_HBS_BUFFER_CHUNK_64K 65536
+#define OCS_HBS_BUFFER_CHUNK_128K (OCS_HBS_BUFFER_CHUNK_64K * 2)
+#define OCS_HBS_BUFFER_CHUNK_SIZE OCS_HBS_BUFFER_CHUNK_4K
+
+/* The OCS_HBS_BUFFER_SIZE must be multiples of OCS_HBS_BUFFER_CHUNK_SIZE */
+#define OCS_HBS_DEFAULT_BUFFER_SIZE OCS_HBS_BUFFER_CHUNK_SIZE
+
+typedef struct ocs_hbs_params_s {
+	int32_t hbs_configurable;
+	int32_t hbs_support_after_reset;
+	int32_t hbs_support_enabled;
+	uint32_t hbs_bufsize_configured;
+} ocs_hbs_params_t;
+
+typedef struct ocs_hbs_conf_s {
+	int32_t mode;
+	int32_t bufsize;
+} ocs_hbs_conf_t;
+
+typedef struct ocs_configure_protocols_s {
+	uint8_t scsi_initiator:1,
+		scsi_target:1,
+		nvme_initiator:1,
+		nvme_target:1,
+		resvd:4;
+	char queue_topology[1024];
+	char filter_def[1024];
+} ocs_configure_protocols_t;
+
+typedef struct {
+    uint32_t   crc;			// 32 bit CRC of the bundle. The CRC starts from word 1 of the bundle.
+    uint32_t   bundle_magic;		// Magic number indicating start of the bundle data – 0x73667066.
+    uint32_t   bundle_ver;		// The Bundle Format version – 0x1
+    uint32_t   bundle_len;      	// The total bundle length (Including the last word aligned bytes)
+    uint32_t   app_fw_ver;     		// SFP's Application FW version.
+    uint32_t   spi_fw_ver;     		// SFP's SPI FW version.
+    uint32_t   app_fw_start_off;  	// Offset in bundle where the Application FW Image starts.
+    uint32_t   app_fw_img_len;    	// The Application FW Image size in bytes
+    uint32_t   spi_fw_start_off;  	// Offset in bundle where the SPI FW Image starts.
+    uint32_t   spi_fw_img_len;    	// The SPI FW Image size in bytes
+    uint8_t    fw_img[0];		// This includes Application FW Image, SPI fw image and the padding to make it word aligned..
+} sfp_fw_bundle;
+
+typedef struct ocs_edif_params_s {
+	uint8_t query;
+	uint8_t edif;
+} ocs_edif_params_t;
+
 #define OCS_IOCTL_CMD_BASE		'o'
 #define OCS_IOCTL_CMD_TEST		_IOWR(OCS_IOCTL_CMD_BASE, 1, ocs_ioctl_test_t)
 #define OCS_IOCTL_CMD_ELXU_MBOX		_IOWR(OCS_IOCTL_CMD_BASE, 2, ocs_ioctl_elxu_mbox_t)
@@ -683,5 +943,11 @@ struct ocs_ioctl_dhchap_secret {
 #define OCS_IOCTL_CMD_GEN_DUMP		_IOWR(OCS_IOCTL_CMD_BASE, 17, int)
 #define OCS_IOCTL_CMD_UNLOAD		_IO(OCS_IOCTL_CMD_BASE, 18)
 #define OCS_IOCTL_CMD_SEND_FRAME	_IOWR(OCS_IOCTL_CMD_BASE, 19, ocs_ioctl_send_frame_t)
+#define OCS_IOCTL_CMD_GET_PCI_CONFIG    _IOR(OCS_IOCTL_CMD_BASE, 20, ocs_ioctl_get_pci_config_t)
+#define OCS_IOCTL_CMD_SET_UAPI_RESP     _IOW(OCS_IOCTL_CMD_BASE, 21, ocs_ioctl_set_uapi_resp_t)
+#define OCS_IOCTL_CMD_GET_UAPI_HWPORT_INIT  _IOWR(OCS_IOCTL_CMD_BASE, 22, ocs_ioctl_uapi_hw_port_init_args_t)
+#define OCS_IOCTL_CMD_SET_UAPI_READY    _IOW(OCS_IOCTL_CMD_BASE, 23, ocs_ioctl_uapi_set_ready_t)
+#define OCS_IOCTL_CMD_UAPI_UNKNOWN_FRAME _IOW(OCS_IOCTL_CMD_BASE, 24, ocs_ioctl_uapi_hw_port_unknown_frame_t)
+#define OCS_IOCTL_CMD_CFG_FILTER	_IOWR(OCS_IOCTL_CMD_BASE, 25, ocs_ioctl_cfg_filter_t)
 
 #endif // __OCS_IOCTL_H__

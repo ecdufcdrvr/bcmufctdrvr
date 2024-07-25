@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -37,12 +39,7 @@
  */
 
 #include "ocs.h"
-
-/* @brief Select DMA buffer allocation method
- */
-#define ENABLE_DMABUF_SLAB		1
-#define ENABLE_DMABUF_KERNEL		0
-#define ENABLE_DMABUF_USER		0
+#include <sys/utsname.h>
 
 static ocs_list_t ocs_thread_list;
 static ocs_lock_t ocs_thread_list_lock;
@@ -50,7 +47,9 @@ static void *ocs_pthread_start(void *arg);
 pid_t gettid(void);
 int32_t ocsu_process_events(ocs_t *ocs);
 
-#if ENABLE_DMABUF_SLAB
+#if defined(ENABLE_DMABUF_SLAB)
+int32_t ocs_dma_alloc_slab(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags);
+int32_t ocs_dma_free_slab(void *os, ocs_dma_t *dma);
 
 static int
 ocsu_dslab_init(ocs_t *ocs, uint32_t entry_count, uint32_t max_item_len)
@@ -69,23 +68,6 @@ ocsu_dslab_teardown(ocs_t *ocs)
 	dslab_dir_del(ocs->drv_ocs.slabdir);
 }
 
-int32_t
-ocs_dma_init(void *os)
-{
-	ocs_t *ocs = os;
-	/* initialize the DMA buffer slab allocator */
-	ocsu_dslab_init(ocs, 16, 1*1024*1024);
-	return 0;
-}
-
-void
-ocs_dma_teardown(void *os)
-{
-	ocs_t *ocs = os;
-	/* tear down the DMA buffer slab allocator */
-	ocsu_dslab_teardown(ocs);
-}
-
 /**
  * @ingroup os
  * @brief Allocate a DMA capable block of memory
@@ -98,7 +80,7 @@ ocs_dma_teardown(void *os)
  * @return 0 on success, non-zero otherwise
  */
 int32_t
-ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align)
+ocs_dma_alloc_slab(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags)
 {
 	ocs_t *ocs = os;
 
@@ -108,7 +90,7 @@ ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align)
 
 	ocs_memset(dma, 0, sizeof(*dma));
 
-	dslab_item_t *item = dslab_item_new(ocs->drv_ocs.slabdir, size);
+	dslab_item_t *item = dslab_item_new(ocs->drv_ocs.slabdir, size, align);
 	if (item == NULL) {
 		ocs_log_err(ocs, "dslab_item_new() failed\n");
 		return -1;
@@ -135,7 +117,7 @@ ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align)
  * @return 0 if memory is de-allocated, non-zero otherwise
  */
 int32_t
-ocs_dma_free(void *os, ocs_dma_t *dma)
+ocs_dma_free_slab(void *os, ocs_dma_t *dma)
 {
 	if (!os)
 		return -EPERM;
@@ -146,34 +128,11 @@ ocs_dma_free(void *os, ocs_dma_t *dma)
 	}
 	return 0;
 }
-
-int32_t
-ocs_dma_free_unbound(ocs_dma_t *dma)
-{
-	return ocs_dma_free(NULL, dma);
-}
 #endif
 
-#if ENABLE_DMABUF_KERNEL
+#if defined(ENABLE_DMABUF_KERNEL)
 int32_t
-ocs_dma_init(void *os)
-{
-	return 0;
-}
-
-/**
- * @ingroup os
- * @brief Allocate a DMA capable block of memory
- *
- * @param os OS specific handle or driver context
- * @param dma DMA descriptor containing results of memory allocation
- * @param size Size in bytes of desired allocation
- * @param align Alignment in bytes of the requested allocation
- *
- * @return 0 on success, non-zero otherwise
- */
-int32_t
-ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align)
+ocs_dma_alloc_kernel(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags)
 {
 	ocs_t *ocs = os;
 	int rc = -1;
@@ -209,17 +168,8 @@ ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align)
 	return 0;
 }
 
-/**
- * @ingroup os
- * @brief Free a DMA capable block of memory
- *
- * @param os OS specific handle or driver context
- * @param dma DMA descriptor for memory to be freed
- *
- * @return 0 if memory is de-allocated, non-zero otherwise
- */
 int32_t
-ocs_dma_free(void *os, ocs_dma_t *dma)
+ocs_dma_free_kernel(void *os, ocs_dma_t *dma)
 {
 	ocs_t *ocs = os;
 	ocsu_ioctl_dmabuf_free_t req;
@@ -240,6 +190,7 @@ ocs_dma_free(void *os, ocs_dma_t *dma)
 		if (rc) {
 			ocs_log_err(ocs, "Error: %s: ioctl/DMABUF_FREE failed: %d\n", rc);
 		}
+
 		memset(dma, 0, sizeof(*dma));
 	}
 
@@ -286,7 +237,72 @@ ocs_dma_sync(ocs_dma_t *dma, uint32_t flags)
 	}
 	return;
 }
+#endif
 
+#if defined(ENABLE_DMABUF_SPDK)
+int32_t ocs_dma_alloc_spdk(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags);
+int32_t ocs_dma_free_spdk(void *os, ocs_dma_t *dma);
+
+/**
+ * @ingroup os
+ * @brief Allocate a DMA capable block of memory
+ *
+ * @param os OS specific handle or driver context
+ * @param dma DMA descriptor containing results of memory allocation
+ * @param size Size in bytes of desired allocation
+ * @param align Alignment in bytes of the requested allocation
+ *
+ * @return 0 on success, non-zero otherwise
+ */
+int32_t
+ocs_dma_alloc_spdk(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags)
+{
+	ocs_t *ocs = os;
+	uint8_t name[32];
+
+	ocs_memset(dma, 0, sizeof(*dma));
+
+	snprintf(name, sizeof(name), "ocs%d-ocs_dma_buff-%d",
+		 ocs->instance_index, ocs->ocs_os.dmabuf_next_instance);
+
+	/* Submit a driver request to allocate a buffer */
+	dma->virt = ocs_spdk_zmalloc(name, size, align, &(dma->phys));
+	if (dma->virt == NULL) {
+		ocs_log_err(os, "Failed to do ocs_spdk_zmalloc\n");
+		return -1;
+	}
+
+	dma->ocs = os;
+	dma->alloc = dma->virt;
+	dma->size = size; // this is the allocaetd size: item->size;
+	dma->len = dma->size;
+
+	return 0;
+}
+
+/**
+ * @ingroup os
+ * @brief Free a DMA capable block of memory
+ *
+ * @param os OS specific handle or driver context
+ * @param dma DMA descriptor for memory to be freed
+ *
+ * @return 0 if memory is de-allocated, non-zero otherwise
+ */
+int32_t
+ocs_dma_free_spdk(void *os, ocs_dma_t *dma)
+{
+	ocs_assert(dma, -1);
+
+	/* Don't free if virtual address is NULL */
+	if (dma->virt) {
+		/* Unmap the address range */
+		ocs_spdk_free(dma->virt);
+		memset(dma, 0, sizeof(*dma));
+	}
+
+	return 0;
+}
 #endif
 
 /**
@@ -453,12 +469,13 @@ ocs_reg_write8(void *os, uint32_t rset, uint32_t off, uint8_t val)
  *
  * @param ocs pointer to ocs structure
  * @param lock pointer to recursive lock
+ * @param lock order
  * @param name text
  *
  * @return none
  */
 void
-ocs_rlock_init(ocs_t *ocs, ocs_rlock_t *lock, const char *name)
+ocs_rlock_init(ocs_t *ocs, ocs_rlock_t *lock, ocs_lock_order_e order, const char *name)
 {
 	lock->ocs = ocs;
 	pthread_mutexattr_t attr;
@@ -648,7 +665,7 @@ void
 ocs_thread_init(void)
 {
 	ocs_list_init(&ocs_thread_list, ocs_thread_t, link);
-	ocs_lock_init(NULL, &ocs_thread_list_lock, "ocs_thread_list_lock");
+	ocs_lock_init(NULL, &ocs_thread_list_lock, OCS_LOCK_ORDER_IGNORE, "ocs_thread_list_lock");
 }
 
 /**
@@ -676,15 +693,21 @@ ocs_thread_create(ocs_os_handle_t os, ocs_thread_t *thread, ocs_thread_fctn fctn
 	thread->os = os;
 	thread->fctn = fctn;
 	thread->name = ocs_strdup(name);
+
 	if (thread->name == NULL) {
 		thread->name = "unknown";
 	}
+
 	thread->arg = arg;
 	ocs_sem_init(&thread->sem, 0, "%s", name);
+
 	if (start == OCS_THREAD_CREATE) {
 		thread->dont_start = 1;
 	}
+
 	rc = pthread_create(&thread->thr, &attr, ocs_pthread_start, thread);
+	thread->created = rc ? false : true;
+
 	return rc;
 }
 
@@ -700,9 +723,11 @@ ocs_thread_create(ocs_os_handle_t os, ocs_thread_t *thread, ocs_thread_fctn fctn
 int32_t
 ocs_thread_join(ocs_thread_t *thread)
 {
-	int32_t rc;
+	int32_t rc = 0;
 
-	rc = pthread_join(thread->thr, NULL);
+	if (thread->created)
+		rc = pthread_join(thread->thr, NULL);
+
 	return rc;
 }
 
@@ -758,12 +783,19 @@ ocs_thread_terminate(ocs_thread_t *thread)
 	/* set request flag */
 	thread->terminate_req = 1;
 
-	/* wait for thread to terminate */
-	pthread_join(thread->thr, &pretval);
+	if (thread->created) {
+		/* Unblock system calls in progress */
+		pthread_kill(thread->thr, SIGRTMIN);
 
-	if (pretval != NULL) {
-		return *((int32_t*)pretval);
+		/* wait for thread to terminate */
+		pthread_join(thread->thr, &pretval);
+
+		thread->created = false;
+		if (pretval != NULL) {
+			return *((int32_t*)pretval);
+		}
 	}
+
 	return 0;
 }
 
@@ -810,7 +842,7 @@ ocs_thread_get_retval(ocs_thread_t *thread)
 
 void
 ocs_thread_yield(ocs_thread_t *thread) {
-	pthread_yield();
+	sched_yield();
 }
 
 ocs_thread_t*
@@ -882,30 +914,6 @@ void ocs_print_stack(void)
         backtrace_symbols_fd(stack, nptrs, STDOUT_FILENO);
 }
 
-const char *
-ocs_pci_model(uint16_t vendor, uint16_t device)
-{
-	switch (device) {
-	case PCI_PRODUCT_EMULEX_OCE11102N:	return "OCE11102N";
-	case PCI_PRODUCT_EMULEX_OCE11102F:	return "OCE11102F";
-	case PCI_PRODUCT_EMULEX_OCE14000:	return "OCE14000";
-//	case PCI_PRODUCT_EMULEX_OCE16001:	return "OCE16001";
-	case PCI_PRODUCT_EMULEX_OCE16002:	return "OCE16002";
-	case PCI_PRODUCT_EMULEX_LPE31004:	return "LPE31004";
-	case PCI_PRODUCT_EMULEX_OCE1600_VF:	return "OCE1600_VF";
-	case PCI_PRODUCT_EMULEX_OCE50102:	return "OCE50102";
-	case PCI_PRODUCT_EMULEX_OCE50102_VF:	return "OCE50102_VR";
-	case PCI_PRODUCT_BE3_INI:		return "BE3_INI";
-	case PCI_PRODUCT_BE3_TGT:		return "BE3_TGT";
-	case PCI_PRODUCT_SH_INI:		return "SH_INI";
-	case PCI_PRODUCT_SH_TGT:		return "SH_TGT";
-	default:
-		break;
-	}
-
-	return "unknown";
-}
-
 int32_t
 ocs_get_bus_dev_func(ocs_t *ocs, uint8_t* bus, uint8_t* dev, uint8_t* func)
 {
@@ -960,8 +968,7 @@ _ocs_assert(const char *cond, const char *filename, int linenum)
 	ocs_save_ddump_all(OCS_DDUMP_FLAGS_WQES|OCS_DDUMP_FLAGS_CQES|OCS_DDUMP_FLAGS_MQES, -1, TRUE);
 }
 
-#if defined(OCS_INCLUDE_FC)
-static void 
+static void
 ocs_xport_domain_shutdown_expires(void *arg)
 {
 	ocs_t *ocs = (ocs_t *)arg;
@@ -990,11 +997,12 @@ ocs_drain_shutdown_events(ocs_t *ocs, ocs_sem_t *sem)
 	return xport->ocs->domain_shutdown_timedout;
 }
 
-//TODO ?
 /**
- * @brief Get OS version name
+ * @brief Get OS Host name 
  *
  * @param pointer to OCS
+ * @param pointer to Host name buffer
+ * @param pointer to size of Host name buffer
  *
  * @return Returns version string
  */
@@ -1002,12 +1010,21 @@ ocs_drain_shutdown_events(ocs_t *ocs, ocs_sem_t *sem)
 void
 ocs_get_os_host_name(ocs_t *ocs, void *os_host_name_str, size_t size)
 {
-	ocs_snprintf(os_host_name_str, size, "%s",
-			"UNKNOWN");
-	return;
+	char *hostname = (char *)os_host_name_str;
+
+	if (gethostname(hostname, size - 1)) {
+		ocs_snprintf(hostname, size, "%s", "UNKNOWN");
+		return;
+	}
+
+	/*
+	 * If Host name is too large, gethostname() truncates the hostname
+	 * to fit in a given size. In such case null termination is not guaranteed.
+	 * Append null terminate sentinel in any case.
+	 */
+	hostname[size-1] = '\0';
 }
 
-//TODO
 /**
  * @brief Get OS version and name
  *
@@ -1018,30 +1035,103 @@ ocs_get_os_host_name(ocs_t *ocs, void *os_host_name_str, size_t size)
 void
 ocs_get_os_version_and_name(ocs_t *ocs, void *os_ver_name_str, size_t size)
 {
-	ocs_snprintf(os_ver_name_str, size, "%s",
-			"UNKNOWN");
-	return;
+	struct utsname utsname;
+
+	if (0 == uname(&utsname)) {
+		ocs_snprintf(os_ver_name_str, size, "%s %s %s", utsname.sysname, utsname.release,
+			     utsname.version);
+	} else {
+		ocs_snprintf(os_ver_name_str, size, "%s", "UNKNOWN");
+	}
 }
 
-//TODO
 /**
- * @brief Get SCSI device host number
+ * @brief Get SCSI Host device name 
  *
  * @param pointer to OCS
- * @param host_name pointer to update
+ * @param host_devname pointer to update
  * @param size of input buffer
  *
  *
  * @return None
  */
 void    
-ocs_scsi_get_host_name(ocs_t *ocs, void *host_name, size_t size)
+ocs_scsi_get_host_devname(ocs_t *ocs, void *host_devname, size_t size)
 {
-	ocs_snprintf(host_name, size, "%s",
-			"UNKNOWN");
-	return;
+	ocs_snprintf(host_devname, size, "Emulex %s", ocs->businfo);
 }
-#endif
+
+void
+ocs_fc_encode_lun(ocs_node_t *node, uint64_t lun, uint8_t *lu)
+{
+	uint8_t abort_test_bits = (lun >> 24);
+
+	lun &= 0xffffff;
+	if (lun <= FCP_LUN_ADDR_SIMPLE_MAX) {
+		lu[1] = lun & 0xff;
+	} else if (lun <= FCP_LUN_ADDR_FLAT_MAX) {
+		/*
+		 * Use single level, flat space LUN
+		 */
+		lu[0] = (FCP_LUN_ADDR_METHOD_FLAT << FCP_LUN_ADDRESS_METHOD_SHIFT) |
+			((lun >> 8) & FCP_LUN_ADDRESS_METHOD_MASK);
+		lu[1] = lun & 0xff;
+	} else {
+		ocs_log_err(node->ocs, "unsupported LU %08lX\n", lun);
+		// TODO: need an error code that indicates LUN INVALID
+		return;
+	}
+
+	lu[2] = abort_test_bits;
+}
+
+uint64_t
+ocs_fc_decode_lun(ocs_node_t *node, uint8_t *lu)
+{
+	uint64_t lun = ULONG_MAX;
+	uint8_t	 address_method = -1;
+
+	address_method = lu[0] >> FCP_LUN_ADDRESS_METHOD_SHIFT;
+
+	switch (address_method) {
+	case FCP_LUN_ADDR_METHOD_PERIPHERAL:
+	{
+		uint8_t	bus_identifier = lu[0] & ~FCP_LUN_ADDRESS_METHOD_MASK;
+
+		if (0 == bus_identifier) {
+			lun = lu[1];
+		} else {
+			ocs_log_test(node->ocs, "unsupported bus identifier %#02x (LU %02x %02x %02x %02x ...)\n",
+				     bus_identifier, lu[0], lu[1], lu[2], lu[3]);
+		}
+		break;
+	}
+	case FCP_LUN_ADDR_METHOD_FLAT:
+	{
+		lun = (lu[0] & ~FCP_LUN_ADDRESS_METHOD_MASK) << 8 | lu[1];
+		break;
+	}
+	case FCP_LUN_ADDR_METHOD_EXTENDED:
+	{
+		uint8_t	length, extended_address_method;
+
+		length = (lu[0] & 0x30) >> 4;
+		extended_address_method = lu[0] & 0xf;
+
+		if ((1 == length) && (2 == extended_address_method)) {
+			lun = (lu[1] << 16) | (lu[2] << 8) | lu[3];
+		} else {
+			ocs_log_test(node->ocs, "unsupported extended addressing method (length=%#x method=%#x)\n",
+				     length, extended_address_method);
+		}
+		break;
+	}
+	default:
+		ocs_log_test(node->ocs, "unsupported LU address method %#02x\n", address_method);
+	}
+
+	return lun;
+}
 
 /**
  *      ocs_get_options - Parse a string into a list of ints
@@ -1073,4 +1163,80 @@ char *ocs_get_options(const char *str, int nints, int *ints)
 	}
 	ints[0] = i - 1;
 	return NULL;
+}
+
+int32_t
+ocs_dma_init(void *os)
+{
+#if defined(ENABLE_DMABUF_SLAB)
+	return ocsu_dslab_init((ocs_t *)os, DSLAB_MAX_SLAB_ENTRIES, DSLAB_MAX_ITEM_LEN);
+#else
+	return 0;
+#endif
+}
+
+void
+ocs_dma_teardown(void *os)
+{
+#if defined(ENABLE_DMABUF_SLAB)
+	ocs_t *ocs = os;
+	/* tear down the DMA buffer slab allocator */
+	ocsu_dslab_teardown(ocs);
+#endif
+}
+
+/**
+ * @ingroup os
+ * @brief Allocate a DMA capable block of memory
+ *
+ * @param os OS specific handle or driver context
+ * @param dma DMA descriptor containing results of memory allocation
+ * @param size Size in bytes of desired allocation
+ * @param align Alignment in bytes of the requested allocation
+ *
+ * @return 0 on success, non-zero otherwise
+ */
+int32_t
+ocs_dma_alloc(void *os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags)
+{
+#if defined(ENABLE_DMABUF_SLAB)
+	return ocs_dma_alloc_slab(os, dma, size, align, flags);
+#elif defined(ENABLE_DMABUF_SPDK)
+	return ocs_dma_alloc_spdk(os, dma, size, align, flags);
+#elif defined(ENABLE_DMABUF_KERNEL)
+	return ocs_dma_alloc_kernel(os, dma, size, align, flags);
+#else
+	ocs_log_err(os, "Unsupported\n");
+	return -1;
+#endif
+}
+
+/**
+ * @ingroup os
+ * @brief Free a DMA capable block of memory
+ *
+ * @param os OS specific handle or driver context
+ * @param dma DMA descriptor for memory to be freed
+ *
+ * @return 0 if memory is de-allocated, non-zero otherwise
+ */
+int32_t
+ocs_dma_free(void *os, ocs_dma_t *dma)
+{
+#if defined(ENABLE_DMABUF_SLAB)
+	return ocs_dma_free_slab(os, dma);
+#elif defined(ENABLE_DMABUF_SPDK)
+	return ocs_dma_free_spdk(os, dma);
+#elif defined(ENABLE_DMABUF_KERNEL)
+	return ocs_dma_free_kernel(os, dma);
+#else
+	ocs_log_err(os, "Unsupported\n");
+	return -1;
+#endif
+}
+
+int32_t
+ocs_dma_free_unbound(ocs_dma_t *dma)
+{
+	return ocs_dma_free(NULL, dma);
 }

@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,11 +46,23 @@ typedef enum {
 	OCS_ELS_ROLE_RESPONDER,
 } ocs_els_role_e;
 
+typedef struct ocs_tdz_req_info_s {
+	uint16_t cmd_code;
+	size_t	 cmd_req_size;
+	size_t	 cmd_rsp_size;
+	ocs_tdz_peer_zone_info_t zone_info;
+} ocs_tdz_req_info_t;
+
 typedef struct ocs_fdmi_get_cmd_req_info_s {
 	size_t	 ct_cmd_req_size;
 	uint64_t identifier;
 	uint16_t cmd_code;
 } ocs_fdmi_get_cmd_req_info_t;
+
+typedef struct ocs_ganxt_get_cmd_req_info_s {
+	size_t	 ct_cmd_req_size;
+	uint32_t port_id;
+} ocs_ganxt_get_cmd_req_info_t;
 
 #define OCS_RDP_RJT		1
 #define OCS_RDP_RJT_NO_LOGIN	2
@@ -70,15 +84,37 @@ typedef struct ocs_rdp_context {
 #define OCS_TRANSGRESSION_LOW_TXPOWER          0x0001
 #define OCS_TRANSGRESSION_HIGH_RXPOWER         0x8000
 #define OCS_TRANSGRESSION_LOW_RXPOWER          0x4000
-        uint16_t sfp_alarm;
-        uint16_t sfp_warning;
-        uint8_t page_a0[SFP_PAGE_SIZE];
-        uint8_t page_a2[SFP_PAGE_SIZE];
+	uint16_t sfp_alarm;
+	uint16_t sfp_warning;
+	uint8_t page_a0[SFP_PAGE_A0_SIZE];
+	uint8_t page_a2[SFP_PAGE_A2_SIZE];
 	int	status;	/*mbox status*/
 } ocs_rdp_context_t;
 
+typedef struct ocs_lcb_ctx_s {
+	ocs_io_t *io;
+	uint16_t ox_id;
+	uint16_t rx_id;
+	uint32_t s_id;
+	uint32_t d_id;
+	uint8_t sub_cmd;
+	uint8_t capability;
+	uint8_t cmd_status;
+	uint8_t frequency;
+	uint16_t duration;
+} ocs_lcb_ctx_t;
+
+typedef struct ocs_discover_target_ctx {
+	uint32_t index;
+	char	 *gidpt;
+	uint32_t gidpt_len;
+	uint32_t port_id;
+	bool stop_discovery;
+} ocs_discover_target_ctx_t;
+
 extern ocs_io_t *ocs_els_io_alloc(ocs_node_t *node, uint32_t reqlen, ocs_els_role_e role);
 extern ocs_io_t *ocs_els_io_alloc_size(ocs_node_t *node, uint32_t reqlen, uint32_t rsplen, ocs_els_role_e role);
+extern void ocs_els_io_update_ls_rsp_params(ocs_io_t *els, fc_header_t *hdr, void *payload);
 extern void ocs_els_io_free(ocs_io_t *els);
 extern void ocs_els_io_send(ocs_io_t *els);
 
@@ -93,27 +129,34 @@ extern ocs_io_t *ocs_send_logo(ocs_node_t *node, uint32_t timeout_sec, uint32_t 
 extern ocs_io_t *ocs_send_adisc(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_send_pdisc(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_send_scr(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
+extern ocs_io_t *ocs_send_rdf(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_send_rrq(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_ns_send_rftid(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_ns_send_rffid(ocs_node_t *node, uint8_t fc_type, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
+extern ocs_io_t *ocs_ns_send_gffid(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg, uint32_t port_id);
 extern ocs_io_t *ocs_ns_send_ganxt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg, uint32_t port_id);
 extern ocs_io_t *ocs_ns_send_gidpt(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
 extern ocs_io_t *ocs_ns_send_loopback_frame(ocs_node_t *node, void *buf, uint32_t size, void *rx_buf, uint32_t rx_buf_size,
 					uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
-extern ocs_io_t *ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries, els_cb_t cb, void *cbarg);
-extern ocs_io_t *ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
-				        uint32_t retries, els_cb_t cb, void *cbarg);
-extern ocs_io_t *
-ocs_fdmi_send_dereg_cmd(ocs_node_t *node, uint16_t dereg_code, uint32_t timeout_sec,
-                  uint32_t retries, els_cb_t cb, void *cbarg);
-extern ocs_io_t *ocs_fdmi_send_grhl(ocs_node_t *node, uint32_t timeout_sec,
-				    uint32_t retries, els_cb_t cb, void *cbarg);
-extern ocs_io_t *ocs_fdmi_send_get_cmd(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
-				els_cb_t cb, void *cbarg, ocs_fdmi_get_cmd_req_info_t *);
-extern int
-ocs_fdmi_get_cmd(ocs_sport_t *sport, els_cb_t cb, void *cb_arg,
-		 ocs_fdmi_get_cmd_req_info_t *fdmi_cmd_req);
 
+extern ocs_io_t *ocs_tdz_send_cmd(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
+				  els_cb_t cb, void *cbarg, ocs_tdz_req_info_t *tdz_req);
+extern int ocs_tdz_issue_fabric_cmd(ocs_sport_t *sport, els_cb_t cb, ocs_tdz_rsp_info_t *tdz_rsp,
+				    ocs_tdz_req_info_t *tdz_req);
+
+extern ocs_io_t *ocs_fdmi_send_rhba(ocs_node_t *node, uint32_t timeout_sec,
+				    uint32_t retries, els_cb_t cb, void *cbarg);
+extern ocs_io_t *ocs_fdmi_send_dereg_cmd(ocs_node_t *node, uint16_t dereg_code, uint32_t timeout_sec,
+					 uint32_t retries, els_cb_t cb, void *cbarg);
+extern ocs_io_t *ocs_fdmi_send_reg_port(ocs_node_t *node, int req_code, uint32_t timeout_sec,
+					uint32_t retries, els_cb_t cb, void *cbarg);
+extern ocs_io_t *ocs_fdmi_send_get_cmd(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
+					els_cb_t cb, void *cbarg, ocs_fdmi_get_cmd_req_info_t *req_info);
+extern int ocs_fdmi_get_cmd(ocs_sport_t *sport, els_cb_t cb, ocs_fdmi_get_cmd_results_t *cb_arg,
+			    ocs_fdmi_get_cmd_req_info_t *fdmi_cmd_req);
+
+extern int ocs_ganxt_get_cmd(ocs_sport_t *sport, els_cb_t cb, ocs_ganxt_get_cmd_results_t *cb_arg,
+			    ocs_ganxt_get_cmd_req_info_t *ganxt_cmd_req);
 extern ocs_io_t *ocs_send_rscn(ocs_node_t *node, uint32_t timeout_sec, uint32_t retries,
 	void *port_ids, uint32_t port_ids_count, els_cb_t cb, void *cbarg);
 extern void ocs_els_io_cleanup(ocs_io_t *els, ocs_sm_event_t node_evt, void *arg);
@@ -132,6 +175,7 @@ extern ocs_io_t *ocs_send_adisc_acc(ocs_io_t *io, uint32_t ox_id, els_cb_t cb, v
 extern void ocs_rdp_defer_response(ocs_t *ocs, fc_header_t *hdr, uint32_t fcfi);
 extern void ocs_send_rdp_resp(ocs_node_t *node, ocs_rdp_context_t *rdp_context, int status);
 extern void ocs_ddump_els(ocs_textbuf_t *textbuf, ocs_io_t *els);
+extern ocs_io_t *ocs_bls_send_rjt(ocs_io_t *io, uint32_t s_id, uint16_t ox_id, uint16_t rx_id);
 
 /* BLS acc send */
 extern ocs_io_t *ocs_bls_send_acc_hdr(ocs_io_t *io, fc_header_t *hdr);
@@ -139,7 +183,7 @@ extern ocs_io_t *ocs_bls_send_acc_hdr(ocs_io_t *io, fc_header_t *hdr);
 extern ocs_io_t *ocs_bls_send_rjt_hdr(ocs_io_t *io, fc_header_t *hdr);
 
 /* ELS IO state machine */
-extern void ocs_els_post_event(ocs_io_t *els, ocs_sm_event_t evt, void *data);
+extern int ocs_els_post_event(ocs_io_t *els, ocs_sm_event_t evt, bool dont_block, void *data);
 extern void *__ocs_els_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 extern void *__ocs_els_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
 extern void *__ocs_els_wait_resp(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg);
@@ -157,5 +201,28 @@ extern int32_t ocs_els_io_list_empty(ocs_node_t *node, ocs_list_t *list);
 extern int32_t ocs_send_ct_rsp(ocs_io_t *io, uint32_t ox_id, fcct_iu_header_t *ct_hdr, uint32_t cmd_rsp_code, uint32_t reason_code, uint32_t reason_code_explanation);
 
 int32_t ocs_first_burst_enabled(ocs_t *ocs);
+
+extern void ocs_els_process_fpin_rcvd(ocs_node_t *node, ocs_node_cb_t *cbdata);
+extern void ocs_els_process_lcb_rcvd(ocs_node_t *node, ocs_node_cb_t *cbdata);
+extern int ocs_els_fpin_send_li(ocs_node_t *node, ocs_fpin_evt_args_t *desc_args);
+
+typedef struct ocs_tdz_cmd_args_s {
+	els_cb_t cb;
+	ocs_tdz_rsp_info_t *cb_arg;
+	ocs_tdz_req_info_t *tdz_req;
+} ocs_tdz_cmd_args_t;
+
+typedef struct ocs_fdmi_get_cmd_args_s {
+	els_cb_t cb;
+	ocs_fdmi_get_cmd_results_t *cb_arg;
+	ocs_fdmi_get_cmd_req_info_t *fdmi_cmd_req;
+} ocs_fdmi_get_cmd_args_t;
+
+typedef struct ocs_ganxt_get_cmd_args_s {
+	els_cb_t cb;
+	ocs_ganxt_get_cmd_results_t *cb_arg;
+	ocs_ganxt_get_cmd_req_info_t *ganxt_cmd_req;
+} ocs_ganxt_get_cmd_args_t;
+
 
 #endif // __OCS_ELS_H__

@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -47,9 +49,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
-#include <sys/uio.h>
 
-#include <sys/types.h>
+#include <sys/uio.h>
 #include <netdb.h>
 
 #include "ocs_socket.h"
@@ -76,6 +77,7 @@ void _errprintf(char *fmt, ...)
 	vprintf(fmt, ap);
 	va_end(ap);
 }
+
 #define ENABLE_ERROR_PRINTF	1
 #if ENABLE_ERROR_PRINTF
 #define errprintf(fmt, ...) _errprintf("Error: %s:" fmt, __func__, ##__VA_ARGS__)
@@ -241,7 +243,7 @@ int ocs_skt_wait(ocs_skt_node_t *node, ocs_skt_node_t *client)
 
 		return -1;
 	}
-	strcpy(client->ipaddr, "<unknown>");
+	strncpy(client->ipaddr, "<unknown>", sizeof(client->ipaddr));
 	if (ss_addr.sa_family == AF_INET) {
 		struct sockaddr_in *in = (struct sockaddr_in*) &ss_addr;
 
@@ -559,6 +561,7 @@ int ocs_skt_str_write(ocs_skt_node_t *node, uint32_t flags, char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
+
 	trace("%s\n", buf);
 	return ocs_skt_write(node, buf, strlen(buf) + 1, flags);
 }

@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -87,6 +89,17 @@ ocs_scsi_ini_io_exit(ocs_io_t *io)
 	return 0;
 }
 
+/**
+ * @brief Check Scsi_Host midlayer registered
+ *
+ * @param Pointer to OCS context
+ *
+ * @return returns TRUE if Scsi_Host ml is registered, otherwise FALSE.
+ */
+int32_t ocs_scsi_host_ml_registered(ocs_t *ocs)
+{
+	return FALSE;
+}
 
 /**
  * @brief initiator client exit
@@ -249,13 +262,12 @@ int32_t ocs_scsi_new_target(ocs_node_t *node)
  * This function is only called if the base driver is enabled for target capability.
  *
  * @param node pointer node being deleted
- * @param reason reason for deleting the target
  *
  * @return Returns OCS_SCSI_CALL_ASYNC if target delete is queued for async completion
  * and OCS_SCSI_CALL_COMPLETE if call completed or error.
  *
  */
-int32_t ocs_scsi_del_target(ocs_node_t *node, ocs_scsi_del_target_reason_e reason)
+int32_t ocs_scsi_del_target(ocs_node_t *node)
 {
 	ocs_assert(node, OCS_SCSI_CALL_COMPLETE);
 	ocs_assert(node->ocs, OCS_SCSI_CALL_COMPLETE);

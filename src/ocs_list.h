@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,7 +75,6 @@ extern void _ocs_list_assertmsg(const char *label, const char *filename, int lin
  * when ocs_list_t is used as a link (ocs_list_link_t).
  *
  */
-
 typedef struct ocs_list_s ocs_list_t;
 struct ocs_list_s {
 	ocs_list_magic_decl			/*<< used if debugging is enabled */
@@ -111,7 +112,6 @@ _ocs_list_init(ocs_list_t *list, uint32_t offset)
 	list->offset = offset;
 }
 #define ocs_list_init(head, type, link)		_ocs_list_init(head, offsetof(type, link))
-
 
 /**
  * @ingroup os
@@ -251,7 +251,6 @@ ocs_list_add_head(ocs_list_t *list, void *item)
 	_ocs_list_insert_link(list, list->next, item2link(list, item));
 }
 
-
 /**
  * @ingroup os
  * @brief Add an item to the tail of the list
@@ -279,7 +278,6 @@ ocs_list_add_tail(ocs_list_t *list, void *item)
 	_ocs_list_insert_link(list->prev, list, link);
 }
 
-
 /**
  * @ingroup os
  * @brief Return the first item in the list
@@ -298,7 +296,7 @@ ocs_list_get_head(ocs_list_t *list)
 
 /**
  * @ingroup os
- * @brief Return the first item in the list
+ * @brief Return the last item in the list
  *
  * @param list head of the list
  *
@@ -306,21 +304,6 @@ ocs_list_get_head(ocs_list_t *list)
  */
 static inline void *
 ocs_list_get_tail(ocs_list_t *list)
-{
-	ocs_list_assert(list, NULL);
-	ocs_list_assert(list->magic == OCS_LIST_LIST_MAGIC, NULL);
-	return ocs_list_empty(list) ? NULL : link2item(list, list->prev);
-}
-
-/**
- * @ingroup os
- * @brief Return the last item in the list
- *
- * @param list Pointer to list head
- *
- * @return pointer to the last item, NULL otherwise
- */
-static inline void *ocs_list_tail(ocs_list_t *list)
 {
 	ocs_list_assert(list, NULL);
 	ocs_list_assert(list->magic == OCS_LIST_LIST_MAGIC, NULL);
@@ -340,7 +323,6 @@ static inline void *ocs_list_next(ocs_list_t *list, void *item)
 {
 	ocs_list_t *link;
 
-	//TODO: this is needed, not sure why
 	if (item == NULL) {
 		return NULL;
 	}
@@ -391,6 +373,7 @@ static inline void *ocs_list_remove(ocs_list_t *list, void *item)
 	if (item == NULL) {
 		return NULL;
 	}
+
 	ocs_list_assert(list, NULL);
 	ocs_list_assert(list->magic == OCS_LIST_LIST_MAGIC, NULL);
 
@@ -424,7 +407,6 @@ static inline void *ocs_list_remove(ocs_list_t *list, void *item)
 
  * @return none
  */
-
 #define ocs_list_foreach(list, item) \
 	for (item = ocs_list_get_head((list)); item; item = ocs_list_next((list), item) )
 
@@ -442,7 +424,6 @@ static inline void *ocs_list_remove(ocs_list_t *list, void *item)
  *
  * @return none
  */
-
 #define ocs_list_foreach_safe(list, item, nxt) \
 	for (item = ocs_list_get_head(list), nxt = item ? ocs_list_next(list, item) : NULL; item; \
 		item = nxt, nxt = ocs_list_next(list, item))
@@ -517,8 +498,6 @@ ocs_list_on_list(ocs_list_link_t *link)
  * <br><br>
  * </div><!-- overview -->
  */
-
-
 
 /**
  * @page uspace_linux_os_overview OS APIs

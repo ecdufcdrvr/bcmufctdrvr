@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -77,11 +79,13 @@
 #define OCS_HAL_DMTF_CLP_CMD_MAX	256
 #define OCS_HAL_DMTF_CLP_RSP_MAX	256
 
+/* max timeout b/w ABORT WQE vs completions */
+#define OCS_HAL_ABORT_WQE_TIMEOUT	50
+
 /* HAL global data */
 ocs_hal_global_t hal_global;
 
 static void ocs_hal_queue_hash_add(ocs_queue_hash_t *, uint16_t, uint16_t);
-static void ocs_hal_adjust_wqs(ocs_hal_t *hal);
 static uint32_t ocs_hal_get_num_chutes(ocs_hal_t *hal);
 static int32_t ocs_hal_cb_link(void *, void *);
 static int32_t ocs_hal_cb_fip(void *, void *);
@@ -93,11 +97,9 @@ static int32_t ocs_hal_cb_node_free(ocs_hal_t *, int32_t, uint8_t *, void *);
 static int32_t ocs_hal_cb_unreg_rpi_all(ocs_hal_t *, int32_t, uint8_t *, void *);
 static ocs_hal_rtn_e ocs_hal_setup_io(ocs_hal_t *);
 static ocs_hal_rtn_e ocs_hal_init_io(ocs_hal_t *);
-static int32_t ocs_hal_command_cancel(ocs_hal_t *);
 static void ocs_hal_io_quarantine(ocs_hal_t *hal, hal_wq_t *wq, ocs_hal_io_t *io);
 static void ocs_hal_io_restore_sgl(ocs_hal_t *, ocs_hal_io_t *);
 static int32_t ocs_hal_io_ini_sge(ocs_hal_t *, ocs_hal_io_t *, ocs_dma_t *, uint32_t, ocs_dma_t *);
-static ocs_hal_rtn_e ocs_hal_firmware_write_lancer(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg);
 static int32_t ocs_hal_cb_fw_write(ocs_hal_t *, int32_t, uint8_t *, void  *);
 static int32_t ocs_hal_cb_sfp(ocs_hal_t *, int32_t, uint8_t *, void  *);
 static int32_t ocs_hal_cb_temp(ocs_hal_t *, int32_t, uint8_t *, void  *);
@@ -111,7 +113,7 @@ static void ocs_hal_linkcfg_dmtf_clp_cb(ocs_hal_t *hal, int32_t status, uint32_t
 
 static int32_t __ocs_read_topology_cb(ocs_hal_t *, int32_t, uint8_t *, void *);
 static int32_t __ocs_read_fec_cb(ocs_hal_t *, int32_t, uint8_t *, void *);
-static ocs_hal_rtn_e ocs_hal_get_linkcfg(ocs_hal_t *, uint32_t, ocs_hal_port_control_cb_t, void *);
+static void ocs_hal_get_linkcfg(ocs_hal_t *, uint32_t, ocs_hal_port_control_cb_t, void *);
 static ocs_hal_rtn_e ocs_hal_get_linkcfg_lancer(ocs_hal_t *, uint32_t, ocs_hal_port_control_cb_t, void *);
 static ocs_hal_rtn_e ocs_hal_get_linkcfg_skyhawk(ocs_hal_t *, uint32_t, ocs_hal_port_control_cb_t, void *);
 static ocs_hal_rtn_e ocs_hal_set_linkcfg(ocs_hal_t *, ocs_hal_linkcfg_e, uint32_t, ocs_hal_port_control_cb_t, void *);
@@ -136,8 +138,6 @@ static ocs_hal_rtn_e ocs_hal_config_fec(ocs_hal_t *hal, uint8_t enable);
 static int32_t ocs_hal_cb_host_stat(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void  *arg);
 static void __ocs_hal_read_lmt_cb(ocs_hal_t *, int32_t, uint8_t *, void *);
 static ocs_hal_rtn_e ocs_hal_config_fw_ag_rsp(ocs_hal_t *hal, uint8_t enable);
-static ocs_hal_rtn_e ocs_hal_exec_mbx_command_generic_results(ocs_hal_t *hal, uint8_t *req_rsp_buf,
-							      bool handle_sli4_rsp, int timeout_usecs);
 
 /* HAL domain database operations */
 static int32_t ocs_hal_domain_add(ocs_hal_t *, ocs_domain_t *);
@@ -166,20 +166,29 @@ static void ocs_hal_check_sec_hio_list(ocs_hal_t *hal);
 
 /* WQE timeouts */
 static void target_wqe_timer_cb(void *arg);
-static void shutdown_target_wqe_timer(ocs_hal_t *hal);
+static void ocs_hal_remove_io_abort_wqe(ocs_hal_io_t *io);
 
 /* Adapter firmware diagnostic logging (RAS) */
 static ocs_hal_rtn_e ocs_hal_config_fw_diagnostic_logging(ocs_hal_t *hal, int32_t log_size, int32_t log_level);
 static ocs_hal_rtn_e ocs_hal_teardown_fw_diagnostic_logging(ocs_hal_t *hal);
 static ocs_hal_rtn_e ocs_hal_config_set_dual_dump(ocs_hal_t *hal);
 
+int32_t
+ocs_hal_wait_for_fw_ready(ocs_hal_t *hal)
+{
+	return sli_wait_for_fw_ready(&hal->sli, SLI4_FW_READY_TIMEOUT_MSEC);
+}
+
 static void
 ocs_hal_log_sli4_rsp_hdr(ocs_hal_t *hal, sli4_res_hdr_t *hdr)
 {
-	ocs_log_err(hal->os, "SLI4_RSP: cmd_opcode: %#x, cmd_subsystem: %#x, status: %#x, addl_status: %#x\n",
-		    hdr->opcode, hdr->subsystem, hdr->status, hdr->additional_status);
-	ocs_log_err(hal->os, "          %08X %08X %08X %08X\n", ((uint32_t *)hdr)[0],
-		    ((uint32_t *)hdr)[1], ((uint32_t *)hdr)[2], ((uint32_t *)hdr)[3]);
+	if (hdr->opcode != SLI4_OPC_COMMON_READ_TRANSCEIVER_DATA ||
+	    hdr->status != SLI4_MGMT_STATUS_COMMAND_NOT_SUPPORTED) {
+		ocs_log_err(hal->os, "SLI4_RSP: cmd_opcode: %#x, cmd_subsystem: %#x, status: %#x, addl_status: %#x\n",
+			    hdr->opcode, hdr->subsystem, hdr->status, hdr->additional_status);
+		ocs_log_err(hal->os, "          %08X %08X %08X %08X\n", ((uint32_t *)hdr)[0],
+			    ((uint32_t *)hdr)[1], ((uint32_t *)hdr)[2], ((uint32_t *)hdr)[3]);
+	}
 }
 
 static ocs_hal_rtn_e
@@ -311,55 +320,36 @@ ocs_hal_init_tow_feature(ocs_hal_t *hal)
 static inline void
 ocs_hal_add_io_timed_wqe(ocs_hal_t *hal, ocs_hal_io_t *io)
 {
+	ocs_hal_wq_ctx_t *ctx = ocs_hal_get_wq_ctx(hal, io->wq);
+
 	if (hal->config.emulate_tgt_wqe_timeout && io->tgt_wqe_timeout) {
 		/*
 		 * Active WQE list currently only used for
 		 * target WQE timeouts.
 		 */
-		ocs_lock(&hal->io_timed_wqe_lock);
-			if (OCS_HAL_ELS_REQ == io->type) {
-				ocs_list_add_head(&hal->io_timed_wqe, io);
-			} else {
-				ocs_list_add_tail(&hal->io_timed_wqe, io);
-			}
+		ocs_lock(&ctx->io_timed_wqe_lock);
+			ocs_list_add_tail(&ctx->io_timed_wqe, io);
 			io->submit_ticks = ocs_get_os_ticks();
-		ocs_unlock(&hal->io_timed_wqe_lock);
+		ocs_unlock(&ctx->io_timed_wqe_lock);
 	}
 }
 
 static inline void
 ocs_hal_remove_io_timed_wqe(ocs_hal_t *hal, ocs_hal_io_t *io)
 {
-	if (hal->config.emulate_tgt_wqe_timeout) {
+	if (hal->config.emulate_tgt_wqe_timeout && io->wq) {
+
+		ocs_hal_wq_ctx_t *ctx = ocs_hal_get_wq_ctx(hal, io->wq);
+
 		/*
 		 * If target wqe timeouts are enabled,
 		 * remove from active wqe list.
 		 */
-		ocs_lock(&hal->io_timed_wqe_lock);
-			if (ocs_list_on_list(&io->wqe_link) && !ocs_list_empty(&hal->io_timed_wqe))
-				ocs_list_remove(&hal->io_timed_wqe, io);
-		ocs_unlock(&hal->io_timed_wqe_lock);
+		ocs_lock(&ctx->io_timed_wqe_lock);
+			if (ocs_list_on_list(&io->wqe_link) && !ocs_list_empty(&ctx->io_timed_wqe))
+				ocs_list_remove(&ctx->io_timed_wqe, io);
+		ocs_unlock(&ctx->io_timed_wqe_lock);
 	}
-}
-
-static bool
-ocs_hal_io_can_post_abts(int32_t status, uint32_t ext_status)
-{
-	if (SLI4_FC_WCQE_STATUS_LOCAL_REJECT == status) {
-		switch (ext_status) {
-			case SLI4_FC_LOCAL_REJECT_LINK_DOWN:
-			case SLI4_FC_LOCAL_REJECT_RPI_SUSPENDED:
-				/*
-				 * WQE failed because link went down. Depending on the timing, FW will complete
-				 * all pending WQEs with extended status as either RPI_SUSPENDED or LINK_DOWN.
-				 */
-				return FALSE;
-			default:
-				break;
-		}
-	}
-
-	return TRUE;
 }
 
 /**
@@ -587,6 +577,58 @@ free_queue_hash:
 	return OCS_HAL_RTN_NO_MEMORY;
 }
 
+ocs_hal_rtn_e
+ocs_hal_setup_queue_topology(ocs_hal_t *hal, const char *queue_topology)
+{
+	ocs_strncpy(hal->config.queue_topology, queue_topology, sizeof(hal->config.queue_topology));
+	hal->config.n_wq = OCS_HAL_DEF_NUM_WQ;
+
+	hal->qtop = ocs_hal_qtop_parse(hal, hal->config.queue_topology);
+	if (hal->qtop == NULL) {
+		ocs_log_crit(hal->os, "Queue topology string is invalid\n");
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	hal->config.n_eq = hal->qtop->entry_counts[QTOP_EQ];
+	hal->config.n_cq = hal->qtop->entry_counts[QTOP_CQ];
+	hal->config.n_rq = hal->qtop->entry_counts[QTOP_RQ];
+	hal->config.n_wq = hal->qtop->entry_counts[QTOP_WQ];
+	hal->config.n_mq = hal->qtop->entry_counts[QTOP_MQ];
+
+	/* Verify qtop configuration against driver supported configuration */
+	if ((hal->config.n_rq < OCS_HAL_MIN_NUM_RQ) || (hal->config.n_rq > OCS_HAL_MAX_NUM_RQ)) {
+		ocs_log_crit(hal->os, "Num supported RQs (min, max) = (%d, %d)\n",
+			     OCS_HAL_MIN_NUM_RQ, OCS_HAL_MAX_NUM_RQ);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	if ((hal->config.n_eq < OCS_HAL_MIN_NUM_EQ) || (hal->config.n_eq > OCS_HAL_MAX_NUM_EQ)) {
+		ocs_log_crit(hal->os, "Num supported EQs (min, max) = (%d, %d)\n",
+			     OCS_HAL_MIN_NUM_EQ, OCS_HAL_MAX_NUM_EQ);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	if ((hal->config.n_cq < OCS_HAL_MIN_NUM_CQ) || (hal->config.n_cq > OCS_HAL_MAX_NUM_CQ)) {
+		ocs_log_crit(hal->os, "Num supported CQs (min, max) = (%d, %d)\n",
+			     OCS_HAL_MIN_NUM_CQ, OCS_HAL_MAX_NUM_CQ);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	if ((hal->config.n_wq < OCS_HAL_MIN_NUM_WQ) || (hal->config.n_wq > OCS_HAL_MAX_NUM_WQ)) {
+		ocs_log_crit(hal->os, "Num supported WQs (min, max) = (%d, %d)\n",
+			     OCS_HAL_MIN_NUM_WQ, OCS_HAL_MAX_NUM_WQ);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	if ((hal->config.n_mq < OCS_HAL_MIN_NUM_MQ) || (hal->config.n_mq > OCS_HAL_MAX_NUM_MQ)) {
+		ocs_log_crit(hal->os, "Num supported MQs (min, max) = (%d, %d)\n",
+			     OCS_HAL_MIN_NUM_MQ, OCS_HAL_MAX_NUM_MQ);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	return OCS_HAL_RTN_SUCCESS;
+}
+
 /**
  * @ingroup devInitShutdown
  * @brief Set up the Hardware Abstraction Layer module.
@@ -606,6 +648,7 @@ ocs_hal_rtn_e
 ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 {
 	uint32_t i;
+	char prop_buf[32];
 
 	if (hal == NULL) {
 		ocs_log_err(os, "bad parameter(s) hal=%p\n", hal);
@@ -633,9 +676,14 @@ ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 
 	ocs_sem_init(&hal->bmbx_sem, 1, "hal_bmbx_sem");
 
-	ocs_lock_init(hal->os, &hal->io_lock, "HAL_io_lock[%d]", ocs_instance(hal->os));
-	ocs_lock_init(hal->os, &hal->io_timed_wqe_lock, "HAL_io_timed_wqe_lock[%d]", ocs_instance(hal->os));
-	ocs_lock_init(hal->os, &hal->cmd_lock, "HAL_cmd_lock[%d]", ocs_instance(hal->os));
+	ocs_lock_init(hal->os, &hal->io_lock, OCS_LOCK_ORDER_HAL_IO, "HAL_io_lock[%d]", ocs_instance(hal->os));
+
+	for (i = 0; i < OCS_HAL_WQ_CTX_NUM; i++)
+		ocs_lock_init(hal->os, &hal->wq_ctx[i].io_timed_wqe_lock, OCS_LOCK_ORDER_IO_TIMED_WQE,
+				"HAL_io_timed_wqe_lock[%d:%d]", ocs_instance(hal->os), i);
+
+	ocs_lock_init(hal->os, &hal->abort_io_timed_wqe_lock, OCS_LOCK_ORDER_ABORT_IO_TIMED_WQE, "HAL_abort_io_timed_wqe_lock[%d]", ocs_instance(hal->os));
+	ocs_lock_init(hal->os, &hal->cmd_lock, OCS_LOCK_ORDER_HAL_CMD, "HAL_cmd_lock[%d]", ocs_instance(hal->os));
 	ocs_list_init(&hal->cmd_head, ocs_command_ctx_t, link);
 	ocs_list_init(&hal->cmd_pending, ocs_command_ctx_t, link);
 	hal->cmd_head_count = 0;
@@ -648,6 +696,10 @@ ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 	hal->config.tow_ref_tag_lba = OCS_HAL_TOW_REF_TAG_LBA_DEFAULT;
 	hal->config.tow_app_tag_valid = OCS_HAL_TOW_APP_TAG_VALID_DEFAULT;
 	hal->config.tow_app_tag_value = OCS_HAL_TOW_APP_TAG_VALUE_DEFAULT;
+
+	if (ocs_get_property("cq_process_max_time_msec", prop_buf, sizeof(prop_buf)) == 0) {
+		hal->cq_process_max_time_msec = ocs_strtoul(prop_buf, 0, 0);
+	}
 
 	/* Allocate storage for SLI queue objects */
 	if (ocs_hal_sli_queue_alloc(hal)) {
@@ -686,7 +738,6 @@ ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 	 * The RQ assignment for RQ pair mode.
 	 */
 	hal->config.rq_default_buffer_size = OCS_HAL_RQ_SIZE_PAYLOAD;
-	hal->config.n_io = sli_get_max_rsrc(&hal->sli, SLI_RSRC_FCOE_XRI);
 
 	/* by default, enable initiator-only auto-ABTS emulation */
 	hal->config.i_only_aab = TRUE;
@@ -704,9 +755,6 @@ ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 	    (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(&hal->sli))) {
 		(void)ocs_hal_read_max_dump_size(hal);
 	}
-
-	/* calculate the number of WQs required. */
-	ocs_hal_adjust_wqs(hal);
 
 	/* Set the default dif mode */
 	if (!sli_is_dif_inline_capable(&hal->sli)) {
@@ -746,55 +794,20 @@ ocs_hal_setup(ocs_hal_t *hal, ocs_os_handle_t os, sli4_port_type_e port_type)
 	}
 	ocs_log_debug(hal->os, "ulp_start %d, ulp_max %d\n",
 		hal->ulp_start, hal->ulp_max);
-	hal->config.queue_topology = hal_global.queue_topology_string;
 
-	hal->qtop = ocs_hal_qtop_parse(hal, hal->config.queue_topology);
-	if (hal->qtop == NULL) {
-		ocs_log_crit(hal->os, "Queue topology string is invalid\n");
+	if (ocs_hal_setup_queue_topology(hal, ((ocs_t *)hal->os)->queue_topology) != OCS_HAL_RTN_SUCCESS) {
+		ocs_log_err(hal->os, "Failed to parse queue_topology\n");
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	hal->config.n_eq = hal->qtop->entry_counts[QTOP_EQ];
-	/* One addl. CQ is reserved for ELS IO */
-	hal->config.n_cq = hal->qtop->entry_counts[QTOP_CQ] + 1;
-	hal->config.n_rq = hal->qtop->entry_counts[QTOP_RQ];
-	/* One addl. WQ is reserved for ELS IO */
-	hal->config.n_wq = hal->qtop->entry_counts[QTOP_WQ] + 1;
-	hal->config.n_mq = hal->qtop->entry_counts[QTOP_MQ];
+	return OCS_HAL_RTN_SUCCESS;
+}
 
-	/* Verify qtop configuration against driver supported configuration */
-#if 0
-	/* TODO - Verify how to sanity check num rqs */
-	if (hal->config.n_rq > OCE_HAL_MAX_NUM_MRQ_PAIRS) {
-		ocs_log_crit(hal->os, "Max supported MRQ pairs = %d\n",
-			     OCE_HAL_MAX_NUM_MRQ_PAIRS);
+ocs_hal_rtn_e
+ocs_hal_xri_resource_reinit(ocs_hal_t *hal)
+{
+	if (sli_config_xri_resource_reinit(&hal->sli))
 		return OCS_HAL_RTN_ERROR;
-	}
-#endif
-
-	if (hal->config.n_eq > OCS_HAL_MAX_NUM_EQ) {
-		ocs_log_crit(hal->os, "Max supported EQs = %d\n",
-			     OCS_HAL_MAX_NUM_EQ);
-		return OCS_HAL_RTN_ERROR;
-	}
-	
-	if (hal->config.n_cq > OCS_HAL_MAX_NUM_CQ) {
-		ocs_log_crit(hal->os, "Max supported CQs = %d\n",
-			     OCS_HAL_MAX_NUM_CQ);
-		return OCS_HAL_RTN_ERROR;
-	}
-
-	if (hal->config.n_wq > OCS_HAL_MAX_NUM_WQ) {
-		ocs_log_crit(hal->os, "Max supported WQs = %d\n",
-			     OCS_HAL_MAX_NUM_WQ);
-		return OCS_HAL_RTN_ERROR;
-	}
-
-	if (hal->config.n_mq > OCS_HAL_MAX_NUM_MQ) {
-		ocs_log_crit(hal->os, "Max supported MQs = %d\n",
-			     OCS_HAL_MAX_NUM_MQ);
-		return OCS_HAL_RTN_ERROR;
-	}
 
 	return OCS_HAL_RTN_SUCCESS;
 }
@@ -809,22 +822,24 @@ ocs_hal_init_sli(ocs_hal_t *hal)
 	/* If MRQ is not required, make sure we dont request the feature */
 	if (hal->config.n_rq == 1)
 		features.flag.mrqp = false;
+	else
+		features.flag.mrqp = true;
 
 	features.flag.hlm = sli_get_hlm(&hal->sli);
 	features.flag.rxseq = false;
 	features.flag.rxri  = false;
 
-	if (sli_get_if_type(&hal->sli) == SLI4_IF_TYPE_LANCER_G7) {
+	if (sli_get_asic_type(&hal->sli) == SLI4_ASIC_TYPE_LANCERG7) {
 		uint32_t tow_feature;
 
 		/*
-		 * Prism A0 limitation:
-		 * Enable either TOW or VMID, but not both.
+		 * Prism A0 & B0 limitation: Support either TOW or VMID, but not both.
+		 * G6 & Prismplus has no such limitation.
 		 */
 		ocs_hal_get(hal, OCS_HAL_TOW_FEATURE, &tow_feature);
 		if (tow_feature) {
 			features.flag.ashdr = false;
-			ocs_log_info(hal->os, "Disable SLI ASHDR feature\n");
+			ocs_log_info(hal->os, "Disable SLI ASHDR (VMID) feature\n");
 		}
 	}
 
@@ -853,10 +868,12 @@ ocs_hal_init(ocs_hal_t *hal)
 {
 	ocs_hal_rtn_e	rc;
 	uint32_t	i = 0;
+	uint32_t 	max_hal_ios;
 	uint8_t		buf[SLI4_BMBX_SIZE];
 	uint32_t	max_rpi;
 	int		rem_count;
 	uint32_t	q_count = 0;
+	char		prop_buf[32];
 
 	/*
 	 * Make sure the command lists are empty. If this is start-of-day,
@@ -865,6 +882,8 @@ ocs_hal_init(ocs_hal_t *hal)
 	 * lists should have been cleaned up as part of the reset (ocs_hal_reset()).
 	 */
 	ocs_lock(&hal->cmd_lock);
+		hal->cmd_submission_disabled = false;
+
 		if (!ocs_list_empty(&hal->cmd_head)) {
 			ocs_log_test(hal->os, "command found on cmd list\n");
 			ocs_unlock(&hal->cmd_lock);
@@ -926,8 +945,12 @@ ocs_hal_init(ocs_hal_t *hal)
 	ocs_list_init(&hal->io_free, ocs_hal_io_t, link);
 	ocs_list_init(&hal->io_port_owned, ocs_hal_io_t, link);
 	ocs_list_init(&hal->io_wait_free, ocs_hal_io_t, link);
-	ocs_list_init(&hal->io_timed_wqe, ocs_hal_io_t, wqe_link);
+
+	for (i = 0; i < OCS_HAL_WQ_CTX_NUM; i++)
+		ocs_list_init(&hal->wq_ctx[i].io_timed_wqe, ocs_hal_io_t, wqe_link);
+
 	ocs_list_init(&hal->io_port_dnrx, ocs_hal_io_t, dnrx_link);
+	ocs_list_init(&hal->io_abort_wqe_list, ocs_hal_io_t, abort_wqe_link);
 
 	rc = ocs_hal_init_sli(hal);
 	if (rc) {
@@ -935,13 +958,21 @@ ocs_hal_init(ocs_hal_t *hal)
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	/* FW host logging feature is only supported for Lancer G6 or Prism */
+	/* FW host logging feature is only supported with LancerG6, Prism, Prismplus */
 	if (hal->sli.asic_type == SLI4_ASIC_TYPE_LANCERG6 ||
-	    hal->sli.asic_type == SLI4_ASIC_TYPE_LANCERG7) {
+	    hal->sli.asic_type == SLI4_ASIC_TYPE_LANCERG7 ||
+	    hal->sli.asic_type == SLI4_ASIC_TYPE_LANCERG7PLUS) {
 		if (ocs_hal_config_fw_diagnostic_logging(hal, hal_global.fw_diag_log_size,
 							 hal_global.fw_diag_log_level)) {
 			ocs_log_err(hal->os, "Failed to enable RAS firmware logging\n");
 		}
+	}
+
+	/* Update OCS_HAL_N_IO (hal->config.n_io) with SLI XRI resources on every reset */
+	ocs_hal_get(hal, OCS_HAL_MAX_IO, &max_hal_ios);
+	if (ocs_hal_set(hal, OCS_HAL_N_IO, max_hal_ios) != OCS_HAL_RTN_SUCCESS) {
+		ocs_log_err(hal->os, "HAL set number of HAL IOs failed\n");
+		return -1;
 	}
 
 	/*
@@ -1005,7 +1036,6 @@ ocs_hal_init(ocs_hal_t *hal)
 		ocs_hal_config_set_fdt_xfer_hint(hal, OCS_HAL_FDT_XFER_HINT);
 	}
 
-#if !defined(OCSU_FC_WORKLOAD)
 	/*
 	 * Set dump to host buffers every time when hal is reset
 	 */
@@ -1014,48 +1044,37 @@ ocs_hal_init(ocs_hal_t *hal)
 		ocs_log_err(hal->os, "Set FW dump location failed (rc: %d)\n", rc);
 		return rc;
 	}
-#endif
 
 	/*
 	 * Verify that we have not exceeded any queue sizes
 	 */
-	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_EQ),
-					OCS_HAL_MAX_NUM_EQ);
+	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_EQ), OCS_HAL_MAX_NUM_EQ);
 	if (hal->config.n_eq > q_count) {
-		ocs_log_err(hal->os, "requested %d EQ but %d allowed\n",
-			    hal->config.n_eq, q_count);
+		ocs_log_err(hal->os, "requested %d EQ but %d allowed\n", hal->config.n_eq, q_count);
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_CQ),
-					OCS_HAL_MAX_NUM_CQ);
+	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_CQ), OCS_HAL_MAX_NUM_CQ);
 	if (hal->config.n_cq > q_count) {
-		ocs_log_err(hal->os, "requested %d CQ but %d allowed\n",
-			    hal->config.n_cq, q_count);
+		ocs_log_err(hal->os, "requested %d CQ but %d allowed\n", hal->config.n_cq, q_count);
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_MQ),
-					OCS_HAL_MAX_NUM_MQ);
+	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_MQ), OCS_HAL_MAX_NUM_MQ);
 	if (hal->config.n_mq > q_count) {
-		ocs_log_err(hal->os, "requested %d MQ but %d allowed\n",
-			    hal->config.n_mq, q_count);
+		ocs_log_err(hal->os, "requested %d MQ but %d allowed\n", hal->config.n_mq, q_count);
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_RQ),
-					OCS_HAL_MAX_NUM_RQ);
+	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_RQ), OCS_HAL_MAX_NUM_RQ);
 	if (hal->config.n_rq > q_count) {
-		ocs_log_err(hal->os, "requested %d RQ but %d allowed\n",
-			    hal->config.n_rq, q_count);
+		ocs_log_err(hal->os, "requested %d RQ but %d allowed\n", hal->config.n_rq, q_count);
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_WQ),
-					OCS_HAL_MAX_NUM_WQ);
+	q_count = MIN(sli_get_max_queue(&hal->sli, SLI_QTYPE_WQ), OCS_HAL_MAX_NUM_WQ);
 	if (hal->config.n_wq > q_count) {
-		ocs_log_err(hal->os, "requested %d WQ but %d allowed\n",
-			    hal->config.n_wq, q_count);
+		ocs_log_err(hal->os, "requested %d WQ but %d allowed\n", hal->config.n_wq, q_count);
 		return OCS_HAL_RTN_ERROR;
 	}
 
@@ -1085,7 +1104,7 @@ ocs_hal_init(ocs_hal_t *hal)
 			ocs_dma_free(hal->os, &hal->rnode_mem);
 		}
 
-		if (ocs_dma_alloc(hal->os, &hal->rnode_mem, i, 4096)) {
+		if (ocs_dma_alloc(hal->os, &hal->rnode_mem, i, 4096, OCS_M_FLAGS_NONE)) {
 			ocs_log_err(hal->os, "remote node memory allocation failed\n");
 			return OCS_HAL_RTN_NO_MEMORY;
 		}
@@ -1252,10 +1271,17 @@ ocs_hal_init(ocs_hal_t *hal)
 	}
 
 	/* Set the DIF seed - only for lancer right now */
-	if (SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(&hal->sli) &&
-	    ocs_hal_set_dif_seed(hal) != OCS_HAL_RTN_SUCCESS) {
-		ocs_log_err(hal->os, "Failed to set DIF seed value (rc: %d)\n", rc);
-		return rc;
+	if (SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli)) &&
+	    sli_get_dif_capable(&hal->sli)) {
+		rc = ocs_hal_set_dif_seed(hal);
+		if (rc == OCS_HAL_RTN_NOT_SUPPORTED) {
+			ocs_log_warn(hal->os, "SLI port does not "
+				    "support DIF seed feature\n");
+		} else if (rc != OCS_HAL_RTN_SUCCESS) {
+			ocs_log_err(hal->os, "Failed to set "
+				    "DIF seed value (rc: %d)\n", rc);
+			return rc;
+		}
 	}
 
 	/* Set the DIF mode - skyhawk only */
@@ -1283,7 +1309,8 @@ ocs_hal_init(ocs_hal_t *hal)
 	 */
 	if (!hal->config.poll_mode) {
 		for (i = 0; i < hal->eq_count; i++) {
-			sli_queue_arm(&hal->sli, hal->eq[i], TRUE);
+			if (!hal->hal_eq[i]->nvmeq)
+				sli_queue_arm(&hal->sli, hal->eq[i], TRUE);
 		}
 	}
 
@@ -1327,13 +1354,28 @@ ocs_hal_init(ocs_hal_t *hal)
 	/* Initialize send frame frame sequence id */
 	ocs_atomic_init(&hal->send_frame_seq_id, 0);
 
-	/* Initilize inbound pending frames counter*/
+	/* Initilize inbound pending frames counter */
 	ocs_atomic_init(&hal->pend_frames_count, 0);
-	if (hal->watchdog_timeout) {
-		hal->watchdog_timer_disable = false;
-		ocs_setup_timer(hal->os, &hal->watchdog_timer, ocs_watchdog_timer,
-				hal, OCS_HAL_WATCHDOG_TIMER_DEFER_MSEC, false);
+
+	/* Initilize send frame request objects */
+	ocs_list_init(&hal->send_frame_wqe_list, ocs_hal_send_frame_context_t, link);
+	ocs_lock_init(hal->os, &hal->send_frame_wqe_lock, OCS_LOCK_ORDER_LAST, "send-frame-req-lock");
+
+	if (ocs_get_property("watchdog_timeout", prop_buf, sizeof(prop_buf)) == 0) {
+		hal->watchdog_timeout = ocs_strtoul(prop_buf, 0, 0);
+
+		if (hal->watchdog_timeout) {
+			ocs_log_info(hal->os, "Setup HAL WDT timer with timeout %d sec\n",
+				     hal->watchdog_timeout);
+			ocs_setup_timer(hal->os, &hal->watchdog_timer, ocs_watchdog_timer,
+					hal, OCS_HAL_WATCHDOG_TIMER_DEFER_MSEC, false);
+		}
 	}
+
+	/* Init rq marker objects */
+	ocs_list_init(&hal->rq_marker_list, ocs_hal_rq_marker_req_t, link);
+	hal->rq_marker_tag = 1;
+	ocs_lock_init(hal->os, &hal->rq_marker_lock, OCS_LOCK_ORDER_IGNORE, "rq-marker-lock");
 
 	return OCS_HAL_RTN_SUCCESS;
 }
@@ -1355,16 +1397,17 @@ ocs_hal_config_mrq(ocs_hal_t *hal, uint8_t mode, uint16_t vlanid, uint16_t fcf_i
 	hal_rq_t *rq;
 	sli4_cmd_reg_fcfi_mrq_t *rsp = NULL;
 	uint32_t i, j;
-	sli4_cmd_rq_cfg_t rq_filter[SLI4_CMD_REG_FCFI_NUM_RQ_CFG];
+	sli4_cmd_rq_cfg_t rq_filter[SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG];
 	int32_t rq_filter_cnt = 0;
 	int32_t rc;
 
+	ocs_memset(rq_filter, 0, sizeof(sli4_cmd_rq_cfg_t) * SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG);
 	if (mode == SLI4_CMD_REG_FCFI_SET_FCFI_MODE) {
 		goto issue_cmd;
 	}
 
 	/* Set the filter match/mask values from hal's filter_def values */
-	for (i = 0; i < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; i++) {
+	for (i = 0; i < SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG; i++) {
 		rq_filter[i].rq_id = 0xffff;
 		rq_filter[i].is_mrq = FALSE;
 		rq_filter[i].r_ctl_mask  = (uint8_t)  hal->config.filter_def[i];
@@ -1378,7 +1421,7 @@ ocs_hal_config_mrq(ocs_hal_t *hal, uint8_t mode, uint16_t vlanid, uint16_t fcf_i
 	/* Accumulate counts for each filter type used, build rq_ids[] list */
 	for (i = 0; i < hal->hal_rq_count; i++) {
 		rq = hal->hal_rq[i];
-		for (j = 0; j < SLI4_CMD_REG_FCFI_NUM_RQ_CFG; j++) {
+		for (j = 0; j < SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG; j++) {
 			if (rq->filter_mask & (1U << j)) {
 				if (rq_filter[j].rq_id != 0xffff) {
 					/* Already used. Bailout ifts not RQset case */
@@ -1398,10 +1441,7 @@ ocs_hal_config_mrq(ocs_hal_t *hal, uint8_t mode, uint16_t vlanid, uint16_t fcf_i
 
 						/* Protocol check is mandatory; this is Prism asic expectation */
 						rq_filter[j].protocol_valid = TRUE;
-						if (rq->policy == REG_FCFI_RQ_SELECTION_POLICY_FC_NVME)
-							rq_filter[j].protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_NVME;
-						else
-							rq_filter[j].protocol = REG_FCFI_RQ_CMD_PROTOCOL_TYPE_SCSI;
+						rq_filter[j].protocol = rq->protocol;
 					} else {
 						rq_filter[j].rq_id = rq->hdr->id;
 					}
@@ -1481,7 +1521,7 @@ ocs_hal_rtn_e
 ocs_hal_teardown(ocs_hal_t *hal)
 {
 	uint32_t	i = 0;
-	uint32_t	iters = 10;/*XXX*/
+	uint32_t	iters;
 	uint32_t	max_rpi;
 	uint32_t destroy_queues;
 	uint32_t free_memory;
@@ -1500,7 +1540,7 @@ ocs_hal_teardown(ocs_hal_t *hal)
 
 	/* Cancel watchdog timer if enabled */
 	if (hal->watchdog_timeout) {
-		hal->watchdog_timer_disable = true;
+		hal->watchdog_timeout = 0;
 		rc = ocs_hal_config_watchdog_timer(hal);
 		if (rc)
 			ocs_del_timer(&hal->watchdog_timer);
@@ -1517,9 +1557,10 @@ ocs_hal_teardown(ocs_hal_t *hal)
 
 		ocs_hal_flush(hal);
 
+		iters = OCS_HAL_MBOX_CMD_TIMEOUT / OCS_HAL_WAIT_DELAY_US;
 		/* If there are outstanding commands, wait for them to complete */
 		while (!ocs_list_empty(&hal->cmd_head) && iters) {
-			ocs_delay_usec(10000);
+			ocs_delay_usec(OCS_HAL_WAIT_DELAY_US);
 			ocs_hal_flush(hal);
 			iters--;
 		}
@@ -1536,10 +1577,8 @@ ocs_hal_teardown(ocs_hal_t *hal)
 		hal->state = OCS_HAL_STATE_TEARDOWN_IN_PROGRESS;
 	}
 
-#if !defined(OCSU_FC_WORKLOAD)
 	/* Clear the dump_to_host buffers */
 	ocs_hal_free_dump_to_host_buffers(hal);
-#endif
 
 	ocs_lock_free(&hal->cmd_lock);
 
@@ -1563,44 +1602,16 @@ ocs_hal_teardown(ocs_hal_t *hal)
 
 	ocs_dma_free(hal->os, &hal->rnode_mem);
 
-	if (hal->io) {
-		for (i = 0; i < hal->config.n_io; i++) {
-			if (!hal->io[i]) {
-				continue;
-			}
-
-			if (hal->io[i]->sgl && hal->io[i]->sgl->virt) {
-				if (hal->io[i]->is_port_owned) {
-					ocs_lock_free(&hal->io[i]->tow_lock);
-				}
-				ocs_dma_free(hal->os, hal->io[i]->sgl);
-			}
-
-			if (hal->xfer_rdy && hal->xfer_rdy[i].virt) {
-				ocs_dma_free(hal->os, &hal->xfer_rdy[i]);
-			}
-
-			ocs_lock_free(&hal->io[i]->lock);
-			ocs_free(hal->os, hal->io[i], sizeof(ocs_hal_io_t));
-			hal->io[i] = NULL;
-		}
-
-		ocs_free(hal->os, hal->wqe_buffs, hal->config.n_io * hal->sli.config.wqe_size);
-		hal->wqe_buffs = NULL;
-		ocs_free(hal->os, hal->io, hal->config.n_io * sizeof(ocs_hal_io_t *));
-		hal->io = NULL;
-	}
-
-	if (hal->xfer_rdy) {
-		ocs_free(hal->os, hal->xfer_rdy, hal->config.n_io * sizeof(ocs_dma_t));
-		hal->xfer_rdy = NULL;
-	}
+	ocs_hal_io_teardown(hal);
 
 	ocs_dma_free(hal->os, &hal->chip_dump_sges);
 	ocs_dma_free(hal->os, &hal->func_dump_sges);
 	ocs_dma_free(hal->os, &hal->loop_map);
 
-	ocs_lock_free(&hal->io_timed_wqe_lock);
+	for (i = 0; i < OCS_HAL_WQ_CTX_NUM; i++)
+		ocs_lock_free(&hal->wq_ctx[i].io_timed_wqe_lock);
+
+	ocs_lock_free(&hal->abort_io_timed_wqe_lock);
 	ocs_lock_free(&hal->io_lock);
 
 	for (i = 0; i < hal->wq_count; i++) {
@@ -1656,6 +1667,9 @@ ocs_hal_teardown(ocs_hal_t *hal)
 
 	/* free hal_wq_callback pool */
 	ocs_pool_free(hal->wq_reqtag_pool);
+
+	ocs_hal_assert(ocs_list_empty(&hal->rq_marker_list));
+	ocs_lock_free(&hal->rq_marker_lock);
 
 	/* Mark HAL setup as not having been called */
 	hal->hal_setup_called = FALSE;
@@ -1722,7 +1736,6 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 	ocs_hal_rtn_e	rc = OCS_HAL_RTN_SUCCESS;
 	ocs_hal_state_e	prev_state = hal->state;
 	uint32_t	destroy_queues, free_memory;
-	ocs_domain_t	*domain;
 	ocs_t		*ocs = (ocs_t *)hal->os;
 
 	if (hal->state != OCS_HAL_STATE_ACTIVE)
@@ -1743,7 +1756,7 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 
 	/* Cancel watchdog timer if enabled */
 	if (hal->watchdog_timeout) {
-		hal->watchdog_timer_disable = true;
+		hal->watchdog_timeout = 0;
 		rc = ocs_hal_config_watchdog_timer(hal);
 		if (rc)
 			ocs_del_timer(&hal->watchdog_timer);
@@ -1757,9 +1770,9 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 		 * then the FW will UE when the reset is issued. So attempt to complete
 		 * all mailbox commands.
 		 */
-		iters = 10;
+		iters = OCS_HAL_MBOX_CMD_TIMEOUT / OCS_HAL_WAIT_DELAY_US;
 		while (!ocs_list_empty(&hal->cmd_head) && iters) {
-			ocs_delay_usec(10000);
+			ocs_delay_usec(OCS_HAL_WAIT_DELAY_US);
 			ocs_hal_flush(hal);
 			iters--;
 		}
@@ -1793,11 +1806,15 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 		 * The IO lists must be empty, but remove any that didn't get cleaned up.
 		 * Clean up the timed wqe list, the free list, and the wait free list.
 		 */
-		ocs_lock(&hal->io_timed_wqe_lock);
-			while (!ocs_list_empty(&hal->io_timed_wqe)) {
-				ocs_list_remove_head(&hal->io_timed_wqe);
-			}
-		ocs_unlock(&hal->io_timed_wqe_lock);
+		for (i = 0; i < OCS_HAL_WQ_CTX_NUM;  i++) {
+			ocs_hal_wq_ctx_t *ctx = &hal->wq_ctx[i];
+
+			ocs_lock(&ctx->io_timed_wqe_lock);
+				while (!ocs_list_empty(&ctx->io_timed_wqe)) {
+					ocs_list_remove_head(&ctx->io_timed_wqe);
+				}
+			ocs_unlock(&ctx->io_timed_wqe_lock);
+		}
 
 		ocs_lock(&hal->io_lock);
 			while (!ocs_list_empty(&hal->io_free)) {
@@ -1809,14 +1826,10 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 			}
 		ocs_unlock(&hal->io_lock);
 	}
-
-	/*
-	 * IO inuse has been cleaned-up; now call domain force free
-	 * before queue reset and RX buffer free.
-	 */
-	while ((domain = ocs_list_get_head(&(ocs->domain_list))) != NULL) {
-		ocs_log_debug(ocs, "free domain %p\n", domain);
-		ocs_domain_force_free(domain);
+	
+	if (!ocs_list_empty(&ocs->domain_list)) {
+		ocs_log_err(ocs, "doamin_list is still not empty.\n");
+		ocs_hal_assert(0);
 	}
 
 	if (prev_state != OCS_HAL_STATE_UNINITIALIZED) {
@@ -1857,12 +1870,21 @@ ocs_hal_reset(ocs_hal_t *hal, ocs_hal_reset_e reset)
 		/* Teardown the HAL queue topology */
 		hal_queue_teardown(hal);
 
+		ocs_hal_io_teardown(hal);
+
 		/* Reset the request tag pool, the HAL IO request tags are reassigned in ocs_hal_setup_io() */
 		ocs_hal_reqtag_reset(hal);
+
+		/* record the fact that the queues are non-functional */
+		hal->state = OCS_HAL_STATE_UNINITIALIZED;
 	} else {
 
 		/* Free rq buffers */
 		ocs_hal_rx_free(hal);
+
+		/* Retain HAL state when SLI reset is failed */
+		if (rc)
+			hal->state = prev_state;
 	}
 
 	/*
@@ -1907,7 +1929,7 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 		*value = hal->config.n_io;
 		break;
 	case OCS_HAL_N_SGL:
-		*value = (hal->config.n_sgl - SLI4_SGE_MAX_RESERVED);
+		*value = hal->config.n_sgl;
 		break;
 	case OCS_HAL_MAX_IO:
 		*value = sli_get_max_rsrc(&hal->sli, SLI_RSRC_FCOE_XRI);
@@ -2096,6 +2118,7 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 	case OCS_HAL_DUMP_PRESENT:
 	{
 		ocs_t *ocs = (ocs_t *)hal->os;
+		int32_t ret;
 
 		/**
 		 * When auto recovery is enabled, SLIPort flag will be cleared by the
@@ -2106,13 +2129,15 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 		 * This can even return the presence of CLD on PCI func 0 since we
 		 * really don't care about the type of dump that exists in OCS buffers.
 		 */
-		*value = (ocs_fw_dump_state_check(ocs, OCS_FW_FUNC_DUMP_STATE_VALID) ||
-			  sli_dump_is_present(&hal->sli));
-
-		/* If FW dump is present, set the appropriate fw_dump_type */
-		if (*value) {
-			*value = ocs->fw_dump.type;
+		if (ocs_fw_dump_state_check(ocs, OCS_FW_FUNC_DUMP_STATE_VALID)) {
+			ret = OCS_FW_DUMP_STATUS_ALREADY_PRESENT;
+		} else {
+			ret = sli_dump_is_present(&hal->sli);
+			if (ret == OCS_FW_DUMP_STATUS_FAILED)
+				ret = OCS_FW_DUMP_STATUS_NOT_PRESENT;
 		}
+
+		*value = ret;
 		break;
 	}
 	case OCS_HAL_RESET_REQUIRED:
@@ -2174,33 +2199,8 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 	case OCS_HAL_VPD_LEN:
 		*value = sli_get_vpd_len(&hal->sli);
 		break;
-	case OCS_HAL_SGL_CHAINING_CAPABLE:
+	case OCS_HAL_XPSGL_CAPABLE:
 		*value = sli_get_is_sgl_chaining_capable(&hal->sli) || hal->workaround.sglc_misreported;
-		break;
-	case OCS_HAL_SGL_CHAINING_ALLOWED:
-		/*
-		 * SGL Chaining is allowed in the following cases:
-		 *   1. Lancer with host SGL Lists
-		 *   2. Skyhawk with pre-registered SGL Lists
-		 */
-		*value = FALSE;
-		if ((sli_get_is_sgl_chaining_capable(&hal->sli) || hal->workaround.sglc_misreported) &&
-		    !sli_get_sgl_preregister(&hal->sli) &&
-		    SLI4_IF_TYPE_LANCER_FC_ETH  == sli_get_if_type(&hal->sli)) {
-			*value = TRUE;
-		}
-
-		if ((sli_get_is_sgl_chaining_capable(&hal->sli) || hal->workaround.sglc_misreported) &&
-		    sli_get_sgl_preregister(&hal->sli) &&
-		    ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
-		     (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli)))) {
-			*value = TRUE;
-		}
-		break;
-	case OCS_HAL_SGL_CHAINING_HOST_ALLOCATED:
-		/* Only lancer supports host allocated SGL Chaining buffers. */
-		*value = ((sli_get_is_sgl_chaining_capable(&hal->sli) || hal->workaround.sglc_misreported) &&
-			  (SLI4_IF_TYPE_LANCER_FC_ETH  == sli_get_if_type(&hal->sli)));
 		break;
 	case OCS_HAL_SEND_FRAME_CAPABLE:
 		*value = ((sli_get_if_type(&hal->sli) == SLI4_IF_TYPE_LANCER_FC_ETH) ||
@@ -2211,6 +2211,10 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 		break;
 	case OCS_HAL_MAX_VPORTS:
 		*value = sli_get_max_rsrc(&hal->sli, SLI_RSRC_FCOE_VPI);
+		/* 1 VPI to be used for physical port */
+		if (*value) {
+			*value = *value - 1;
+		}
 		break;
 	case OCS_HAL_PORTNUM:
 		*value = sli_get_portnum(&hal->sli);
@@ -2226,6 +2230,9 @@ ocs_hal_get(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t *value)
 		break;
 	case OCS_HAL_ENABLE_DUAL_DUMP:
 		*value = hal->config.enable_dual_dump;
+		break;
+	case OCS_HAL_FLASH_ID:
+		*value = sli_get_flash_id(&hal->sli);
 		break;
 	default:
 		ocs_log_test(hal->os, "unsupported property %#x\n", prop);
@@ -2252,6 +2259,12 @@ ocs_hal_get_ptr(ocs_hal_t *hal, ocs_hal_property_e prop)
 		if (sli_get_vpd_len(&hal->sli)) {
 			rc = sli_get_vpd(&hal->sli);
 		}
+		break;
+	case OCS_HAL_QUEUE_TOPOLOGY:
+		rc = (void *) hal->config.queue_topology;
+		break;
+	case OCS_HAL_FILTER_DEF:
+		rc = (void *) &hal->config.filter_def[0];
 		break;
 	case OCS_HAL_FW_REV:
 		rc = sli_get_fw_name(&hal->sli, 0);
@@ -2291,7 +2304,15 @@ ocs_hal_set(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t value)
 		}
 		break;
 	case OCS_HAL_N_SGL:
-		value += SLI4_SGE_MAX_RESERVED;
+		if (value % 4) {
+			/*
+			 * SLI requires SGL buffer to be a multiple of 64 bytes.
+			 * So we need N_SGL to be a multiple of 4.
+			 */
+			value = roundup(value, 4);
+			ocs_log_info(hal->os,
+					"Rounding off N_SGL to %d.\n", value);
+		}
 		if (value > sli_get_max_sgl(&hal->sli)) {
 			ocs_log_test(hal->os, "SGL value out of range %d vs %d\n",
 				     value, sli_get_max_sgl(&hal->sli));
@@ -2382,7 +2403,7 @@ ocs_hal_set(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t value)
 		break;
 	case OCS_HAL_DIF_SEED:
 		/* Set the DIF seed - only for lancer right now */
-		if (SLI4_IF_TYPE_LANCER_FC_ETH != sli_get_if_type(&hal->sli)) {
+		if (!SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli))) {
 			ocs_log_test(hal->os, "DIF seed not supported for this device\n");
 			rc = OCS_HAL_RTN_ERROR;
 		} else {
@@ -2514,6 +2535,9 @@ ocs_hal_set(ocs_hal_t *hal, ocs_hal_property_e prop, uint32_t value)
 	case OCS_HAL_ENABLE_DUAL_DUMP:
 		hal->config.enable_dual_dump = value;
 		break;
+	case OCS_HAL_ENABLE_RQ_NO_BUFF_WARNS:
+		sli_set_rq_dnb(&hal->sli, value);
+		break;
 	default:
 		ocs_log_test(hal->os, "unsupported property %#x\n", prop);
 		rc = OCS_HAL_RTN_ERROR;
@@ -2563,6 +2587,7 @@ ocs_hal_dump_type2(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_si
 {
 	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
 	uint8_t buf[SLI4_BMBX_SIZE];
+	sli4_mbox_command_header_t *cmd;
 	ocs_dma_t dma_buf;
 
 	if (hal == NULL) {
@@ -2570,7 +2595,7 @@ ocs_hal_dump_type2(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_si
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	if (ocs_dma_alloc(hal->os, &dma_buf, req_size, OCS_MIN_DMA_ALIGNMENT)) {
+	if (ocs_dma_alloc(hal->os, &dma_buf, req_size, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to alloc DMA buffer\n");
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
@@ -2579,6 +2604,11 @@ ocs_hal_dump_type2(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_si
 
 	if (sli_cmd_dump_type2(&hal->sli, buf, SLI4_BMBX_SIZE, region_id, &dma_buf)) {
 		rc = ocs_hal_exec_mbx_command_generic_results(hal, buf, false, 15*1000*1000);
+		cmd = (sli4_mbox_command_header_t *)buf;
+		if(rc && (cmd->status == SLI4_MBOX_STATUS_NO_DATA_IN_REGION)){
+			ocs_log_err(hal->os, "Operation not supported with current IPL version, rc=0x%x \n", cmd->status);
+			rc = OCS_HAL_RTN_NOT_SUPPORTED;
+		}
 	} else {
 		ocs_log_err(hal->os, "sli_cmd_dump_type2 failed\n");
 		rc = OCS_HAL_RTN_ERROR;
@@ -2609,7 +2639,7 @@ ocs_hal_update_cfg(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_si
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
 
-	if (ocs_dma_alloc(hal->os, &dma_buf, req_size, OCS_MIN_DMA_ALIGNMENT)) {
+	if (ocs_dma_alloc(hal->os, &dma_buf, req_size, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to alloc DMA buffer\n");
 		ocs_free(hal->os, mbox_cmd, SLI4_BMBX_SIZE);
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -2619,6 +2649,11 @@ ocs_hal_update_cfg(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_si
 
 	if (sli_cmd_update_cfg(&hal->sli, mbox_cmd, SLI4_BMBX_SIZE, region_id, &dma_buf)) {
 		rc = ocs_hal_exec_mbx_command_generic_results(hal, (uint8_t *)mbox_cmd, false, 15*1000*1000);
+		if(rc && (mbox_cmd->hdr.status == SLI4_MBOX_STATUS_NO_DATA_IN_REGION)){
+			ocs_log_err(hal->os, "Operation not supported with current IPL version, rc: %x \n", mbox_cmd->hdr.status);
+			rc = OCS_HAL_RTN_NOT_SUPPORTED;
+		}
+
 	} else {
 		ocs_log_err(hal->os, "sli_cmd_update_cfg failed\n");
 		rc = OCS_HAL_RTN_ERROR;
@@ -2888,9 +2923,6 @@ ocs_hal_reset_pending(ocs_hal_t *hal)
 	uint32_t err1 = sli_reg_read(&hal->sli, SLI4_REG_SLIPORT_ERROR1);
 	uint32_t err2 = sli_reg_read(&hal->sli, SLI4_REG_SLIPORT_ERROR2);
 
-	if (err1 == 0x2 && err2 == 0x10)
-		ocs_log_crit(hal->os, "FW heartbeat expired after %d seconds\n", hal->watchdog_timeout);
-
 	if (sli_fw_error_status(&hal->sli) > 0) {
 		ocs_log_crit(hal->os, "Chip is in an error state - reset needed\n");
 		ocs_log_crit(hal->os, "status=%#x error1=%#x error2=%#x\n",
@@ -2937,7 +2969,16 @@ ocs_hal_command(ocs_hal_t *hal, uint8_t *cmd, uint32_t opts, void *cb, void *arg
 
 	/* Check if the chip is in an error state (UE'd) before proceeding */
 	if (ocs_hal_reset_pending(hal))
-		return OCS_HAL_RTN_ERROR;
+		return rc;
+
+	ocs_lock(&hal->cmd_lock);
+	if (hal->cmd_submission_disabled) {
+		ocs_unlock(&hal->cmd_lock);
+
+		rc = OCS_HAL_RTN_MBOX_SUBMISSION_DISABLED;
+		goto log_err;
+	}
+	ocs_unlock(&hal->cmd_lock);
 
 	if (OCS_CMD_POLL == opts) {
 		if (hal->mq[0]->length && !sli_queue_is_empty(&hal->sli, hal->mq[0])) {
@@ -2950,7 +2991,6 @@ ocs_hal_command(ocs_hal_t *hal, uint8_t *cmd, uint32_t opts, void *cb, void *arg
 		} else {
 			if (ocs_sem_p(&hal->bmbx_sem, OCS_SEM_FOREVER)) {
 				ocs_log_err(hal->os, "ocs_sem_p failed\n");
-				rc = OCS_HAL_RTN_ERROR;
 				goto log_err;
 			} else {
 				rc = ocs_hal_bmbx_command(hal, cmd);
@@ -2982,14 +3022,19 @@ ocs_hal_command(ocs_hal_t *hal, uint8_t *cmd, uint32_t opts, void *cb, void *arg
 		ctx->ctx = hal;
 
 		ocs_lock(&hal->cmd_lock);
-			/* Add to pending list */
-			ocs_list_add_tail(&hal->cmd_pending, ctx);
-
-			/* Submit as much of the pending list as we can */
-			rc = ocs_hal_cmd_submit_pending(hal);
-			if (rc) {
-				ocs_log_err(hal->os, "MQE submission failed\n");
+			if (hal->cmd_submission_disabled) {
 				ocs_free(hal->os, ctx, sizeof(*ctx));
+				rc = OCS_HAL_RTN_MBOX_SUBMISSION_DISABLED;
+			} else {
+				/* Add to pending list */
+				ocs_list_add_tail(&hal->cmd_pending, ctx);
+
+				/* Submit as much of the pending list as we can */
+				rc = ocs_hal_cmd_submit_pending(hal);
+				if (rc) {
+					ocs_log_err(hal->os, "MQE submission failed\n");
+					ocs_free(hal->os, ctx, sizeof(*ctx));
+				}
 			}
 		ocs_unlock(&hal->cmd_lock);
 	}
@@ -3091,9 +3136,18 @@ ocs_hal_port_alloc(ocs_hal_t *hal, ocs_sli_port_t *sport, ocs_domain_t *domain, 
 	}
 
 	if (sli_resource_alloc(&hal->sli, SLI_RSRC_FCOE_VPI, &sport->indicator, &index)) {
-		ocs_log_err(hal->os, "FCOE_VPI allocation failure\n");
+		ocs_log_err(hal->os, "FC_VPI allocation failure\n");
 		return OCS_HAL_RTN_ERROR;
 	}
+
+	if (sli_resource_alloc(&hal->sli, SLI_RSRC_FCOE_RPI, &sport->fabric_rpi, &sport->fabric_rpi_index)) {
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
+			ocs_log_err(hal->os, "FC VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+		ocs_log_err(hal->os, "FC_RPI allocation failure\n");
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	ocs_log_debug(hal->os, "Port fabric RPI %d index %d\n", sport->fabric_rpi, sport->fabric_rpi_index);
 
 	if (domain != NULL) {
 		ocs_sm_function_t	next = NULL;
@@ -3126,7 +3180,9 @@ ocs_hal_port_alloc_out:
 	if (rc != OCS_HAL_RTN_SUCCESS) {
 		ocs_free(hal->os, cmd, SLI4_BMBX_SIZE);
 		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
-			ocs_log_err(hal->os, "FCOE_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+			ocs_log_err(hal->os, "FC_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, sport->indicator))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", sport->fabric_rpi, sport->fc_id);
 	}
 
 	return rc;
@@ -3405,7 +3461,7 @@ ocs_hal_domain_alloc(ocs_hal_t *hal, ocs_domain_t *domain, uint32_t fcf, uint32_
 	}
 
 	// allocate memory for the service parameters
-	if (ocs_dma_alloc(hal->os, &domain->dma, 112, 4)) {
+	if (ocs_dma_alloc(hal->os, &domain->dma, 112, 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA memory\n");
 		ocs_free(hal->os, cmd, SLI4_BMBX_SIZE);
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -3552,8 +3608,12 @@ ocs_hal_node_alloc(ocs_hal_t *hal, ocs_remote_node_t *rnode, uint32_t fc_addr,
 	// NULL SLI port indicates an unallocated remote node
 	rnode->sport = NULL;
 
-	if (sli_resource_alloc(&hal->sli, SLI_RSRC_FCOE_RPI, &rnode->indicator, &rnode->index)) {
-		ocs_log_err(hal->os, "FCOE_RPI allocation failure addr=%#x\n",
+	if (fc_addr == FC_ADDR_FABRIC) {
+		ocs_log_debug(hal->os, "Skipping FC_RPI allocation for fabric node, use preallocated sport rpi: %d index %d\n", sport->fabric_rpi, sport->fabric_rpi_index);
+		rnode->indicator = sport->fabric_rpi;
+		rnode->index = sport->fabric_rpi_index;
+	} else if (sli_resource_alloc(&hal->sli, SLI_RSRC_FCOE_RPI, &rnode->indicator, &rnode->index)) {
+		ocs_log_err(hal->os, "FC_RPI allocation failure addr=%#x\n",
 				fc_addr);
 		return OCS_HAL_RTN_ERROR;
 	}
@@ -3613,9 +3673,10 @@ ocs_hal_node_attach(ocs_hal_t *hal, ocs_remote_node_t *rnode, ocs_dma_t *sparms)
 		 * Mode is enabled
 		 */
 		if (sli_get_hlm(&hal->sli) == FALSE) {
-			ocs_log_test(hal->os, "attach to already attached node HLM=%d count=%d\n",
+			ocs_log_err(hal->os, "attach to already attached node HLM=%d count=%d\n",
 				     sli_get_hlm(&hal->sli), count);
-			rc = OCS_HAL_RTN_SUCCESS;
+			ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
+			ocs_assert(FALSE, OCS_HAL_RTN_SUCCESS);
 		} else {
 			rnode->node_group = TRUE;
 			rnode->attached = ocs_atomic_read(&hal->rpi_ref[rnode->index].rpi_attached);
@@ -3628,7 +3689,7 @@ ocs_hal_node_attach(ocs_hal_t *hal, ocs_remote_node_t *rnode, ocs_dma_t *sparms)
 		ocs_display_sparams("", "reg rpi", 0, NULL, sparms->virt);
 		sli_cmd_reg_rpi(&hal->sli, buf, SLI4_BMBX_SIZE, rnode->fc_id,
 				rnode->indicator, rnode->sport->indicator, sparms, false,
-				(hal->tow_enabled && hal->config.tow_t10_enable), hlm, 0);
+				(hal->tow_enabled && hal->config.tow_t10_enable), hlm, false);
 		rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_node_attach, rnode);
 	}
 
@@ -3646,7 +3707,7 @@ ocs_hal_node_attach(ocs_hal_t *hal, ocs_remote_node_t *rnode, ocs_dma_t *sparms)
 static int32_t
 ocs_hal_cb_reg_rpi_update(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 {
-	ocs_remote_node_t *rnode = arg;
+	ocs_node_cb_t *cbdata = arg;
 	sli4_mbox_command_header_t *hdr = (sli4_mbox_command_header_t *)mqe;
 	ocs_sm_event_t evt = OCS_EVT_LAST;
 
@@ -3655,10 +3716,8 @@ ocs_hal_cb_reg_rpi_update(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *ar
 	else
 		evt = OCS_EVT_NODE_RPI_UPDATE_OK;
 
-	if (rnode)
-		ocs_node_post_event((ocs_node_t *)rnode->node, evt, NULL);
-	else
-		ocs_log_err(hal->os, "reg_rpi_update cb is not handled\n");
+	ocs_assert(cbdata->io, -1);
+	ocs_node_post_event(cbdata->io->node, evt, cbdata);
 
 	ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
 	return 0;
@@ -3669,20 +3728,26 @@ ocs_hal_cb_reg_rpi_update(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *ar
  * @brief Update REG_RPI with new parameters
  *
  * @param hal Hardware context.
- * @param rnode Remote node object to free.
- * @param nsler NVMe SLER capability to update
+ * @param rnode Allocated remote node object to update.
+ * @param nsler NVMe SLER capability to update.
+ * @param arg Callback argument invoked after the command completes.
  *
  * @return Return 0 on success, or a non-zero value on failure.
  */
 ocs_hal_rtn_e
-ocs_hal_reg_rpi_update(ocs_hal_t *hal, ocs_remote_node_t *rnode, int32_t nsler)
+ocs_hal_reg_rpi_update(ocs_hal_t *hal, ocs_remote_node_t *rnode, bool nsler, void *arg)
 {
 	ocs_hal_rtn_e rc = OCS_HAL_RTN_ERROR;
 	uint8_t *buf = NULL;
 
-	if (!hal || !rnode || !rnode->attached) {
-		ocs_log_err(NULL, "bad parameter(s) hal=%p rnode=%p rnode attached=%d\n",
-			    hal, rnode, (rnode) ? rnode->attached : 0);
+	if (!hal) {
+		ocs_log_err(NULL, "bad parameter hal\n");
+		return rc;
+	}
+
+	if (!rnode || !rnode->attached) {
+		ocs_log_err(hal->os, "bad parameter(s) rnode=%p rnode attached=%d\n",
+			    rnode, rnode ? rnode->attached : 0);
 		return rc;
 	}
 
@@ -3695,7 +3760,7 @@ ocs_hal_reg_rpi_update(ocs_hal_t *hal, ocs_remote_node_t *rnode, int32_t nsler)
 	sli_cmd_reg_rpi(&hal->sli, buf, SLI4_BMBX_SIZE, 0,
 			rnode->indicator, 0, NULL, true,
 			0, 0, nsler);
-	rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_reg_rpi_update, rnode);
+	rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_reg_rpi_update, arg);
 	if (rc) {
 		ocs_log_err(hal->os, "Failed to submit reg_rpi update\n");
 		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
@@ -3762,7 +3827,6 @@ ocs_hal_rtn_e
 ocs_hal_node_detach(ocs_hal_t *hal, ocs_remote_node_t *rnode)
 {
 	uint8_t	*buf = NULL;
-	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS_SYNC;
 	uint32_t index = UINT32_MAX;
 	uint32_t indicator;
 	ocs_node_t *node;
@@ -3784,8 +3848,12 @@ ocs_hal_node_detach(ocs_hal_t *hal, ocs_remote_node_t *rnode)
 		uint32_t count = 0;
 		uint32_t fc_id;
 
-		if (!rnode->attached)
+		if (!ocs_atomic_read(&hal->rpi_ref[index].rpi_attached)) {
+			node_printf(node, "RPI is not attached\n");
 			return OCS_HAL_RTN_SUCCESS_SYNC;
+		}
+
+		ocs_assert(ocs_atomic_read(&hal->rpi_ref[index].rpi_count), OCS_HAL_RTN_ERROR);
 
 		buf = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
 		if (!buf) {
@@ -3795,7 +3863,6 @@ ocs_hal_node_detach(ocs_hal_t *hal, ocs_remote_node_t *rnode)
 
 		indicator = rnode->indicator;
 		count = ocs_atomic_sub_return(&hal->rpi_ref[index].rpi_count, 1);
-
 		if (count <= 1) {
 			/* There are no other references to this RPI; so unregister it and free the resource */
 			fc_id = UINT32_MAX;
@@ -3817,29 +3884,30 @@ ocs_hal_node_detach(ocs_hal_t *hal, ocs_remote_node_t *rnode)
 			rnode->indicator = UINT32_MAX;
 		}
 
-		if (!node->unreg_rpi && !node->sport->unreg_rpi_all) {
+		if (!node->unreg_rpi) {
 			node->unreg_rpi = TRUE;
-			rc = OCS_HAL_RTN_SUCCESS;
-
 			if (sli_cmd_unreg_rpi(&hal->sli, buf, SLI4_BMBX_SIZE, indicator,
 					      SLI_RSRC_FCOE_RPI, fc_id)) {
-				if (hal->state != OCS_HAL_STATE_ACTIVE)
-					ocs_hal_cb_node_free(hal, OCS_HAL_RTN_SUCCESS, buf, rnode);
-				else
-					rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_node_free, rnode);
+				if (hal->state != OCS_HAL_STATE_ACTIVE) {
+					ocs_log_info(hal->os, "HAL state is not active\n");
+					ocs_hal_cb_node_free(hal, OCS_HAL_RTN_ERROR, buf, rnode);
+					return OCS_HAL_RTN_SUCCESS_SYNC;
+				} else {
+					if (ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_node_free, rnode)) {
+						ocs_log_err(hal->os, "failed to send HAL command\n");
+						ocs_hal_cb_node_free(hal, OCS_HAL_RTN_ERROR, buf, rnode);
+						return OCS_HAL_RTN_SUCCESS_SYNC;
+					}
+				}
 			}
-
-			if (rc)
-				ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
 		} else {
 			/* We already called unreg_rpi_all, skipping unreg_rpi */
 			ocs_log_info(hal->os, "UNREG_RPI skipped\n");
 			ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
-			rc = OCS_HAL_RTN_SUCCESS;
 		}
 	}
 
-	return rc;
+	return OCS_HAL_RTN_SUCCESS;
 }
 
 /**
@@ -3854,7 +3922,6 @@ ocs_hal_rtn_e
 ocs_hal_unreg_rpi_all(ocs_hal_t *hal, ocs_sport_t *sport)
 {
 	uint8_t	*buf = NULL;
-	ocs_hal_rtn_e	rc = OCS_HAL_RTN_SUCCESS;
 
 	if (!hal) {
 		ocs_log_err(NULL, "bad parameter hal=%p\n", hal);
@@ -3869,16 +3936,20 @@ ocs_hal_unreg_rpi_all(ocs_hal_t *hal, ocs_sport_t *sport)
 
 	if (sli_cmd_unreg_rpi(&hal->sli, buf, SLI4_BMBX_SIZE, sport->indicator,
 				SLI_RSRC_FCOE_VPI, UINT32_MAX)) {
-		if (hal->state != OCS_HAL_STATE_ACTIVE)
-			ocs_hal_cb_unreg_rpi_all(hal, OCS_HAL_RTN_SUCCESS, buf, sport);
-		else
-			rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_unreg_rpi_all, sport);
+		if (hal->state != OCS_HAL_STATE_ACTIVE) {
+			ocs_hal_cb_unreg_rpi_all(hal, OCS_HAL_RTN_ERROR, buf, sport);
+			ocs_log_err(hal->os, "HAL state is not active \n");
+			return OCS_HAL_RTN_ERROR;
+		} else {
+			if (ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_unreg_rpi_all, sport)) {
+				ocs_log_err(hal->os, "unreg_rpi_all command is failed\n");
+				ocs_hal_cb_unreg_rpi_all(hal, OCS_HAL_RTN_ERROR, buf, sport);
+				return OCS_HAL_RTN_ERROR;
+			}
+		}
 	}
 
-	if (rc)
-		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
-
-	return rc;
+	return OCS_HAL_RTN_SUCCESS;
 }
 
 ocs_hal_rtn_e
@@ -3964,6 +4035,7 @@ ocs_hal_init_free_io(ocs_hal_io_t *io)
 	io->done = NULL;
 	io->abort_done = NULL;
 	io->abort_issued = FALSE;
+	io->abort_completed = FALSE;
 	io->port_owned_abort_count = 0;
 	io->rnode = NULL;
 	io->type = 0xFFFF;
@@ -4476,11 +4548,11 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 	sli4_sge_t	*sge = NULL;
 	ocs_hal_rtn_e	rc = OCS_HAL_RTN_SUCCESS;
 	uint16_t	local_flags = 0;
-	bool		select_els_wq = true;
 
-	if (!hal || !io || !rnode || !iparam) {
-		ocs_log_err(NULL, "bad parm hal=%p io=%p send=%p receive=%p rnode=%p iparam=%p\n",
-			    hal, io, send, receive, rnode, iparam);
+	if (!hal || !io || !rnode || !iparam ||
+	    (((OCS_HAL_ELS_REQ == type) || (OCS_HAL_FC_CT == type)) && !receive)) {
+		ocs_log_err(NULL, "bad parm hal=%p type=%d io=%p send=%p receive=%p rnode=%p iparam=%p\n",
+			    hal, type, io, send, receive, rnode, iparam);
 		return OCS_HAL_RTN_ERROR;
 	}
 
@@ -4523,14 +4595,14 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 	switch (type) {
 	case OCS_HAL_ELS_REQ:
 		if (!iparam->els.timeout)
-			io->tgt_wqe_timeout = 2 * (hal->sli.config.r_a_tov) + 5;
+			io->tgt_wqe_timeout = (2 * hal->sli.config.r_a_tov);
 		else
-			io->tgt_wqe_timeout = iparam->els.timeout + 5;
+			io->tgt_wqe_timeout = iparam->els.timeout;
 
 		if ((!send) || sli_els_request64_wqe(&hal->sli, io->wqe.wqebuf, hal->sli.config.wqe_size, io->sgl,
 						      *((uint8_t *)(send->virt)), /* req_type */
 						      len, receive->size,
-						      iparam->els.timeout, io->indicator, io->reqtag, SLI4_CQ_DEFAULT, rnode)) {
+						      iparam->els.timeout, io->indicator, io->reqtag, SLI4_CQ_DEFAULT, rnode, NULL)) {
 			ocs_log_err(hal->os, "REQ WQE error\n");
 			rc = OCS_HAL_RTN_ERROR;
 		}
@@ -4554,8 +4626,6 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 		}
 		break;
 	case OCS_HAL_FC_CT:
-		/* Pick regular WQ for CT requests to avoid deadlock */
-		select_els_wq = false;
 		if ((!send) || sli_gen_request64_wqe(&hal->sli, io->wqe.wqebuf, hal->sli.config.wqe_size, io->sgl, len,
 					  receive->size, iparam->fc_ct.timeout, io->indicator,
 					  io->reqtag, SLI4_CQ_DEFAULT, rnode, iparam->fc_ct.r_ctl,
@@ -4565,8 +4635,6 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 		}
 		break;
 	case OCS_HAL_FC_CT_RSP:
-		/* Pick regular WQ for CT responses to avoid deadlock */
-		select_els_wq = false;
 		if ((!send) || sli_xmit_sequence64_wqe(&hal->sli, io->wqe.wqebuf, hal->sli.config.wqe_size, io->sgl, len,
 					  iparam->fc_ct_rsp.timeout, iparam->fc_ct_rsp.ox_id, io->indicator,
 					  io->reqtag, rnode, iparam->fc_ct_rsp.r_ctl,
@@ -4599,8 +4667,6 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 			rc = OCS_HAL_RTN_ERROR;
 		}
 
-		/* Pick regular WQ for backend BLS responses to avoid race conditions */
-		select_els_wq = false;
 		break;
 	}
 	case OCS_HAL_BLS_ACC_SID:
@@ -4638,10 +4704,7 @@ ocs_hal_srrs_send(ocs_hal_t *hal, ocs_hal_io_type_e type, ocs_hal_io_t *io,
 
 	if (OCS_HAL_RTN_SUCCESS == rc) {
 		if (io->wq == NULL) {
-			if (select_els_wq)
-				io->wq = hal->hal_els_wq;
-			else
-				io->wq = ocs_hal_queue_next_wq(hal, io);
+			io->wq = ocs_hal_queue_next_wq(hal, io);
 			ocs_hal_assert(io->wq != NULL);
 		}
 		io->xbusy = TRUE;
@@ -5061,13 +5124,11 @@ exit:
 ocs_hal_rtn_e
 ocs_hal_io_register_sgl(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_dma_t *sgl, uint32_t sgl_count)
 {
-	if (sli_get_sgl_preregister(&hal->sli)) {
-		ocs_log_err(hal->os, "can't use temporary SGL with pre-registered SGLs\n");
-		return OCS_HAL_RTN_ERROR;
-	}
 	io->ovfl_sgl = sgl;
 	io->ovfl_sgl_count = sgl_count;
 	io->ovfl_io = NULL;
+
+	hal->oflow_sgl_used++;
 
 	return OCS_HAL_RTN_SUCCESS;
 }
@@ -5160,8 +5221,7 @@ ocs_hal_io_init_sges(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_io_type_e type)
 		io->n_sge = 2;
 		break;
 	case OCS_HAL_IO_TARGET_WRITE:
-#define OCS_TARGET_WRITE_SKIPS	2
-		skips = OCS_TARGET_WRITE_SKIPS;
+		skips = SLI4_SGE_SKIP_PER_WQE_MAX;
 
 		/* populate host resident XFER_RDY buffer */
 		data->sge_type = SLI4_SGE_TYPE_DATA;
@@ -5178,8 +5238,7 @@ ocs_hal_io_init_sges(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_io_type_e type)
 		/*
 		 * For FCP_TSEND64, the first 2 entries are SKIP SGE's
 		 */
-#define OCS_TARGET_READ_SKIPS	2
-		skips = OCS_TARGET_READ_SKIPS;
+		skips = SLI4_SGE_SKIP_PER_WQE_MAX;
 		break;
 	case OCS_HAL_IO_TARGET_RSP:
 		/*
@@ -5209,6 +5268,85 @@ ocs_hal_io_init_sges(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_io_type_e type)
 	return OCS_HAL_RTN_SUCCESS;
 }
 
+static ocs_hal_rtn_e
+ocs_hal_io_overflow_sgl(ocs_hal_t *hal, ocs_hal_io_t *io)
+{
+	sli4_lsp_sge_t *lsp;
+
+	/* fail if we're already pointing to the overflow SGL */
+	if (io->sgl == io->ovfl_sgl) {
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	/*
+	 * For skyhawk, we can use another SGL to extend the SGL list. The
+	 * Chained entry must not be in the first 4 entries.
+	 *
+	 * Note: For DIF enabled IOs, we will use the ovfl_io for the sec_hio.
+	 */
+	switch (sli_get_if_type(&hal->sli)) {
+	case SLI4_IF_TYPE_LANCER_FC_ETH:
+	case SLI4_IF_TYPE_LANCER_G7:
+		if (io->ovfl_sgl == NULL) {
+			ocs_log_err(hal->os, "OVERFLOW SGL is NULL\n");
+			return OCS_HAL_RTN_ERROR;
+		}
+		break;
+	case SLI4_IF_TYPE_BE3_SKH_PF:
+	case SLI4_IF_TYPE_BE3_SKH_VF:
+		if (sli_get_sgl_preregister(&hal->sli) &&
+		    io->def_sgl_count > 4 && io->ovfl_io == NULL) {
+			io->ovfl_io = ocs_hal_io_alloc(hal);
+			if (!io->ovfl_io)
+				return OCS_HAL_RTN_ERROR;
+
+			/*
+			 * Note: We can't call ocs_hal_io_register_sgl() here
+			 * because it checks that SGLs are not pre-registered
+			 * and for shyhawk, preregistered SGLs are required.
+			 */
+			io->ovfl_sgl = &io->ovfl_io->def_sgl;
+			io->ovfl_sgl_count = io->ovfl_io->def_sgl_count;
+		}
+		break;
+	default:
+		;
+	}
+
+	/*
+	 * Overflow, we need to put a link SGE in the last location of the current SGL, after
+	 * copying the the last SGE to the overflow SGL
+	 */
+
+	((sli4_sge_t*)io->ovfl_sgl->virt)[0] = ((sli4_sge_t*)io->sgl->virt)[io->n_sge - 1];
+
+	lsp = &((sli4_lsp_sge_t*)io->sgl->virt)[io->n_sge - 1];
+	ocs_memset(lsp, 0, sizeof(*lsp));
+
+	if ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
+	    (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli))) {
+		sli_skh_chain_sge_build(&hal->sli,
+					(sli4_sge_t*)lsp,
+					io->ovfl_io->indicator,
+					0, /* frag_num */
+					0); /* offset */
+	} else {
+		lsp->buffer_address_high = ocs_addr32_hi(io->ovfl_sgl->phys);
+		lsp->buffer_address_low  = ocs_addr32_lo(io->ovfl_sgl->phys);
+		lsp->sge_type = SLI4_SGE_TYPE_LSP;
+		lsp->last = 0;
+		io->ovfl_lsp = lsp;
+		io->ovfl_lsp->segment_length = sizeof(sli4_sge_t);
+	}
+
+	/* Update the current SGL pointer, and n_sgl */
+	io->sgl = io->ovfl_sgl;
+	io->sgl_count = io->ovfl_sgl_count;
+	io->n_sge = 1;
+
+	return OCS_HAL_RTN_SUCCESS;
+}
+
 /**
  * @ingroup io
  * @brief Add a T10 PI seed scatter gather list entry.
@@ -5220,10 +5358,12 @@ ocs_hal_io_init_sges(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_io_type_e type)
  * @return Returns 0 on success, or a non-zero value on failure.
  */
 ocs_hal_rtn_e
-ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *dif_info)
+ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *dif_info,
+			bool last_data_sge)
 {
 	sli4_sge_t	*data = NULL;
 	sli4_diseed_sge_t *dif_seed;
+	uint32_t allowed_index_b4_last;
 
 	/* If no dif_info, or dif_oper is disabled, then just return success */
 	if ((dif_info == NULL) || (dif_info->dif_oper == OCS_HAL_DIF_OPER_DISABLED)) {
@@ -5233,6 +5373,50 @@ ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *di
 	if (!hal || !io) {
 		ocs_log_err(hal ? hal->os : NULL, "bad parameter hal=%p io=%p dif_info=%p\n", hal, io, dif_info);
 		return OCS_HAL_RTN_ERROR;
+	}
+
+	/* SGL chaining has following requirements,
+	 *  1) If separate DIF is enabled, DISEED SGE and DIF SGE have to be
+	 *     next to each other.
+	 *  2) Only DATA SGE can follow a DISEED SGE or DIF SGE.
+	 *  3) DATA SGE with non-zero segment length has to precede a LSP SGE
+	 *
+	 *  e.g. Valid SGL representations,
+	 *
+	 *   No seperate DIF     Separate DIF      Separate DIF    Separate DIF
+	 *      -----------       -----------      -----------     -----------
+	 *      -----------       -----------      -----------     -----------
+	 *      -----------       -----------      -----------     -----------
+	 *      -----------       -----------      -----------     -----------
+	 *     | SKIP SGE  |     | DISEED SGE|    |DATA SGE(A)|   | DATA SGE  |
+	 *      -----------       -----------      -----------     -----------
+	 *     | DISEED SGE|     | DIF SGE   |    | LSP SGE   |   |DISEED SGE |
+	 *      -----------       -----------      -----------     ----------
+	 *     | DATA SGE  |     | DATA SGE  |    |   (B)     |   |DIF SGE    |
+	 *      -----------       -----------      -----------     -----------
+	 *     | LSP SGE   |     | LSP SGE   |    |   (B)     |   |DATA SGE(C)|
+	 *      -----------       -----------      -----------     -----------
+	 *
+	 *  (A) : DATA SGE with LAST-bit=0
+	 *  (B) : could be uninitialized SGE or SKIP SGE, SLI port will
+	 *        discard all SGE's following a LSP SGE or SGE with LAST-bit=1
+	 *  (C) : DATA SGE with LAST-bit=1
+	 **/
+	allowed_index_b4_last = 2;
+	if (dif_info->dif_separate) {
+		allowed_index_b4_last++;
+		if (!last_data_sge)
+			/* LSP might appear following the DATA SGE pertaining
+			 * to this DISEED SGE
+			 **/
+			allowed_index_b4_last++;
+	}
+
+	if ((io->n_sge + allowed_index_b4_last) > io->sgl_count) {
+		if (ocs_hal_io_overflow_sgl(hal, io) != OCS_HAL_RTN_ERROR) {
+			ocs_log_err(hal->os, "SGL full (%d)\n", io->n_sge);
+			return OCS_HAL_RTN_ERROR;
+		}
 	}
 
 	data = io->sgl->virt;
@@ -5245,14 +5429,14 @@ ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *di
 	dif_seed->ref_tag_repl = dif_info->ref_tag_repl;
 	dif_seed->app_tag_repl = dif_info->app_tag_repl;
 	dif_seed->repl_app_tag = dif_info->repl_app_tag;
-	if (SLI4_IF_TYPE_LANCER_FC_ETH != hal->sli.if_type) {
+	if (!SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli))) {
 		dif_seed->atrt = dif_info->disable_app_ref_ffff;
 		dif_seed->at = dif_info->disable_app_ffff;
 	}
 	dif_seed->sge_type = SLI4_SGE_TYPE_DISEED;
 	/* Workaround for SKH (BZ157233) */
 	if (((io->type == OCS_HAL_IO_TARGET_WRITE) || (io->type == OCS_HAL_IO_INITIATOR_READ)) &&
-		(SLI4_IF_TYPE_LANCER_FC_ETH != hal->sli.if_type) && dif_info->dif_separate) {
+		!SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli)) && dif_info->dif_separate) {
 		dif_seed->sge_type = SLI4_SGE_TYPE_SKIP;
 	}
 
@@ -5315,77 +5499,6 @@ ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *di
 	}
 
 	io->n_sge++;
-
-	return OCS_HAL_RTN_SUCCESS;
-}
-
-static ocs_hal_rtn_e
-ocs_hal_io_overflow_sgl(ocs_hal_t *hal, ocs_hal_io_t *io)
-{
-	sli4_lsp_sge_t *lsp;
-
-	/* fail if we're already pointing to the overflow SGL */
-	if (io->sgl == io->ovfl_sgl) {
-		return OCS_HAL_RTN_ERROR;
-	}
-
-	/*
-	 * For skyhawk, we can use another SGL to extend the SGL list. The
-	 * Chained entry must not be in the first 4 entries.
-	 *
-	 * Note: For DIF enabled IOs, we will use the ovfl_io for the sec_hio.
-	 */
-	if (sli_get_sgl_preregister(&hal->sli) &&
-	    io->def_sgl_count > 4 &&
-	    io->ovfl_io == NULL &&
-	    ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
-	     (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli)))) {
-		io->ovfl_io = ocs_hal_io_alloc(hal);
-		if (io->ovfl_io != NULL) {
-			/*
-			 * Note: We can't call ocs_hal_io_register_sgl() here
-			 * because it checks that SGLs are not pre-registered
-			 * and for shyhawk, preregistered SGLs are required.
-			 */
-			io->ovfl_sgl = &io->ovfl_io->def_sgl;
-			io->ovfl_sgl_count = io->ovfl_io->def_sgl_count;
-		}
-	}
-
-	/* fail if we don't have an overflow SGL registered */
-	if (io->ovfl_io == NULL || io->ovfl_sgl == NULL)
-		return OCS_HAL_RTN_ERROR;
-
-	/*
-	 * Overflow, we need to put a link SGE in the last location of the current SGL, after
-	 * copying the the last SGE to the overflow SGL
-	 */
-
-	((sli4_sge_t*)io->ovfl_sgl->virt)[0] = ((sli4_sge_t*)io->sgl->virt)[io->n_sge - 1];
-
-	lsp = &((sli4_lsp_sge_t*)io->sgl->virt)[io->n_sge - 1];
-	ocs_memset(lsp, 0, sizeof(*lsp));
-
-	if ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
-	    (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli))) {
-		sli_skh_chain_sge_build(&hal->sli,
-					(sli4_sge_t*)lsp,
-					io->ovfl_io->indicator,
-					0, /* frag_num */
-					0); /* offset */
-	} else {
-		lsp->buffer_address_high = ocs_addr32_hi(io->ovfl_sgl->phys);
-		lsp->buffer_address_low  = ocs_addr32_lo(io->ovfl_sgl->phys);
-		lsp->sge_type = SLI4_SGE_TYPE_LSP;
-		lsp->last = 0;
-		io->ovfl_lsp = lsp;
-		io->ovfl_lsp->segment_length = sizeof(sli4_sge_t);
-	}
-
-	/* Update the current SGL pointer, and n_sgl */
-	io->sgl = io->ovfl_sgl;
-	io->sgl_count = io->ovfl_sgl_count;
-	io->n_sge = 1;
 
 	return OCS_HAL_RTN_SUCCESS;
 }
@@ -5491,7 +5604,7 @@ ocs_hal_io_add_dif_sge(ocs_hal_t *hal, ocs_hal_io_t *io, uintptr_t addr)
 	data->sge_type = SLI4_SGE_TYPE_DIF;
 	/* Workaround for SKH (BZ157233) */
 	if (((io->type == OCS_HAL_IO_TARGET_WRITE) || (io->type == OCS_HAL_IO_INITIATOR_READ)) &&
-		(SLI4_IF_TYPE_LANCER_FC_ETH != hal->sli.if_type)) {
+		!SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli))) {
 		data->sge_type = SLI4_SGE_TYPE_SKIP;
 	}
 
@@ -5528,7 +5641,7 @@ ocs_hal_io_abort_all(ocs_hal_t *hal)
 	ocs_hal_io_t *next_io		= NULL;
 
 	ocs_list_foreach_safe(&hal->io_inuse, io_to_abort, next_io) {
-		ocs_hal_io_abort(hal, io_to_abort, TRUE, NULL, NULL);
+		ocs_hal_io_abort(hal, io_to_abort, FALSE, NULL, NULL);
 	}
 }
 
@@ -5642,6 +5755,12 @@ ocs_hal_io_abort(ocs_hal_t *hal, ocs_hal_io_t *io_to_abort, uint32_t send_abts, 
 		if (rc >= 0) {
 			/* Non-negative return value is success */
 			rc = OCS_HAL_RTN_SUCCESS;
+			if (hal->config.emulate_tgt_wqe_timeout) {
+				ocs_lock(&hal->abort_io_timed_wqe_lock);
+				ocs_list_add_tail(&hal->io_abort_wqe_list, io_to_abort);
+				io_to_abort->abort_wqe_submit_ticks = ocs_get_os_ticks();
+				ocs_unlock(&hal->abort_io_timed_wqe_lock);
+			}
 		} else {
 			ocs_log_err(hal->os, "ABORT WQE submit error, io=%p xri=%#x tag=%#x\n",
 				io_to_abort, io_to_abort->indicator, io_to_abort->reqtag);
@@ -5661,6 +5780,60 @@ exit_hal_io_abort:
 		ocs_ref_put(&io_to_abort->ref); /* ocs_ref_get(): same function */
 
 	return rc;
+}
+
+/**
+ * @ingroup io
+ * @brief Update the abort_done and abort_arg to get notified
+ *        when an abort completes for a previously-started IO.
+ *
+ * @param hal Hardware context.
+ * @param io_to_abort The HAL IO to abort.
+ * @param cb Function call upon completion of the abort (may be NULL).
+ * @param arg Argument to pass to abort completion function.
+ *
+ * @return Returns 0 on success, or a non-zero value on failure.
+ */
+ocs_hal_rtn_e
+ocs_hal_io_abort_notify_completion(ocs_hal_t *hal, ocs_hal_io_t *io_to_abort, void *cb, void *arg)
+{
+	if (!hal || !io_to_abort) {
+		ocs_log_err(hal ? hal->os : NULL, "Bad parameter(s): hal=%p, io=%p\n", hal, io_to_abort);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	if (OCS_HAL_STATE_ACTIVE != hal->state) {
+		ocs_log_err(hal->os, "Cannot wait for IO abort completion, HAL state=%d\n", hal->state);
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	/* If cb is NULL, return success */
+	if (!cb)
+		return OCS_HAL_RTN_SUCCESS;
+
+	/*
+	 * TODO: If the abort_done was already set, then we don't have space to register for
+	 * another callback routine. In order to register for multiple callback functions, we
+	 * need to maintain a list to store all the abort callback contexts. For now, assert.
+	 */
+	ocs_assert(!io_to_abort->abort_done, OCS_HAL_RTN_ERROR);
+
+	ocs_lock(&io_to_abort->lock);
+		if (io_to_abort->abort_completed) {
+			/*
+			 * If WQE abort is complete, return HAL I/O as not active
+			 * so that the caller will invoke abort callback, if any.
+			 */
+			ocs_unlock(&io_to_abort->lock);
+			return OCS_HAL_RTN_IO_NOT_ACTIVE;
+		}
+
+		/* If WQE abort is not complete, update the abort_done and abort_arg appropriately */
+		io_to_abort->abort_done = cb;
+		io_to_abort->abort_arg = arg;
+	ocs_unlock(&io_to_abort->lock);
+
+	return OCS_HAL_RTN_SUCCESS;
 }
 
 /**
@@ -5715,6 +5888,11 @@ typedef struct ocs_hal_parity_stat_cb_arg {
 	void *arg;
 } ocs_hal_parity_stat_cb_arg_t;
 
+typedef struct ocs_hal_set_beacon_config_cb_arg {
+	ocs_hal_set_beacon_config_cb_t cb;
+	void *arg;
+} ocs_hal_set_beacon_config_cb_arg_t;
+
 typedef struct ocs_hal_dump_get_cb_arg {
 	ocs_hal_dump_get_cb_t cb;
 	void *arg;
@@ -5747,15 +5925,39 @@ typedef struct ocs_hal_dump_clear_cb_arg {
  * @return Returns 0 on success, or a non-zero value on failure.
  */
 ocs_hal_rtn_e
-ocs_hal_firmware_write(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg)
+ocs_hal_common_write_object(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg,
+					char *object_name)
 {
-	if ((hal->sli.if_type == SLI4_IF_TYPE_LANCER_FC_ETH) ||
-	    (hal->sli.if_type == SLI4_IF_TYPE_LANCER_G7)) {
-		return ocs_hal_firmware_write_lancer(hal, dma, size, offset, last, cb, arg);
-	} else {
-		// TODO:  Write firmware_write for BE3/Skyhawk
-		return -1;
+	ocs_hal_rtn_e rc;
+	uint8_t *mbxdata;
+	ocs_hal_fw_write_cb_arg_t *cb_arg;
+	int noc=0;	// No Commit bit - set to 1 for testing
+
+	mbxdata = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (mbxdata == NULL) {
+		ocs_log_err(hal->os, "failed to malloc mbox\n");
+		return OCS_HAL_RTN_NO_MEMORY;
 	}
+
+	cb_arg = ocs_malloc(hal->os, sizeof(ocs_hal_fw_write_cb_arg_t), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (cb_arg == NULL) {
+		ocs_log_err(hal->os, "failed to malloc cb_arg\n");
+		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
+		return OCS_HAL_RTN_NO_MEMORY;
+	}
+
+	cb_arg->cb = cb;
+	cb_arg->arg = arg;
+
+	/* Send the HAL command */
+	sli_cmd_common_write_object(&hal->sli, mbxdata, SLI4_BMBX_SIZE, noc, last, size, offset, object_name, dma);
+	rc = ocs_hal_command(hal, mbxdata, OCS_CMD_NOWAIT, ocs_hal_cb_fw_write, cb_arg);
+	if (rc) {
+		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
+		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
+	}
+
+	return rc;
 }
 
 /**
@@ -5780,44 +5982,40 @@ ocs_hal_firmware_write(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t o
  * @return Returns 0 on success, or a non-zero value on failure.
  */
 ocs_hal_rtn_e
-ocs_hal_firmware_write_lancer(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg)
+ocs_hal_firmware_write(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg)
 {
-	ocs_hal_rtn_e rc = OCS_HAL_RTN_ERROR;
-	uint8_t *mbxdata;
-	ocs_hal_fw_write_cb_arg_t *cb_arg;
-	int noc=0;	// No Commit bit - set to 1 for testing
+	if ((hal->sli.if_type == SLI4_IF_TYPE_LANCER_FC_ETH) ||
+	    (hal->sli.if_type == SLI4_IF_TYPE_LANCER_G7)) {
+		return ocs_hal_common_write_object(hal, dma, size, offset, last, cb, arg, "/prg");
 
-	if ((SLI4_IF_TYPE_LANCER_FC_ETH != sli_get_if_type(&hal->sli)) &&
-	     (SLI4_IF_TYPE_LANCER_G7 != sli_get_if_type(&hal->sli))) {
+	} else {
+		// TODO:  Write firmware_write for BE3/Skyhawk
 		ocs_log_test(hal->os, "Function only supported for I/F type 2/6\n");
-		return OCS_HAL_RTN_ERROR;
+		return -1;
+	}
+}
+
+
+ocs_hal_rtn_e
+ocs_hal_sfp_firmware_write(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last, ocs_hal_fw_cb_t cb, void *arg)
+{
+	if (!offset) {
+		sfp_fw_bundle *fw_bundle_info = (sfp_fw_bundle *) dma->virt;
+
+		ocs_log_info(hal->os,"Writing sfp firmware size:\n");
+		ocs_log_info(hal->os,"sfp BundleVersion: %x\n", fw_bundle_info->bundle_ver);
+		ocs_log_info(hal->os,"sfp BundleLength: %x\n", fw_bundle_info->bundle_len);
+		ocs_log_info(hal->os,"sfp AppFwVersion: %x\n", fw_bundle_info->app_fw_ver);
+		ocs_log_info(hal->os,"sfp SPIFwVersion: %x\n", fw_bundle_info->spi_fw_ver);
+		ocs_log_info(hal->os,"sfp AppFWStartOffset: %x\n", fw_bundle_info->app_fw_start_off);
+		ocs_log_info(hal->os,"sfp AppFWImgLength: %x\n", fw_bundle_info->app_fw_img_len);
+		ocs_log_info(hal->os,"sfp SPIFWStartOffset: %x\n", fw_bundle_info->spi_fw_start_off);
+		ocs_log_info(hal->os,"sfp SPIFWImgLength: %x\n", fw_bundle_info->spi_fw_img_len);
+		ocs_log_info(hal->os,"magicNumber: %x\n", fw_bundle_info->bundle_magic);
+		ocs_log_info(hal->os,"CRC: %x\n",fw_bundle_info->crc);
 	}
 
-	mbxdata = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
-	if (mbxdata == NULL) {
-		ocs_log_err(hal->os, "failed to malloc mbox\n");
-		return OCS_HAL_RTN_NO_MEMORY;
-	}
-
-	cb_arg = ocs_malloc(hal->os, sizeof(ocs_hal_fw_write_cb_arg_t), OCS_M_ZERO | OCS_M_NOWAIT);
-	if (cb_arg == NULL) {
-		ocs_log_err(hal->os, "failed to malloc cb_arg\n");
-		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
-		return OCS_HAL_RTN_NO_MEMORY;
-	}
-
-	cb_arg->cb = cb;
-	cb_arg->arg = arg;
-
-	/* Send the HAL command */
-	sli_cmd_common_write_object(&hal->sli, mbxdata, SLI4_BMBX_SIZE, noc, last, size, offset, "/prg/", dma);
-	rc = ocs_hal_command(hal, mbxdata, OCS_CMD_NOWAIT, ocs_hal_cb_fw_write, cb_arg);
-	if (rc) {
-		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
-		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
-	}
-
-	return rc;
+	return ocs_hal_common_write_object(hal, dma, size, offset, last, cb, arg, "/sfp/sfp_fw_bundle");
 }
 
 /**
@@ -5861,7 +6059,9 @@ ocs_hal_cb_fw_write(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void  *arg)
 			status = wr_obj_rsp->hdr.status;
 	}
 
-	cb_arg->cb(status, wr_obj_rsp->hdr.additional_status, bytes_written, change_status, cb_arg->arg);
+	cb_arg->cb(status, wr_obj_rsp->hdr.additional_status, wr_obj_rsp->hdr.additional_status_2,
+			bytes_written, change_status, cb_arg->arg);
+
 
 ocs_hal_cb_fw_write_done:
 	if (cb_arg)
@@ -5963,7 +6163,7 @@ ocs_hal_get_sfp(ocs_hal_t *hal, uint16_t page, ocs_hal_sfp_cb_t cb, void *arg)
 
 	/* payload holds the non-embedded portion */
 	if (ocs_dma_alloc(hal->os, &cb_arg->payload, sizeof(sli4_res_common_read_transceiver_data_t),
-			  OCS_MIN_DMA_ALIGNMENT)) {
+			  OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, cb_arg, sizeof(ocs_hal_sfp_cb_arg_t));
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
@@ -6117,6 +6317,7 @@ ocs_hal_get_link_stats(ocs_hal_t *hal,
 	/* Send the HAL command */
 	sli_cmd_read_link_stats(&hal->sli, mbxdata, SLI4_BMBX_SIZE, req_ext_counters,
 				clear_overflow_flags, clear_all_counters);
+
 	rc = ocs_hal_command(hal, mbxdata, OCS_CMD_NOWAIT, ocs_hal_cb_link_stat, cb_arg);
 	if (rc) {
 		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
@@ -6475,7 +6676,7 @@ ocs_hal_set_linkcfg(ocs_hal_t *hal, ocs_hal_linkcfg_e value, uint32_t opts, ocs_
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	if (SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(&hal->sli)) {
+	if (SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli))) {
 		return ocs_hal_set_linkcfg_lancer(hal, value, opts, cb, arg);
 	} else if ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
 		   (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli))) {
@@ -6518,7 +6719,8 @@ ocs_hal_set_linkcfg_lancer(ocs_hal_t *hal, ocs_hal_linkcfg_e value, uint32_t opt
 
 	ocs_snprintf(cmd, OCS_HAL_DMTF_CLP_CMD_MAX, "set / OEMELX_LinkConfig=%s", value_str);
 	/* allocate DMA for command */
-	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd, ocs_strlen(cmd)+1, 4096)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd, ocs_strlen(cmd)+1,
+			  4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -6528,7 +6730,8 @@ ocs_hal_set_linkcfg_lancer(ocs_hal_t *hal, ocs_hal_linkcfg_e value, uint32_t opt
 	ocs_memcpy(cb_arg->dma_cmd.virt, cmd, ocs_strlen(cmd));
 
 	/* allocate DMA for response */
-	if (ocs_dma_alloc(hal->os, &cb_arg->dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX, 4096)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX,
+			  4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		ocs_dma_free(hal->os, &cb_arg->dma_cmd);
 		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
@@ -6654,26 +6857,22 @@ ocs_hal_set_linkcfg_skyhawk(ocs_hal_t *hal, ocs_hal_linkcfg_e value, uint32_t op
  * @param cb Callback function to invoke following mbx command.
  * @param arg Callback argument.
  *
- * @return Returns OCS_HAL_RTN_SUCCESS on success.
+ * @return Returns None.
  */
-static ocs_hal_rtn_e
+static void
 ocs_hal_get_linkcfg(ocs_hal_t *hal, uint32_t opts, ocs_hal_port_control_cb_t cb, void *arg)
 {
-	if (!sli_link_is_configurable(&hal->sli)) {
-		ocs_log_debug(hal->os, "Function not supported\n");
-		return OCS_HAL_RTN_ERROR;
-	}
+	if (!sli_link_is_configurable(&hal->sli))
+		return;
 
 	if ((SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(&hal->sli)) ||
-	    (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(&hal->sli))) {
-		return ocs_hal_get_linkcfg_lancer(hal, opts, cb, arg);
-	} else if ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
-		   (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli))) {
-		return ocs_hal_get_linkcfg_skyhawk(hal, opts, cb, arg);
-	} else {
-		ocs_log_test(hal->os, "Function not supported for this IF_TYPE\n");
-		return OCS_HAL_RTN_ERROR;
-	}
+	    (SLI4_IF_TYPE_LANCER_G7 == sli_get_if_type(&hal->sli)))
+		ocs_hal_get_linkcfg_lancer(hal, opts, cb, arg);
+	else if ((SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) ||
+		 (SLI4_IF_TYPE_BE3_SKH_VF == sli_get_if_type(&hal->sli)))
+		ocs_hal_get_linkcfg_skyhawk(hal, opts, cb, arg);
+	else
+		ocs_log_debug(hal->os, "Function not supported for this IF_TYPE\n");
 }
 
 /**
@@ -6703,7 +6902,8 @@ ocs_hal_get_linkcfg_lancer(ocs_hal_t *hal, uint32_t opts, ocs_hal_port_control_c
 	ocs_snprintf(cmd, OCS_HAL_DMTF_CLP_CMD_MAX, "show / OEMELX_LinkConfig");
 
 	/* allocate DMA for command  */
-	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd, ocs_strlen(cmd)+1, 4096)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd, ocs_strlen(cmd)+1,
+			  4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -6714,7 +6914,8 @@ ocs_hal_get_linkcfg_lancer(ocs_hal_t *hal, uint32_t opts, ocs_hal_port_control_c
 	ocs_memcpy(cb_arg->dma_cmd.virt, cmd, ocs_strlen(cmd));
 
 	/* allocate DMA for response */
-	if (ocs_dma_alloc(hal->os, &cb_arg->dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX, 4096)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX,
+			  4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		ocs_dma_free(hal->os, &cb_arg->dma_cmd);
 		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
@@ -6825,7 +7026,8 @@ ocs_hal_get_linkcfg_skyhawk(ocs_hal_t *hal, uint32_t opts, ocs_hal_port_control_
 	cb_arg->opts = opts;
 
 	/* dma_mem holds the non-embedded portion */
-	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd, sizeof(sli4_res_common_get_reconfig_link_info_t), 4)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->dma_cmd,
+			  sizeof(sli4_res_common_get_reconfig_link_info_t), 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
 		ocs_free(hal->os, cb_arg, sizeof(ocs_hal_linkcfg_cb_arg_t));
@@ -6869,10 +7071,10 @@ ocs_hal_set_dif_seed(ocs_hal_t *hal)
 		SLI4_SET_FEATURES_DIF_SEED, 4, (uint32_t *)&seed_param);
 
 	rc = ocs_hal_command(hal, buf, OCS_CMD_POLL, NULL, NULL);
-	if (rc || ((sli4_mbox_command_header_t *)buf)->status)
-		return OCS_HAL_RTN_ERROR;
+	if (!rc && !((sli4_mbox_command_header_t *)buf)->status)
+		ocs_log_debug(hal->os, "DIF seed set to 0x%x\n",
+			      hal->config.dif_seed);
 
-	ocs_log_debug(hal->os, "DIF seed set to 0x%x\n", hal->config.dif_seed);
 	return rc;
 }
 
@@ -6936,7 +7138,7 @@ ocs_hal_config_fw_ag_rsp(ocs_hal_t *hal, uint8_t enable)
 
 	rc = ocs_hal_command(hal, buf, OCS_CMD_POLL, NULL, NULL);
 	if (rc == OCS_HAL_RTN_NOT_SUPPORTED) {
-		ocs_log_warn(hal->os, "Setting FW auto-good response not supported, rc %d, status %d\n", 
+		ocs_log_warn(hal->os, "Setting FW auto-good response not supported, rc %d, status %d\n",
 							rc, ((sli4_mbox_command_header_t *)buf)->status);
 	} else if (rc || ((sli4_mbox_command_header_t *)buf)->status) {
 		rc = OCS_HAL_RTN_ERROR;
@@ -6960,7 +7162,10 @@ ocs_watchdog_timer(void *arg)
 		return;
 	}
 
-	ocs_hal_config_watchdog_timer(hal);
+	if (ocs_hal_config_watchdog_timer(hal)) {
+		ocs_log_err(hal->os, "HAL WDT config failed\n");
+		ocs_assert(false);
+	}
 }
 
 static void
@@ -6979,7 +7184,7 @@ ocs_hal_cb_cfg_watchdog(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 		else if (sli4_rsp->hdr.status)
 			status = sli4_rsp->hdr.status;
 
-		if (!hal->watchdog_timer_disable)
+		if (hal->watchdog_timeout)
 			/* keeping callback 500ms before timeout to keep heartbeat alive */
 			ocs_setup_timer(hal->os, &hal->watchdog_timer, ocs_watchdog_timer,
 					hal, (hal->watchdog_timeout*1000 - 500), false);
@@ -7001,7 +7206,6 @@ static ocs_hal_rtn_e
 ocs_hal_config_watchdog_timer(ocs_hal_t *hal)
 {
 	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
-	int32_t timeout;
 	uint8_t *buf;
 
 	buf = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
@@ -7010,10 +7214,11 @@ ocs_hal_config_watchdog_timer(ocs_hal_t *hal)
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
 
-	timeout = hal->watchdog_timer_disable ? 0 : hal->watchdog_timeout;
-
-	sli4_cmd_lowlevel_set_watchdog(&hal->sli, buf, SLI4_BMBX_SIZE, timeout);
-	rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_cfg_watchdog, NULL);
+	hal->watchdog_jiffies_prev = ocs_get_os_ticks();
+	sli4_cmd_lowlevel_set_watchdog(&hal->sli, buf,
+				       SLI4_BMBX_SIZE, hal->watchdog_timeout);
+	rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT,
+			     ocs_hal_cb_cfg_watchdog, NULL);
 	if (rc)
 		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
 
@@ -7084,6 +7289,91 @@ ocs_hal_get_itcm_parity_stats(ocs_hal_t *hal, bool clear_stats, ocs_hal_parity_s
 }
 
 static void
+ocs_hal_cb_set_beacon_config(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
+{
+	sli4_cmd_sli_config_t *mbox_rsp = (sli4_cmd_sli_config_t *)mqe;
+	sli4_res_common_set_beacon_config_t *sli4_rsp = NULL;
+	ocs_hal_set_beacon_config_cb_arg_t *cb_arg = arg;
+
+	sli4_rsp = (sli4_res_common_set_beacon_config_t *)mbox_rsp->payload.embed;
+	if (sli4_rsp->hdr.status)
+		ocs_hal_log_sli4_rsp_hdr(hal, &sli4_rsp->hdr);
+
+	if (!cb_arg || !cb_arg->cb)
+		goto ocs_hal_cb_set_beacon_config_done;
+
+	if (0 == status) {
+		if (mbox_rsp->hdr.status)
+			status = mbox_rsp->hdr.status;
+		else if (sli4_rsp->hdr.status)
+			status = sli4_rsp->hdr.status;
+	}
+
+	cb_arg->cb(hal->os, status, cb_arg->arg);
+
+ocs_hal_cb_set_beacon_config_done:
+	if (cb_arg)
+		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
+
+	ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
+}
+
+ocs_hal_rtn_e
+ocs_hal_set_beacon_config(ocs_hal_t *hal, uint8_t sub_cmd, uint16_t duration,
+			  ocs_hal_set_beacon_config_cb_t cb, void *arg)
+{
+	uint8_t *buf = NULL;
+	ocs_hal_set_beacon_config_cb_arg_t *cb_arg = NULL;
+	ocs_hal_rtn_e rc = OCS_HAL_RTN_ERROR;
+
+	buf = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_NOWAIT);
+	if (!buf) {
+		ocs_log_err(hal->os, "Failed to malloc mbox\n");
+		return OCS_HAL_RTN_NO_MEMORY;
+	}
+
+	cb_arg = ocs_malloc(hal->os, sizeof(*cb_arg), OCS_M_NOWAIT);
+	if (!cb_arg) {
+		ocs_log_err(hal->os, "Failed to malloc cb_arg\n");
+		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
+		return OCS_HAL_RTN_NO_MEMORY;
+	}
+
+	cb_arg->cb = cb;
+	cb_arg->arg = arg;
+
+	sli_cmd_common_set_beacon_config(&hal->sli, buf, SLI4_BMBX_SIZE, sub_cmd, duration);
+	rc = ocs_hal_command(hal, buf, OCS_CMD_NOWAIT, ocs_hal_cb_set_beacon_config, cb_arg);
+	if (rc) {
+		ocs_free(hal->os, cb_arg, sizeof(*cb_arg));
+		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
+	}
+
+	return rc;
+}
+
+ocs_hal_rtn_e
+ocs_hal_sfp_fw_upgrade(ocs_hal_t *hal, uint16_t upgrade, void *results, int res_len)
+{
+	uint8_t buf[SLI4_BMBX_SIZE];
+	ocs_hal_rtn_e rc = OCS_HAL_RTN_ERROR;
+	void *rsp;
+
+	ocs_assert(res_len <= SLI4_BMBX_SIZE, -1);
+
+	sli_cmd_common_sfp_fw_upgrade(&hal->sli, buf, upgrade, SLI4_BMBX_SIZE);
+
+	rsp = (sli4_res_common_get_sli4_parameters_t *)
+                        (buf + offsetof(sli4_cmd_sli_config_t, payload.embed));
+
+	rc = ocs_hal_exec_mbx_command_generic_results(hal, buf, true, 30*1000*1000);
+
+	ocs_memcpy(results, rsp, res_len);
+
+	return rc;
+}
+
+static void
 ocs_hal_generic_mbx_command_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 {
 	sli4_cmd_sli_config_t *mbox_rsp = (sli4_cmd_sli_config_t *)mqe;
@@ -7124,7 +7414,7 @@ ocs_hal_generic_mbx_command_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, voi
  * @return Returns OCS_HAL_RTN_SUCCESS on success.
  * 		   OCS_HAL_RTN_ERROR on timeout or failure
  */
-static ocs_hal_rtn_e
+ocs_hal_rtn_e
 ocs_hal_exec_mbx_command_generic_results(ocs_hal_t *hal, uint8_t *req_rsp_buf, bool handle_sli4_rsp, int timeout_usecs)
 {
 	ocs_mq_mbx_results_t *results;
@@ -7642,6 +7932,7 @@ ocs_parse_dual_dump_config_resp(ocs_hal_t *hal, uint8_t *resp, uint32_t *dual_du
 		hal->dual_dump_state = OCS_HAL_DUAL_DUMP_STATE_DISABLED;
 
 	*dual_dump_state = (uint32_t)hal->dual_dump_state;
+
 	return OCS_HAL_RTN_SUCCESS;
 }
 
@@ -7786,7 +8077,6 @@ ocs_hal_linkcfg_dmtf_clp_cb(ocs_hal_t *hal, int32_t status, uint32_t result_len,
 	}
 }
 
-#if !defined(OCSU_FC_WORKLOAD)
 /**
  * @brief Set the Lancer dump location
  *
@@ -7825,7 +8115,8 @@ ocs_hal_set_dump_location(ocs_hal_t *hal, uint32_t num_buffers, ocs_dma_t *dump_
 		dump_sges = (fdb ? &hal->func_dump_sges : &hal->chip_dump_sges);
 		if (dump_sges->size < sge_size) {
 			ocs_dma_free(hal->os, dump_sges);
-			if (ocs_dma_alloc(hal->os, dump_sges, sge_size, OCS_MIN_DMA_ALIGNMENT)) {
+			if (ocs_dma_alloc(hal->os, dump_sges, sge_size,
+					  OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE)) {
 				ocs_log_err(hal->os, "SGE DMA allocation failed\n");
 				return OCS_HAL_RTN_NO_MEMORY;
 			}
@@ -7958,8 +8249,12 @@ ocs_fw_dump_buffer_alloc(ocs_t *ocs, uint8_t dump_level)
 	}
 
 	/* If dump buffers were already allocated, return success */
-	if ((NULL != dump_buffers) && (0 != num_buffers))
+	if ((NULL != dump_buffers) && (0 != num_buffers)) {
+		for (i = 0; i < num_buffers; i++) {
+			ocs_memset(dump_buffers[i].virt, 0, dump_buffers[i].size);
+		}
 		return rc;
+	}
 
 	ocs_hal_get(&ocs->hal, OCS_HAL_DUMP_MAX_SIZE, &ocs->fw_dump.size);
 	if (!ocs->fw_dump.saved_buff)
@@ -7992,12 +8287,15 @@ ocs_fw_dump_buffer_alloc(ocs_t *ocs, uint8_t dump_level)
 
 	for (i = 0; i < num_buffers; i++) {
 		uint32_t num_bytes = OCS_MIN(rem_bytes, OCS_FW_DUMP_CHUNK_SIZE);
-		rc = ocs_dma_alloc(ocs, &dump_buffers[i], num_bytes, OCS_MIN_DMA_ALIGNMENT);
+
+		rc = ocs_dma_alloc(ocs, &dump_buffers[i], num_bytes, OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE);
 		if (rc) {
 			ocs_log_err(ocs, "Failed to allocate buffer for dump\n");
 			rc = -1;
 			goto free_dump_buffers;
 		}
+		ocs_memset(dump_buffers[i].virt, 0, num_bytes);
+
 		rem_bytes -= num_bytes;
 	}
 
@@ -8068,8 +8366,7 @@ ocs_hal_set_dump_to_host_buffers(ocs_hal_t *hal)
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	/* Don't set the dump location if 'fw_dump_to_host' is not enabled */
-	if (OCS_FW_DUMP_TYPE_DUMPTOHOST != ocs->fw_dump.type)
+	if ((OCS_FW_DUMP_TYPE_DUMPTOHOST != ocs->fw_dump.type) || ocs_virtfn(ocs))
 		return OCS_HAL_RTN_SUCCESS;
 
 	/**
@@ -8092,7 +8389,6 @@ ocs_hal_set_dump_to_host_buffers(ocs_hal_t *hal)
 	/* For FDD, set the dump location on all pci functions */
 	return ocs_hal_alloc_set_dump_buffers(hal, OCS_FW_FUNC_DESC_DUMP);
 }
-#endif
 
 /**
  * @brief set loopback mode
@@ -8144,12 +8440,14 @@ ocs_hal_run_biu_diag(ocs_hal_t *hal, void *tx_buff, size_t tx_buff_len,
 		return OCS_HAL_RTN_ERROR;
 	}
 
-	if (ocs_dma_alloc(hal->os, &tx_dma_buf, tx_buff_len, OCS_MIN_DMA_ALIGNMENT)) {
+	if (ocs_dma_alloc(hal->os, &tx_dma_buf, tx_buff_len,
+			  OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to alloc DMA memory for TX buffer\n");
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
 
-	if (ocs_dma_alloc(hal->os, &rx_dma_buf, rx_buff_len, OCS_MIN_DMA_ALIGNMENT)) {
+	if (ocs_dma_alloc(hal->os, &rx_dma_buf, rx_buff_len,
+			  OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to alloc DMA memory for RX buffer\n");
 		ocs_dma_free(hal->os, &tx_dma_buf);
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -8209,7 +8507,7 @@ ocs_hal_set_eth_license(ocs_hal_t *hal, uint32_t license)
 
 	ocs_snprintf(cmd, OCS_HAL_DMTF_CLP_CMD_MAX, "set / OEMELX_Ethernet_License=%X", license);
 	/* allocate DMA for command  */
-	if (ocs_dma_alloc(hal->os, &dma_cmd, ocs_strlen(cmd)+1, 4096)) {
+	if (ocs_dma_alloc(hal->os, &dma_cmd, ocs_strlen(cmd)+1, 4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
@@ -8217,7 +8515,8 @@ ocs_hal_set_eth_license(ocs_hal_t *hal, uint32_t license)
 	ocs_memcpy(dma_cmd.virt, cmd, ocs_strlen(cmd));
 
 	/* allocate DMA for response */
-	if (ocs_dma_alloc(hal->os, &dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX, 4096)) {
+	if (ocs_dma_alloc(hal->os, &dma_resp, OCS_HAL_DMTF_CLP_RSP_MAX,
+			  4096, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "malloc failed\n");
 		ocs_dma_free(hal->os, &dma_cmd);
 		return OCS_HAL_RTN_NO_MEMORY;
@@ -8433,17 +8732,18 @@ ocs_hal_clp_resp_get_value(ocs_hal_t *hal, const char *keyword, char *value, uin
  * halted from the driver as soon as the error is detected.
  *
  * @param hal Hardware context.
- * @param dump Generate dump as part of reset.
+ * @param reset_level Chip level or Port level
+ * @param trigger_dump Generate dump as part of reset.
  *
  * @return Returns 0 on success, or a non-zero value on failure.
  *
  */
 ocs_hal_rtn_e
-ocs_hal_raise_ue(ocs_hal_t *hal, uint8_t dump)
+ocs_hal_raise_ue(ocs_hal_t *hal, uint8_t reset_level, bool trigger_dump)
 {
 	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
 
-	if (sli_raise_ue(&hal->sli, dump) != 0) {
+	if (sli_raise_ue(&hal->sli, reset_level, trigger_dump) != 0) {
 		rc = OCS_HAL_RTN_ERROR;
 	} else {
 		if (hal->state != OCS_HAL_STATE_UNINITIALIZED) {
@@ -8874,7 +9174,7 @@ ocs_hal_get_port_protocol(ocs_hal_t *hal, uint32_t pci_func,
 	cb_arg->pci_func = pci_func;
 
 	/* dma_mem holds the non-embedded portion */
-	if (ocs_dma_alloc(hal->os, &cb_arg->payload, 4096, 4)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->payload, 4096, 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
 		ocs_free(hal->os, cb_arg, sizeof(ocs_hal_get_port_protocol_cb_arg_t));
@@ -9027,7 +9327,7 @@ ocs_hal_set_port_protocol_cb1(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void
 	 */
 	if (ocs_dma_alloc(hal->os, &new_cb_arg->payload, sizeof(sli4_req_common_set_profile_config_t) +
 			  (pci_descriptor_count * sizeof(sli4_pcie_resource_descriptor_v1_t)) +
-			  sizeof(sli4_isap_resouce_descriptor_v1_t), 4)) {
+			  sizeof(sli4_isap_resouce_descriptor_v1_t), 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, new_cb_arg, sizeof(*new_cb_arg));
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
@@ -9180,7 +9480,7 @@ ocs_hal_set_port_protocol(ocs_hal_t *hal, ocs_hal_port_protocol_e new_protocol,
 	cb_arg->pci_func = pci_func;
 
 	/* dma_mem holds the non-embedded portion */
-	if (ocs_dma_alloc(hal->os, &cb_arg->payload, 4096, 4)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->payload, 4096, 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
 		ocs_free(hal->os, cb_arg, sizeof(ocs_hal_get_port_protocol_cb_arg_t));
@@ -9329,7 +9629,8 @@ ocs_hal_get_profile_list(ocs_hal_t *hal, ocs_get_profile_list_cb_t cb, void* ul_
 	cb_arg->arg = ul_arg;
 
 	/* dma_mem holds the non-embedded portion */
-	if (ocs_dma_alloc(hal->os, &cb_arg->payload, sizeof(sli4_res_common_get_profile_list_t), 4)) {
+	if (ocs_dma_alloc(hal->os, &cb_arg->payload,
+			  sizeof(sli4_res_common_get_profile_list_t), 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
 		ocs_free(hal->os, cb_arg, sizeof(ocs_hal_get_profile_list_cb_arg_t));
@@ -10035,7 +10336,14 @@ ocs_hal_domain_get(ocs_hal_t *hal, uint16_t fcfi)
 	}
 
 	if (fcfi < SLI4_MAX_FCFI) {
-		return hal->domains[fcfi];
+		/* 
+		 * Verify that domain object is not being flushed and
+ 		 * in the process of being freed
+ 		 */
+		if (hal->domains[fcfi] && !hal->domains[fcfi]->async_flush_state)
+			return hal->domains[fcfi];
+		else
+			return NULL;
 	} else {
 		ocs_log_test(hal->os, "FCFI %#x out of range (max %#x)\n", fcfi, SLI4_MAX_FCFI);
 		return NULL;
@@ -10122,8 +10430,9 @@ ocs_hal_cq_process(ocs_hal_t *hal, hal_cq_t *cq)
 	uint32_t	n_processed = 0;
 	time_t		tstart;
 	time_t		telapsed;
+	time_t		cq_tstart;
 
-	tstart = ocs_msectime();
+	tstart = cq_tstart = ocs_msectime();
 
 	while (!sli_queue_read(&hal->sli, cq->queue, cqe)) {
 		status = sli_cq_parse(&hal->sli, cq->queue, cqe, &ctype, &rid);
@@ -10198,6 +10507,7 @@ ocs_hal_cq_process(ocs_hal_t *hal, hal_cq_t *cq)
 			break;
 		}
 
+		/* allow preemptions for other higher priority rt threads */
 		n_processed++;
 		if (n_processed == cq->queue->proc_limit) {
 			break;
@@ -10205,6 +10515,13 @@ ocs_hal_cq_process(ocs_hal_t *hal, hal_cq_t *cq)
 
 		if (cq->queue->n_posted >= (cq->queue->posted_limit)) {
 			sli_queue_arm(&hal->sli, cq->queue, FALSE);
+		}
+
+		if (hal->cq_process_max_time_msec && !ocs_in_interrupt_context()) {
+			if ((ocs_msectime() - cq_tstart) >= hal->cq_process_max_time_msec) {
+				ocs_thread_yield(NULL);
+				cq_tstart = ocs_msectime();
+			}
 		}
 	}
 
@@ -10254,6 +10571,35 @@ ocs_hal_wq_process(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe, int32_t status, u
 	}
 
 	(*wqcb->callback)(wqcb->arg, cqe, status);
+}
+
+static int32_t 
+ocs_hal_sport_logo_cb(ocs_hal_io_t *hio, ocs_remote_node_t *rnode, uint32_t length, int32_t status, uint32_t ext_status, void *arg)
+{
+	ocs_hal_fabric_logo_req_t *req = arg;
+	ocs_hal_io_t *io = req->hio;
+	ocs_sport_t *sport = req->sport;
+	ocs_hal_t *hal = io->hal;
+
+	/* Free the resources allocated while sending LOGO req */
+	ocs_dma_free(hal->os, &req->send);
+	ocs_dma_free(hal->os, &req->receive);
+	ocs_hal_io_free(hal, io);
+
+	ocs_free(hal->os, req, sizeof(*req));
+
+	/* Post sport event */
+	switch (status) {
+	case SLI4_FC_WCQE_STATUS_SUCCESS:
+		ocs_sm_post_event(&sport->sm, OCS_EVT_SRRS_ELS_REQ_OK, NULL); 
+		break;
+	default:	// Other error
+		ocs_log_err(hal->os, "status x%x, ext_status x%x\n", status, ext_status);
+		ocs_sm_post_event(&sport->sm, OCS_EVT_SRRS_ELS_REQ_FAIL, NULL); 
+		break;
+	}
+
+	return 0;
 }
 
 /**
@@ -10373,19 +10719,33 @@ ocs_hal_wq_process_io(void *arg, uint8_t *cqe, int32_t status)
 
 	if (status) {
 		ext = sli_fc_ext_status(&hal->sli, cqe);
-		ocs_log_err(hal->os, "HAL IO error WCQE, io=%p xri=%#x tag=%#x type=%d status=%#x ext_status=%#x\n",
-				io, io->indicator, io->reqtag, io->type, status, ext);
+		if (io->rnode) {
+			ocs_node_t *node = (ocs_node_t *)io->rnode->node;
+
+			if (status == SLI4_FC_WCQE_STATUS_FCP_RSP_FAILURE) {
+				node_printf(node, "WQE completed with non-zero status, [%016" PRIX64".%016" PRIX64"] " \
+						"io=%p xri=%#x tag=%#x type=%d status=%#x ext_status=%#x\n",
+						node->sport->wwpn, ocs_node_get_wwpn(node),
+						io, io->indicator, io->reqtag, io->type, status, ext);
+			} else {
+				node_printf_err(node, "WQE completed with non-zero status, [%016" PRIX64".%016" PRIX64"] " \
+						"io=%p xri=%#x tag=%#x type=%d status=%#x ext_status=%#x\n",
+						node->sport->wwpn, ocs_node_get_wwpn(node),
+						io, io->indicator, io->reqtag, io->type, status, ext);
+			}
+		} else {
+			ocs_log_err(hal->os, "WQE completed with non-zero status, io=%p xri=%#x tag=%#x type=%d status=%#x ext_status=%#x\n",
+					io, io->indicator, io->reqtag, io->type, status, ext);
+		}
 	}
 
 	if (wcqe->xb && wcqe->rha) {
 		ocs_hal_rtn_e rc;
-		bool send_abts = ocs_hal_io_can_post_abts(status, ext);
 
-		/* If this is a target command, make sure to suppress any further WQE's */
 		ocs_log_info(hal->os, "Aborting io=%p xri=%#x tag=%#x type=%d\n",
 				io, io->indicator, io->reqtag, io->type);
 
-		rc = ocs_hal_io_abort(hal, io, send_abts, NULL, NULL);
+		rc = ocs_hal_io_abort(hal, io, FALSE, NULL, NULL);
 		if ((OCS_HAL_RTN_SUCCESS != rc) && (OCS_HAL_RTN_IO_ABORT_IN_PROGRESS != rc)) {
 			/* Failed to abort for some other reason, log error */
 			ocs_log_err(hal->os, "Failed to abort io=%p xri=%#x tag=%#x type=%d rc=%d\n",
@@ -10445,6 +10805,22 @@ ocs_hal_wq_process_io(void *arg, uint8_t *cqe, int32_t status)
 		ocs_unlock(&io->tow_lock);
 }
 
+static void
+ocs_hal_remove_io_abort_wqe(ocs_hal_io_t *io)
+{
+	ocs_hal_t *hal = io->hal;
+
+	if (hal->config.emulate_tgt_wqe_timeout) {
+		ocs_lock(&hal->abort_io_timed_wqe_lock);
+		if (!ocs_list_empty(&hal->io_abort_wqe_list) &&
+		    ocs_list_on_list(&io->abort_wqe_link)) {
+			ocs_list_remove(&hal->io_abort_wqe_list, io);
+			io->abort_wqe_submit_ticks = 0;
+		}
+		ocs_unlock(&hal->abort_io_timed_wqe_lock);
+	}
+}
+
 /**
  * @brief Process WQ completions for abort requests.
  *
@@ -10461,9 +10837,15 @@ ocs_hal_wq_process_abort(void *arg, uint8_t *cqe, int32_t status)
 	hal_wq_callback_t *wqcb;
 	uint32_t ext = sli_fc_ext_status(&io->hal->sli, cqe);
 
-	ocs_log_info(io->hal->os, "HAL IO abort WCQE, io=%p xri=%#x tag=%#x abort_reqtag= %#x type=%d status=%#x ext_status=%#x\n",
-				io, io->indicator, io->reqtag, io->abort_reqtag, io->type, status, ext);
+	ocs_log_info(io->hal->os, "HAL IO abort WCQE, io=%p xri=%#x tag=%#x abort_reqtag=%#x type=%d status=%#x "
+		     "ext_status=%#x\n", io, io->indicator, io->reqtag, io->abort_reqtag, io->type, status, ext);
 	ocs_hal_assert(OCS_HAL_IO_STATE_WAIT_FREE != io->state);
+
+	ocs_hal_remove_io_abort_wqe(io);
+	ocs_lock(&io->lock);
+		/* Mark the abort_completed flag to indicate abort is complete */
+		io->abort_completed = TRUE;
+	ocs_unlock(&io->lock);
 
 	/* Invoke the abort_done callback */
 	if (io->abort_done) {
@@ -10537,75 +10919,6 @@ ocs_hal_xabt_process(ocs_hal_t *hal, hal_cq_t *cq, uint8_t *cqe, uint16_t rid)
 	ocs_unlock(&hal->io_lock);
 }
 
-/**
- * @brief Adjust the number of WQs and CQs within the HAL.
- *
- * @par Description
- * Calculates the number of WQs and associated CQs needed in the HAL based on
- * the number of IOs. Calculates the starting CQ index for each WQ, RQ and
- * MQ.
- *
- * @param hal Hardware context allocated by the caller.
- */
-static void
-ocs_hal_adjust_wqs(ocs_hal_t *hal)
-{
-	uint32_t max_wq_num = sli_get_max_queue(&hal->sli, SLI_QTYPE_WQ);
-	uint32_t max_wq_entries = hal->num_qentries[SLI_QTYPE_WQ];
-	uint32_t max_cq_entries = hal->num_qentries[SLI_QTYPE_CQ];
-
-	/*
-	 * possibly adjust the the size of the WQs so that the CQ is twice as
-	 * big as the WQ to allow for 2 completions per IO. This allows us to
-	 * handle multi-phase as well as aborts.
-	 */
-	if (max_cq_entries < max_wq_entries * 2) {
-		max_wq_entries = hal->num_qentries[SLI_QTYPE_WQ] = max_cq_entries / 2;
-	}
-
-	/*
-	 * Calculate the number of WQs to use base on the number of IOs.
-	 *
-	 * Note: We need to reserve room for aborts which must be sent down
-	 *       the same WQ as the IO. So we allocate enough WQ space to
-	 *       handle 2 times the number of IOs. Half of the space will be
-	 *       used for normal IOs and the other half is reserved for aborts.
-	 */
-	hal->config.n_wq = ((hal->config.n_io * 2) + (max_wq_entries - 1)) / max_wq_entries;
-
-	/*
-	 * For performance reasons, it is best to use use a minimum of 4 WQs
-	 * for BE3 and Skyhawk.
-	 */
-	if (hal->config.n_wq < 4 &&
-	    SLI4_IF_TYPE_BE3_SKH_PF == sli_get_if_type(&hal->sli)) {
-		hal->config.n_wq = 4;
-	}
-
-	/*
-	 * For dual-chute support, we need to have at least one WQ per chute.
-	 */
-	if (hal->config.n_wq < 2 &&
-	    ocs_hal_get_num_chutes(hal) > 1) {
-		hal->config.n_wq = 2;
-	}
-
-	/* make sure we haven't exceeded the max supported in the HAL */
-	if (hal->config.n_wq > OCS_HAL_MAX_NUM_WQ) {
-		hal->config.n_wq = OCS_HAL_MAX_NUM_WQ;
-	}
-
-	/* make sure we haven't exceeded the chip maximum */
-	if (hal->config.n_wq > max_wq_num) {
-		hal->config.n_wq = max_wq_num;
-	}
-
-	/*
-	 * Using Queue Topology string, we divide by number of chutes
-	 */
-	hal->config.n_wq /= ocs_hal_get_num_chutes(hal);
-}
-
 static int32_t
 ocs_hal_command_process(ocs_hal_t *hal, int32_t status, uint8_t *mqe, size_t size)
 {
@@ -10625,7 +10938,7 @@ ocs_hal_command_process(ocs_hal_t *hal, int32_t status, uint8_t *mqe, size_t siz
 		ocs_hal_cmd_submit_pending(hal);
 	ocs_unlock(&hal->cmd_lock);
 
-	if (status || hdr->status) {
+	if ((status != SLI4_MGMT_STATUS_COMMAND_NOT_SUPPORTED) && (status || hdr->status)) {
 		ocs_log_err(hal->os, "MQE failed; mqe_hdr: %p, mqe_cmd: %#x, mqe_status: %#x, cqe_status: %#x\n",
 			    hdr, hdr->command, hdr->status, status);
 		ocs_dump32(OCS_DEBUG_ALWAYS, hal->os, "MBOX command buff dump", mqe, SLI4_BMBX_SIZE);
@@ -10694,7 +11007,7 @@ ocs_hal_read_fcf(ocs_hal_t *hal, uint32_t index)
 		return OCS_HAL_RTN_NO_MEMORY;
 	}
 
-	if (ocs_dma_alloc(hal->os, dma, OCS_HAL_READ_FCF_SIZE, OCS_HAL_READ_FCF_SIZE)) {
+	if (ocs_dma_alloc(hal->os, dma, OCS_HAL_READ_FCF_SIZE, OCS_HAL_READ_FCF_SIZE, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "ocs_dma_alloc() failed\n");
 		ocs_free(hal->os, buf, SLI4_BMBX_SIZE);
 		ocs_free(hal->os, dma, sizeof(ocs_dma_t));
@@ -10753,7 +11066,7 @@ ocs_hal_cb_read_fcf(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 			status = read_fcf_rsp->hdr.status;
 	}
 
-	if (status)
+	if (status || (hal->link.status == SLI_LINK_STATUS_DOWN))
 		goto ocs_hal_cb_read_fcf_done;
 
 	/* If either FC / FCOE and FCF entry is valid, process it */
@@ -10912,7 +11225,8 @@ ocs_hal_cb_link(void *ctx, void *e)
 
 			ocs_log_info(hal->os, "Link Up, LOOP, speed is %d Mbps\n", event->speed);
 			if ((0 == hal->loop_map.size) &&
-					ocs_dma_alloc(hal->os, &hal->loop_map, SLI4_MIN_LOOP_MAP_BYTES, 4))
+					ocs_dma_alloc(hal->os, &hal->loop_map,
+						      SLI4_MIN_LOOP_MAP_BYTES, 4, OCS_M_NOWAIT))
 				ocs_log_err(hal->os, "ocs_dma_alloc() failed\n");
 
 			buf = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
@@ -10960,6 +11274,17 @@ ocs_hal_cb_link(void *ctx, void *e)
 		hal->link.logical_link_speed = event->logical_link_speed;
 		hal->link.aggregate_link_speed = event->aggregate_link_speed;
 		break;
+	case SLI_LINK_STATUS_INOPERABLE: {
+		ocs_t *ocs = hal->os;
+
+		if (ocs_get_os_ticks() > ocs->ticks_trigger_fw_error) {
+			/* limit to trigger FW error every 60 minutes */
+			ocs_log_debug(ocs, "Trigger FW error to collect FW dump\n");
+			ocs->ticks_trigger_fw_error = ocs_get_os_ticks() + 60 * 60 * ocs_get_os_tick_freq();
+			ocs_device_trigger_fw_error(ocs, OCS_FW_CHIP_LEVEL_DUMP, true);
+		}
+		break;
+	}
 	default:
 		ocs_log_test(hal->os, "unhandled link status %#x\n", event->status);
 		break;
@@ -11080,6 +11405,10 @@ ocs_hal_cb_node_attach(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 		evt = OCS_HAL_NODE_ATTACH_OK;
 	}
 
+	ocs_node_lock(node);
+		node->wait_attached = FALSE;
+	ocs_node_unlock(node);
+
 	if (hal->callback.rnode)
 		hal->callback.rnode(hal->args.rnode, evt, rnode);
 
@@ -11119,8 +11448,10 @@ ocs_hal_cb_node_free(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 	 * rnode->indicator is valid for the last UNREG_RPI of remote node.
 	 */
 	if (rnode->indicator != UINT32_MAX) {
-		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, rnode->indicator))
-			ocs_log_err(hal->os, "FCOE_RPI (%d) free failed, addr=%#x\n", rnode->indicator, rnode->fc_id);
+		ocs_node_t *node = rnode->node;
+
+		if ((rnode->indicator != node->sport->fabric_rpi) && sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, rnode->indicator))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", rnode->indicator, rnode->fc_id);
 
 		rnode->indicator = UINT32_MAX;
 	}
@@ -11144,13 +11475,21 @@ ocs_hal_cb_unreg_rpi_all(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg
 	ocs_node_t *node_next;
 	int32_t rc = 0;
 
-	if ((hal->state == OCS_HAL_STATE_ACTIVE) && 
+	if ((hal->state == OCS_HAL_STATE_ACTIVE) &&
 	     (status || hdr->status)) {
 		rc = -1;
 	} else {
 		evt = OCS_HAL_NODE_FREE_OK;
 	}
 
+	/* Take sport reference before taking lock and release at end */
+	if (!ocs_ref_get_unless_zero(&sport->ref)) {
+		ocs_log_err(hal->os, "failed to get sport ref count\n");
+		ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
+		ocs_assert(FALSE, -1);
+	}
+
+	ocs_sport_lock(sport);
 	ocs_list_foreach_safe(&sport->node_list, node, node_next) {
 		rnode = &node->rnode;
 		if (!rnode->attached)
@@ -11164,9 +11503,56 @@ ocs_hal_cb_unreg_rpi_all(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg
 		if (hal->callback.rnode)
 			hal->callback.rnode(hal->args.rnode, evt, rnode);
 	}
+	ocs_sport_unlock(sport);
+
+	ocs_ref_put(&sport->ref);
 
 	ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
 	return rc;
+}
+
+void
+ocs_hal_io_teardown(ocs_hal_t *hal)
+{
+	uint32_t i;
+
+	if (hal->io) {
+		for (i = 0; i < hal->config.n_io; i++) {
+			if (!hal->io[i]) {
+				continue;
+			}
+
+			if (hal->io[i]->sgl && hal->io[i]->sgl->virt) {
+
+				if (hal->io[i]->is_port_owned) {
+					ocs_lock_free(&hal->io[i]->tow_lock);
+				}
+
+				ocs_dma_free(hal->os, hal->io[i]->sgl);
+			}
+
+			if (hal->xfer_rdy && hal->xfer_rdy[i].virt) {
+				ocs_dma_free(hal->os, &hal->xfer_rdy[i]);
+			}
+
+			ocs_lock_free(&hal->io[i]->lock);
+			ocs_free(hal->os, hal->io[i], sizeof(ocs_hal_io_t));
+			hal->io[i] = NULL;
+		}
+
+		ocs_free(hal->os, hal->io, hal->config.n_io * sizeof(ocs_hal_io_t *));
+		hal->io = NULL;
+	}
+	
+	if (hal->xfer_rdy) {
+		ocs_free(hal->os, hal->xfer_rdy, hal->config.n_io * sizeof(ocs_dma_t));
+		hal->xfer_rdy = NULL;
+	}
+
+	if (hal->wqe_buffs) {
+		ocs_free(hal->os, hal->wqe_buffs, hal->config.n_io * hal->sli.config.wqe_size);
+		hal->wqe_buffs = NULL;
+	}
 }
 
 /**
@@ -11182,45 +11568,44 @@ ocs_hal_setup_io(ocs_hal_t *hal)
 	uint32_t	i = 0;
 	ocs_hal_io_t	*io = NULL;
 	uint32_t	index;
-	uint8_t		new_alloc = TRUE;
+	uint32_t	max_hal_ios = hal->config.n_io;
+	int32_t sgl_dma_size, sgl_dma_align;
 
+	ocs_assert(hal->io == NULL, OCS_HAL_RTN_ERROR);
+	ocs_assert(hal->wqe_buffs == NULL, OCS_HAL_RTN_ERROR);
+	ocs_assert(hal->xfer_rdy == NULL, OCS_HAL_RTN_ERROR);
+
+	hal->io = ocs_malloc(hal->os, max_hal_ios * sizeof(ocs_hal_io_t *), OCS_M_ZERO);
 	if (!hal->io) {
-		hal->io = ocs_malloc(hal->os, hal->config.n_io * sizeof(ocs_hal_io_t *), OCS_M_ZERO);
-		if (!hal->io) {
-			ocs_log_err(hal->os, "IO pointer memory allocation failed, %d Ios at size %zu\n",
-					hal->config.n_io, sizeof(ocs_hal_io_t *));
-			goto setup_io_error;
-		}
-
-		/* Create WQE buffs for IO */
-		hal->wqe_buffs = ocs_malloc(hal->os, hal->config.n_io * hal->sli.config.wqe_size, OCS_M_ZERO);
-		if (!hal->wqe_buffs) {
-			ocs_log_err(hal->os, "IO WQE buff allocation failed, %d Ios at size %zu\n",
-					hal->config.n_io, hal->sli.config.wqe_size);
-			goto setup_io_error;
-		}
-
-		hal->xfer_rdy = ocs_malloc(hal->os, hal->config.n_io * sizeof(ocs_dma_t), OCS_M_ZERO);
-		if (!hal->xfer_rdy) {
-			ocs_log_err(hal->os, "hal->xfer_rdy memory allocation failed, %d Ios at size %zu\n",
-					hal->config.n_io, sizeof(ocs_dma_t));
-			goto setup_io_error;
-		}
-	} else {
-		/* re-use existing IOs, including SGLs */
-		new_alloc = FALSE;
+		ocs_log_err(hal->os, "IO pointer memory allocation failed, %d Ios at size %zu\n",
+				max_hal_ios, sizeof(ocs_hal_io_t *));
+		goto setup_io_error;
 	}
 
-	for (i = 0; i < hal->config.n_io; i++) {
+	/* Create WQE buffs for IO */
+	hal->wqe_buffs = ocs_malloc(hal->os, max_hal_ios * hal->sli.config.wqe_size, OCS_M_ZERO);
+	if (!hal->wqe_buffs) {
+		ocs_log_err(hal->os, "IO WQE buff allocation failed, %d Ios at size %zu\n",
+				max_hal_ios, hal->sli.config.wqe_size);
+		goto setup_io_error;
+	}
+
+	hal->xfer_rdy = ocs_malloc(hal->os, max_hal_ios * sizeof(ocs_dma_t), OCS_M_ZERO);
+	if (!hal->xfer_rdy) {
+		ocs_log_err(hal->os, "hal->xfer_rdy memory allocation failed, %d Ios at size %zu\n",
+				max_hal_ios, sizeof(ocs_dma_t));
+		goto setup_io_error;
+	}
+
+	for (i = 0; i < max_hal_ios; i++) {
 		hal_wq_callback_t *wqcb;
 
-		if (new_alloc) {
-			hal->io[i] = ocs_malloc(hal->os, sizeof(ocs_hal_io_t), OCS_M_ZERO);
-			if (!hal->io[i]) {
-				ocs_log_err(hal->os, "IO(%d) memory allocation failed\n", i);
-				goto setup_io_error;
-			}
+		hal->io[i] = ocs_malloc(hal->os, sizeof(ocs_hal_io_t), OCS_M_ZERO);
+		if (!hal->io[i]) {
+			ocs_log_err(hal->os, "IO(%d) memory allocation failed\n", i);
+			goto setup_io_error;
 		}
+
 		io = hal->io[i];
 
 		/* Initialize IO fields */
@@ -11248,23 +11633,29 @@ ocs_hal_setup_io(ocs_hal_t *hal)
 			goto setup_io_error;
 		}
 
-		if (new_alloc) {
-			if (ocs_dma_alloc(hal->os, &io->def_sgl, hal->config.n_sgl * sizeof(sli4_sge_t), 64)) {
-				ocs_log_err(hal->os, "ocs_dma_alloc failed @ %d\n", i);
-				ocs_memset(&io->def_sgl, 0, sizeof(ocs_dma_t));
-				goto setup_io_error;
-			}
-
-			if (ocs_dma_alloc(hal->os, &hal->xfer_rdy[i], sizeof(fcp_xfer_rdy_iu_t), 4)) {
-				ocs_log_err(hal->os, "XFER_RDY buffer allocation failed @ %d\n", i);
-				ocs_memset(&hal->xfer_rdy[i], 0, sizeof(ocs_dma_t));
-				goto setup_io_error;
-			}
-
-			ocs_lock_init(hal->os, &io->lock, "hio_lock[%d]", io->indicator);
+		sgl_dma_size = hal->config.n_sgl * sizeof(sli4_sge_t);
+		if (sgl_dma_size > SLI_PAGE_SIZE)
+			sgl_dma_align = SLI_PAGE_SIZE;
+		else
+			sgl_dma_align = 64;
+ 
+		if (ocs_dma_alloc(hal->os, &io->def_sgl, sgl_dma_size,
+				  sgl_dma_align, OCS_M_FLAGS_NONE)) {
+			ocs_log_err(hal->os, "ocs_dma_alloc failed @ %d\n", i);
+			ocs_memset(&io->def_sgl, 0, sizeof(ocs_dma_t));
+			goto setup_io_error;
 		}
 
-		io->def_sgl_count = hal->config.n_sgl;
+		if (ocs_dma_alloc(hal->os, &hal->xfer_rdy[i], sizeof(fcp_xfer_rdy_iu_t),
+				  4, OCS_M_FLAGS_NONE)) {
+			ocs_log_err(hal->os, "XFER_RDY buffer allocation failed @ %d\n", i);
+			ocs_memset(&hal->xfer_rdy[i], 0, sizeof(ocs_dma_t));
+			goto setup_io_error;
+		}
+
+		ocs_lock_init(hal->os, &io->lock, OCS_LOCK_ORDER_HIO, "hio_lock[%d]", io->indicator);
+
+		ocs_hal_get(hal, OCS_HAL_N_SGL, &io->def_sgl_count);
 		io->sgl = &io->def_sgl;
 		io->sgl_count = io->def_sgl_count;
 
@@ -11278,34 +11669,41 @@ ocs_hal_setup_io(ocs_hal_t *hal)
 	return OCS_HAL_RTN_SUCCESS;
 
 setup_io_error:
-	if (hal->io) {
-		for (i = 0; i < hal->config.n_io && hal->io[i]; i++) {
-			if (hal->io[i]->sgl && hal->io[i]->sgl->virt)
-				ocs_dma_free(hal->os, hal->io[i]->sgl);
-
-			if (hal->xfer_rdy && hal->xfer_rdy[i].virt)
-				ocs_dma_free(hal->os, &hal->xfer_rdy[i]);
-
-			ocs_lock_free(&hal->io[i]->lock);
-			ocs_free(hal->os, hal->io[i], sizeof(ocs_hal_io_t));
-			hal->io[i] = NULL;
-		}
-
-		ocs_free(hal->os, hal->io, hal->config.n_io * sizeof(ocs_hal_io_t *));
-		hal->io = NULL;
-	}
-
-	if (hal->xfer_rdy) {
-		ocs_free(hal->os, hal->xfer_rdy, hal->config.n_io * sizeof(ocs_dma_t));
-		hal->xfer_rdy = NULL;
-	}
-
-	if (hal->wqe_buffs) {
-		ocs_free(hal->os, hal->wqe_buffs, hal->config.n_io * hal->sli.config.wqe_size);
-		hal->wqe_buffs = NULL;
-	}
+	ocs_hal_io_teardown(hal);
 
 	return OCS_HAL_RTN_NO_MEMORY;
+}
+
+static bool
+ocs_hal_sgl_chaining_allowed(ocs_hal_t *hal)
+{
+	bool sgl_chaining_allowed = false;
+	uint32_t prereg;
+	uint32_t xpsgl;
+
+	prereg = sli_get_sgl_preregister(&hal->sli);
+	/*
+	 * Lancer G5 and G6
+	 *    LSP SGE is allowed in BLP
+	 *    LSP SGE is not allowed in Pre-registered SGL's
+	 * Prism and Prism+
+	 *    LSP SGE is allowed in both BLP and pre-reg SGL's
+	 */
+	switch (sli_get_if_type(&hal->sli)) {
+	case SLI4_IF_TYPE_LANCER_FC_ETH:
+		if (!prereg)
+			sgl_chaining_allowed = true;
+		break;
+	case SLI4_IF_TYPE_LANCER_G7:
+		if (!ocs_hal_get(hal, OCS_HAL_XPSGL_CAPABLE, &xpsgl) &&
+		    xpsgl)
+			sgl_chaining_allowed = true;
+		break;
+	default:
+		;
+	}
+
+	return sgl_chaining_allowed;
 }
 
 static ocs_hal_rtn_e
@@ -11323,8 +11721,11 @@ ocs_hal_init_io(ocs_hal_t *hal)
 	ocs_dma_t	reqbuf = { 0 };
 	uint16_t	reqbuf_length = sizeof(sli4_req_fcoe_post_sgl_pages_t) +
 					sizeof(sli4_fcoe_post_sgl_page_desc_t)*sgls_per_request;
+	bool		sgl_chaining_allowed;
 
 	prereg = sli_get_sgl_preregister(&hal->sli);
+	sgl_chaining_allowed = ocs_hal_sgl_chaining_allowed(hal);
+
 	if (prereg) {
 		sgls = ocs_malloc(hal->os, sizeof(*sgls) * sgls_per_request, OCS_M_ZERO);
 		if (sgls == NULL) {
@@ -11333,7 +11734,8 @@ ocs_hal_init_io(ocs_hal_t *hal)
 		}
 
 		/* Create a buffer that can hold sgls for 256 SGLs at a time */
-		rc = ocs_dma_alloc(hal->os, &reqbuf, reqbuf_length, OCS_MIN_DMA_ALIGNMENT);
+		rc = ocs_dma_alloc(hal->os, &reqbuf, reqbuf_length,
+				   OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE);
 		if (rc) {
 			ocs_log_err(hal->os, "ocs_dma_alloc reqbuf failed\n");
 			ocs_free(hal->os, sgls, sizeof(*sgls) * sgls_per_request);
@@ -11359,7 +11761,7 @@ ocs_hal_init_io(ocs_hal_t *hal)
 			}
 
 			sli_cmd_fcoe_post_sgl_pages(&hal->sli, cmd, sizeof(cmd),
-				hal->io[io_index]->indicator, n, sgls, NULL, &reqbuf);
+				hal->io[io_index]->indicator, n, sgls, &reqbuf);
 			rc = ocs_hal_command(hal, cmd, OCS_CMD_POLL, NULL, NULL);
 			if (rc) {
 				rc = OCS_HAL_RTN_ERROR;
@@ -11374,6 +11776,7 @@ ocs_hal_init_io(ocs_hal_t *hal)
 			io = hal->io[io_index];
 			io->is_port_owned = 0;
 			io->state = OCS_HAL_IO_STATE_FREE;
+			io->sgl_chaining_allowed = sgl_chaining_allowed;
 			ocs_list_add_tail(&hal->io_free, io);
 		}
 	}
@@ -11401,7 +11804,7 @@ ocs_hal_flush(ocs_hal_t *hal)
 	return 0;
 }
 
-static int32_t
+int32_t
 ocs_hal_command_cancel(ocs_hal_t *hal)
 {
 	ocs_lock(&hal->cmd_lock);
@@ -11446,50 +11849,64 @@ ocs_hal_io_lookup(ocs_hal_t *hal, uint32_t xri)
 }
 
 /**
- * @brief Issue any pending callbacks for an IO and remove off the timer and pending lists.
+ * @brief cancel pending send frame request
+ *
+ * @param hal Hal context.
+ *
+ */
+static void
+ocs_hal_send_frame_req_cancel(ocs_hal_t *hal)
+{
+	ocs_hal_send_frame_context_t *req, *tmp_req;
+
+	ocs_list_foreach_safe(&hal->send_frame_wqe_list, req, tmp_req) {			
+		/* Report IO failure status*/
+		if (req->wqcb->callback)
+			req->wqcb->callback(req->wqcb->arg, NULL, SLI4_FC_WCQE_STATUS_SHUTDOWN);
+	}
+}
+
+/**
+ * @brief Copy the IO to a local list if there are any pending callbacks and
+ *	  remove the IO off the timer and pending lists.
  *
  * @param hal Hal context.
  * @param io Pointer to the IO to cleanup.
+ * @param cancel_wqe_list Local list to copy the IO.
+ *
+ * @return None.
  */
 static void
-ocs_hal_io_cancel_cleanup(ocs_hal_t *hal, ocs_hal_io_t *io)
+ocs_hal_io_cancel_cleanup(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_list_t cancel_wqe_list)
 {
 	/* Remove from the io_timed_wqe list */
 	ocs_hal_remove_io_timed_wqe(hal, io);
+
+	/* Remove from io_abort_wqe list if exists */
+	ocs_hal_remove_io_abort_wqe(io);
 
 	/* Remove from the WQ pending list */
 	if (io->wq && ocs_list_on_list(&io->wqe.link) && !ocs_list_empty(&io->wq->pending_list))
 		ocs_list_remove(&io->wq->pending_list, io);
 
-	if (io->done) {
-		ocs_hal_done_t	done = io->done;
-		void		*arg = io->arg;
-
-		io->done = NULL;
-		ocs_unlock(&hal->io_lock);
-
-		done(io, io->rnode, 0, SLI4_FC_WCQE_STATUS_SHUTDOWN, 0, arg);
-		ocs_lock(&hal->io_lock);
-	}
-
-	if (io->abort_done) {
-		ocs_hal_done_t	abort_done = io->abort_done;
-		void		*abort_arg = io->abort_arg;
-
-		io->abort_done = NULL;
-		ocs_unlock(&hal->io_lock);
-
-		abort_done(io, io->rnode, 0, SLI4_FC_WCQE_STATUS_SHUTDOWN, 0, abort_arg);
-		ocs_lock(&hal->io_lock);
-	}
+	if (io->done || io->abort_done)
+		ocs_list_add_tail(&cancel_wqe_list, io);
 }
+
 
 int32_t
 ocs_hal_io_cancel(ocs_hal_t *hal)
 {
 	ocs_hal_io_t *io = NULL;
 	ocs_hal_io_t *tmp_io = NULL;
+	ocs_list_t cancel_wqe_list;
 	uint32_t iters = 100; /* One second limit */
+
+	/* Cleanup pending send frame IO requests if any*/
+	ocs_hal_send_frame_req_cancel(hal);
+
+	/* Initialize the local 'cancel_wqe_list' */
+	ocs_list_init(&cancel_wqe_list, ocs_hal_io_t, cancel_wqe_link);
 
 	/*
 	 * Manually clean up the outstanding IO. Walk through the list only
@@ -11500,7 +11917,7 @@ ocs_hal_io_cancel(ocs_hal_t *hal)
 			ocs_hal_done_t done = io->done;
 			ocs_hal_done_t abort_done = io->abort_done;
 
-			ocs_hal_io_cancel_cleanup(hal, io);
+			ocs_hal_io_cancel_cleanup(hal, io, cancel_wqe_list);
 
 			/*
 			 * This is called only in the reset/shutdown path.
@@ -11524,15 +11941,34 @@ ocs_hal_io_cancel(ocs_hal_t *hal)
 			 * Note: A port owned XRI cannot be on the io_inuse list. We cannot
 			 *	 call ocs_hal_io_free() because we already hold the io_lock.
 			 */
-			ocs_hal_io_cancel_cleanup(hal, io);
+			ocs_hal_io_cancel_cleanup(hal, io, cancel_wqe_list);
 			ocs_list_remove(&hal->io_port_owned, io);
 			ocs_hal_io_free_common(hal, io);
 		}
 	ocs_unlock(&hal->io_lock);
 
+	/* Report IO failure status to the backend target driver */
+	ocs_list_foreach_safe(&cancel_wqe_list, io, tmp_io) {
+		ocs_list_remove(&cancel_wqe_list, io);
+
+		if (io->done) {
+			ocs_hal_done_t done = io->done;
+
+			io->done = NULL;
+			done(io, io->rnode, 0, SLI4_FC_WCQE_STATUS_SHUTDOWN, 0, io->arg);
+		}
+
+		if (io->abort_done) {
+			ocs_hal_done_t abort_done = io->abort_done;
+
+			io->abort_done = NULL;
+			abort_done(io, io->rnode, 0, SLI4_FC_WCQE_STATUS_SHUTDOWN, 0, io->abort_arg);
+		}
+	}
+
 	/* Give time for the callbacks to complete */
 	do {
-		ocs_delay_usec(10000);
+		ocs_delay_usec(OCS_HAL_WAIT_DELAY_US);
 		iters--;
 	} while (!ocs_list_empty(&hal->io_inuse) && iters);
 
@@ -11621,7 +12057,7 @@ __ocs_read_topology_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
 		if (SLI_LINK_STATUS_UP == hal->link.status) {
 			hal->link.loop_map = hal->loop_map.virt;
 		}
-		hal->link.fc_id = read_topo->acquired_al_pa;
+		hal->link.fc_id = read_topo->al_pa_granted;
 		break;
 	default:
 		hal->link.topology = SLI_LINK_TOPO_MAX;
@@ -11655,7 +12091,7 @@ __ocs_hal_port_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t ev
 		if (data != NULL) {
 			ocs_free(hal->os, data, SLI4_BMBX_SIZE);
 		}
-		/* fall through */
+		FALL_THROUGH; /* fall through */
 	default:
 		ocs_log_test(hal->os, "%s %-20s not handled\n", funcname, ocs_sm_event_name(evt));
 		break;
@@ -11701,7 +12137,10 @@ __ocs_hal_port_freed(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 	case OCS_EVT_ENTER:
 		/* free SLI resource */
 		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
-			ocs_log_err(hal->os, "FCOE_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+			ocs_log_err(hal->os, "FC_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, sport->fabric_rpi))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", sport->fabric_rpi, sport->fc_id);
 
 		/* free mailbox buffer */
 		if (data != NULL) {
@@ -11732,7 +12171,10 @@ __ocs_hal_port_attach_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *d
 	case OCS_EVT_ENTER:
 		/* free SLI resource */
 		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
-			ocs_log_err(hal->os, "FCOE_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+			ocs_log_err(hal->os, "FC_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, sport->fabric_rpi))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", sport->fabric_rpi, sport->fc_id);
 
 		ocs_dump32(OCS_DEBUG_ALWAYS, hal->os, "sport service params",
 			   sport->service_params, sizeof(sport->service_params));
@@ -11926,7 +12368,10 @@ __ocs_hal_port_done(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 	case OCS_EVT_ENTER:
 		/* free SLI resource */
 		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
-			ocs_log_err(hal->os, "FCOE_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+			ocs_log_err(hal->os, "FC_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, sport->fabric_rpi))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", sport->fabric_rpi, sport->fc_id);
 
 		/* free mailbox buffer */
 		if (data != NULL) {
@@ -11973,7 +12418,7 @@ __ocs_hal_port_allocated(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 		break;
 	case OCS_EVT_HAL_PORT_REQ_FREE:
 		/* virtual port request free */
-		if (SLI4_IF_TYPE_LANCER_FC_ETH == sli_get_if_type(&hal->sli)) {
+		if (SLI4_IS_LANCER_FAMILY(sli_get_if_type(&hal->sli))) {
 			ocs_sm_transition(ctx, __ocs_hal_port_free_unreg_vpi, NULL);
 		} else {
 			/*
@@ -12007,7 +12452,10 @@ __ocs_hal_port_alloc_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *da
 	case OCS_EVT_ENTER:
 		/* free SLI resource */
 		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VPI, sport->indicator))
-			ocs_log_err(hal->os, "FCOE_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+			ocs_log_err(hal->os, "FC_VPI (%d) free failed, addr=%#x\n", sport->indicator, sport->fc_id);
+
+		if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_RPI, sport->fabric_rpi))
+			ocs_log_err(hal->os, "FC_RPI (%d) free failed, addr=%#x\n", sport->fabric_rpi, sport->fc_id);
 
 		/* free mailbox buffer */
 		if (data != NULL) {
@@ -12044,7 +12492,7 @@ __ocs_hal_port_alloc_read_sparm64(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *d
 	switch (evt) {
 	case OCS_EVT_ENTER:
 		// allocate memory for the service parameters
-		if (ocs_dma_alloc(hal->os, &sport->dma, 112, 4)) {
+		if (ocs_dma_alloc(hal->os, &sport->dma, 112, 4, OCS_M_NOWAIT)) {
 			ocs_log_err(hal->os, "Failed to allocate DMA memory\n");
 			ocs_sm_transition(ctx, __ocs_hal_port_done, data);
 			break;
@@ -12099,6 +12547,7 @@ static void *
 __ocs_hal_port_alloc_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 {
 	ocs_sli_port_t	*sport = ctx->app;
+	ocs_hal_t	*hal = sport->hal;
 
 	smtrace("port");
 
@@ -12113,9 +12562,10 @@ __ocs_hal_port_alloc_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 		ocs_sm_transition(ctx, __ocs_hal_port_alloc_report_fail, NULL);
 		break;
 	case OCS_EVT_HAL_PORT_REQ_FREE:
-		/* Wait for attach response and then free */
-		sport->sm_free_req_pending = 1;
+		/* port reg_vpi is not yet sent, move to port_freed state */
+		ocs_sm_transition(ctx, __ocs_hal_port_freed, data);
 		break;
+
 	default:
 		__ocs_hal_port_common(__func__, ctx, evt, data);
 		break;
@@ -12248,6 +12698,47 @@ __ocs_hal_domain_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t 
 }
 
 static void *
+__ocs_hal_domain_freed(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
+{
+	ocs_domain_t	*domain = ctx->app;
+	ocs_hal_t	*hal = (domain ? domain->hal : NULL);
+
+	smtrace("domain");
+
+	switch (evt) {
+	case OCS_EVT_ENTER:
+		/* First free the BMBX data */
+		if (data != NULL)
+			ocs_free(domain != NULL ? domain->hal->os : NULL, data, SLI4_BMBX_SIZE);
+
+		/* Free DMA */
+		if (domain != NULL) {
+			/* free VFI resource */
+			if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VFI, domain->indicator))
+				ocs_log_err(hal->os, "FCOE_VFI (%d) free failed\n", domain->indicator);
+
+			ocs_hal_domain_del(hal, domain);
+			ocs_dma_free(hal->os, &domain->dma);
+
+			/* inform registered callbacks */
+			if (hal->callback.domain != NULL) {
+				hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_FREE_OK, domain);
+			}
+		}
+		break;
+
+	case OCS_EVT_EXIT:
+		break;
+
+	default:
+		__ocs_hal_domain_common(__func__, ctx, evt, data);
+		break;
+	}
+
+	return NULL;
+}
+
+static void *
 __ocs_hal_domain_alloc_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 {
 	ocs_domain_t	*domain = ctx->app;
@@ -12277,6 +12768,12 @@ __ocs_hal_domain_alloc_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *
 			hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_ALLOC_FAIL, domain);
 		}
 		break;
+
+	case OCS_EVT_HAL_DOMAIN_REQ_FREE:
+		/* reg_vfi not yet sent, move to domain_freed state */
+		ocs_sm_transition(ctx, __ocs_hal_domain_freed, data);
+		break;
+
 	default:
 		__ocs_hal_domain_common(__func__, ctx, evt, data);
 		break;
@@ -12348,6 +12845,9 @@ __ocs_hal_domain_attach_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void 
 		if (hal->callback.domain != NULL) {
 			hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_ATTACH_FAIL, domain);
 		}
+		break;
+	case OCS_EVT_HAL_DOMAIN_REQ_FREE:
+		ocs_sm_transition(ctx, __ocs_hal_domain_free_unreg_vfi, NULL);
 		break;
 	case OCS_EVT_EXIT:
 		break;
@@ -12638,14 +13138,13 @@ static void *
 __ocs_hal_domain_free_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
 {
 	ocs_domain_t	*domain = ctx->app;
+	ocs_hal_t	*hal = (domain ? domain->hal : NULL);
 
 	smtrace("domain");
 
 	switch (evt) {
 	case OCS_EVT_ENTER:
 		if (domain != NULL) {
-			ocs_hal_t	*hal = domain->hal;
-
 			ocs_hal_domain_del(hal, domain);
 			ocs_dma_free(hal->os, &domain->dma);
 
@@ -12659,46 +13158,6 @@ __ocs_hal_domain_free_report_fail(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *d
 		// free command buffer
 		if (data != NULL) {
 			ocs_free(domain != NULL ? domain->hal->os : NULL, data, SLI4_BMBX_SIZE);
-		}
-		break;
-	case OCS_EVT_EXIT:
-		break;
-	default:
-		__ocs_hal_domain_common(__func__, ctx, evt, data);
-		break;
-	}
-
-	return NULL;
-}
-
-static void *
-__ocs_hal_domain_freed(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *data)
-{
-	ocs_domain_t	*domain = ctx->app;
-
-	smtrace("domain");
-
-	switch (evt) {
-	case OCS_EVT_ENTER:
-		/* First free the BMBX data */
-		if (data != NULL)
-			ocs_free(domain != NULL ? domain->hal->os : NULL, data, SLI4_BMBX_SIZE);
-
-		/* Free DMA and mailbox buffer */
-		if (domain != NULL) {
-			ocs_hal_t *hal = domain->hal;
-
-			/* free VFI resource */
-			if (sli_resource_free(&hal->sli, SLI_RSRC_FCOE_VFI, domain->indicator))
-				ocs_log_err(hal->os, "FCOE_VFI (%d) free failed\n", domain->indicator);
-
-			ocs_hal_domain_del(hal, domain);
-			ocs_dma_free(hal->os, &domain->dma);
-
-			/* inform registered callbacks */
-			if (hal->callback.domain != NULL) {
-				hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_FREE_OK, domain);
-			}
 		}
 		break;
 	case OCS_EVT_EXIT:
@@ -12896,103 +13355,115 @@ target_wqe_timer_cb(void *arg)
 	ocs_hal_t *hal = (ocs_hal_t *)arg;
 	ocs_hal_io_t *io = NULL;
 	ocs_hal_io_t *io_next = NULL;
-	uint64_t ticks_current = ocs_get_os_ticks();
-	uint32_t sec_elapsed;
+	uint64_t ticks_timeout;
 	ocs_list_t io_timed_out_wqe;
-	bool generate_fw_dump = false;
-	int rc = 0;
+	int i, rc = 0;
+	uint8_t fw_dump_type = OCS_FW_DUMP_LEVEL_NONE;
+	ocs_hal_wq_ctx_t *ctx = NULL;
 
-	/* delete existing timer; will kick off new timer after checking wqe timeouts */
+	/* Delete existing timer; will kick off new timer after checking wqe timeouts */
 	hal->in_active_wqe_timer = TRUE;
 	ocs_del_timer(&hal->wqe_timer);
 
 	/* Initialize the local 'io_timed_out_wqe' list */
 	ocs_list_init(&io_timed_out_wqe, ocs_hal_io_t, timed_out_wqe_link);
 
-	/* Loop through active WQE list and check for timeouts */
-	ocs_lock(&hal->io_timed_wqe_lock);
-		ocs_list_foreach_safe(&hal->io_timed_wqe, io, io_next) {
-			sec_elapsed = ((ticks_current - io->submit_ticks) / ocs_get_os_tick_freq());
+	/* In case of chip error, cleanup outstanding pending IOs */
+	if (ocs_hal_reset_pending(hal)) {
+		ocs_t *ocs = hal->os;
 
+		ocs_stop_event_processing(&ocs->ocs_os);
+		/* Check and set HAL state inactive so that we don't post any more WQE's */
+		ocs_adapter_hal_inactive(ocs, TRUE);
+		ocs_hal_flush(hal);
+		ocs_hal_io_cancel(hal);
+		goto exit_target_wqe_timer_cb;
+	}
+
+	/* Loop through active WQE list and check for timeouts */
+	for (i = 0; i < OCS_HAL_WQ_CTX_NUM; i++) {
+		ctx = &hal->wq_ctx[i];
+
+		ocs_lock(&ctx->io_timed_wqe_lock);
+
+		ocs_list_foreach_safe(&ctx->io_timed_wqe, io, io_next) {
 			/*
-			 * If elapsed time > timeout, abort it. No need to check type since
+			 * If IO timed out, abort it. No need to check type since
 			 * it wouldn't be on this list unless it was a target WQE
 			 */
-			if (sec_elapsed > io->tgt_wqe_timeout) {
-				/*
-				 * If the chip is in an error state (UE'd) then don't abort the IO
-				 * as recovery path will be detect the IO timeout and send appropiate
-				 * status to backend target
-				 */
-				if (ocs_hal_reset_pending(hal)) {
-					ocs_unlock(&hal->io_timed_wqe_lock);
-					goto exit_target_wqe_timer_cb;
-				}
+			ticks_timeout = io->submit_ticks + io->tgt_wqe_timeout * ocs_get_os_tick_freq();
+			if (ocs_time_after64(ocs_get_os_ticks(), ticks_timeout)) {
+				ocs_node_t *node = (ocs_node_t *)io->rnode->node;
 
-				ocs_log_info(hal->os, "[INI WWPN: 0x%" PRIx64 "] [TGT WWPN: 0x%" PRIx64 "] "\
-					     "IO timeout io=%p xri=%#x tag=%#x type=%d\n",
-					     ocs_node_get_wwpn(io->rnode->node), io->rnode->sport->wwpn,
-					     io, io->indicator, io->reqtag, io->type);
+				node_printf(node, "IO timeout, [%016" PRIX64".%016" PRIX64"] " \
+					    "io=%p xri=%#x tag=%#x type=%d current:%"PRIu64" submit:%"PRIu64"\n",
+					    node->sport->wwpn, ocs_node_get_wwpn(node),
+					    io, io->indicator, io->reqtag, io->type,
+					    ocs_get_os_ticks(), io->submit_ticks);
 
-				if (io->type == OCS_HAL_ELS_REQ) {
-					/* Remove from active_wqe list so that we won't try to abort again */
-					ocs_list_remove(&hal->io_timed_wqe, io);
-					ocs_log_err(hal->os, "ELS WQE (XRI: 0x%x) completion timedout; "\
-							"Collecting FW dump\n", io->indicator);
-					generate_fw_dump = true;
-					continue;
-				}
-
-				/* now abort outstanding IO */
-				rc = ocs_hal_io_abort(hal, io, TRUE, NULL, NULL);
-				if (OCS_HAL_RTN_NO_RESOURCES == rc) {
-					/* Try to abort this IO request later */
-					continue;
-				}
-
-				/* Remove from active_wqe list so that we won't try to abort again */
-				ocs_list_remove(&hal->io_timed_wqe, io);
-				if (OCS_HAL_RTN_ERROR == rc) {
-					/* Add this IO to a local list and send failure status later */
-					ocs_list_add_tail(&io_timed_out_wqe, io);
-				}
-			} else {
-				/*
-				 * Since all the IO (non-ELS) REQ's have the same timeout value,
-				 * break out of the loop at the first IO REQ that hasn't expired
-				 */
-				if (OCS_HAL_ELS_REQ != io->type) {
-					break;
-				}
+				ocs_list_add_tail(&io_timed_out_wqe, io);
+				ocs_list_remove(&ctx->io_timed_wqe, io);
 			}
+			/* Go through the entire list since each IO could have a different timeout value */
 		}
-	ocs_unlock(&hal->io_timed_wqe_lock);
 
-	/* Report IO timeout failure status to backend target driver */
-	ocs_list_foreach_safe(&io_timed_out_wqe, io, io_next) {
-		ocs_list_remove(&io_timed_out_wqe, io);
-		ocs_scsi_io_timedout(io->ul_io);
+		ocs_unlock(&ctx->io_timed_wqe_lock);
+
+		ocs_list_foreach_safe(&io_timed_out_wqe, io, io_next) {
+			/* Remove IO from local list */
+			ocs_list_remove(&io_timed_out_wqe, io);
+			/* Now abort the outstanding IO */
+			rc = ocs_hal_io_abort(hal, io, FALSE, NULL, NULL);
+			if (OCS_HAL_RTN_NO_RESOURCES == rc) {
+				/* Try to abort this IO request later */
+				ocs_lock(&ctx->io_timed_wqe_lock);
+				ocs_list_add_tail(&ctx->io_timed_wqe, io);
+				ocs_unlock(&ctx->io_timed_wqe_lock);
+				continue;
+			}
+
+			if (rc)
+				ocs_log_err(hal->os, "Failed to abort io=%p xri=%#x tag=%#x type=%d rc=%d\n",
+						io, io->indicator, io->reqtag, io->type, rc);
+		}
 	}
 
-	if (generate_fw_dump)
-		ocs_device_trigger_fw_dump((ocs_t *)hal->os, OCS_FW_FUNC_DESC_DUMP);
+	ocs_lock(&hal->abort_io_timed_wqe_lock);
+	ocs_list_foreach_safe(&hal->io_abort_wqe_list, io, io_next) {
+		ticks_timeout = io->abort_wqe_submit_ticks +
+				OCS_HAL_ABORT_WQE_TIMEOUT * ocs_get_os_tick_freq();
+		if (ocs_time_after64(ocs_get_os_ticks(), ticks_timeout)) {
+			ocs_list_remove(&hal->io_abort_wqe_list, io);
+			io->abort_wqe_submit_ticks = 0;	
+			fw_dump_type = OCS_FW_CHIP_LEVEL_DUMP;
+			ocs_log_err(hal->os, "[INI WWPN: 0x%" PRIx64 "] [TGT WWPN: 0x%" PRIx64 "] "\
+					"ABORT IO timeout io=%p xri=%#x tag=%#x type=%d. Triggering FW Dump\n",
+					ocs_node_get_wwpn(io->rnode->node), io->rnode->sport->wwpn,
+					io, io->indicator, io->reqtag, io->type);
+			break;
+		}
+	}
+	ocs_unlock(&hal->abort_io_timed_wqe_lock);
+
+	if (fw_dump_type)
+		ocs_device_trigger_fw_error(hal->os, fw_dump_type, true);
 
 exit_target_wqe_timer_cb:
-	/* if we're not in the middle of shutting down, schedule next timer */
-	if (!hal->active_wqe_timer_shutdown) {
+	/* If we're not in the middle of shutting down, schedule the next timer */
+	if (!hal->active_wqe_timer_shutdown)
 		ocs_setup_timer(hal->os, &hal->wqe_timer, target_wqe_timer_cb, hal, OCS_HAL_WQ_TIMER_PERIOD_MS, false);
-	} else {
+	else
 		ocs_log_info(hal->os, "active_wqe_timer_shutdown set, do not re-arm wqe timer\n");
-	}
+
 	hal->in_active_wqe_timer = FALSE;
 }
 
-static void
+void
 shutdown_target_wqe_timer(ocs_hal_t *hal)
 {
 	uint32_t	iters = 100;
 
-	if (hal->config.emulate_tgt_wqe_timeout) {
+	if (hal->config.emulate_tgt_wqe_timeout && !hal->active_wqe_timer_shutdown) {
 		/* request active wqe timer shutdown, then wait for it to complete */
 		hal->active_wqe_timer_shutdown = TRUE;
 
@@ -13006,7 +13477,7 @@ shutdown_target_wqe_timer(ocs_hal_t *hal)
 			 * completions are being processed
 			 */
 			ocs_hal_flush(hal);
-			ocs_delay_usec(10000);
+			ocs_delay_usec(OCS_HAL_WAIT_DELAY_US);
 			iters--;
 		}
 
@@ -13194,7 +13665,7 @@ ocs_hal_xri_move_to_port_owned(ocs_hal_t *hal, uint32_t num_xri)
 				}
 			}
 
-			ocs_lock_init(hal->os, &io->tow_lock, "tow_lock[%d]", io->indicator);
+			ocs_lock_init(hal->os, &io->tow_lock, OCS_LOCK_ORDER_HIO_TOW, "tow_lock[%d]", io->indicator);
 			io->is_port_owned = 1;
 			ocs_list_add_tail(&hal->io_port_owned, io);
 
@@ -13345,7 +13816,8 @@ ocs_hal_rx_buffer_alloc(ocs_hal_t *hal, uint32_t rqindex, uint32_t count, uint32
 			}
 
 			rq_buf[i]->rqindex = rqindex;
-			if (ocs_dma_alloc(ocs, &rq_buf[i]->dma, size, OCS_MIN_DMA_ALIGNMENT)) {
+			if (ocs_dma_alloc(ocs, &rq_buf[i]->dma, size,
+					  OCS_MIN_DMA_ALIGNMENT, OCS_M_FLAGS_NONE)) {
 				ocs_log_err(hal->os, "DMA allocation failed\n");
 				goto free_rx_buffer;
 			}
@@ -13493,6 +13965,65 @@ ocs_hal_rx_free(ocs_hal_t *hal)
 			rq->payload_buf = NULL;
 		}
 	}
+}
+
+int32_t
+ocs_hal_get_rq_count_by_filter(ocs_hal_t *hal, uint8_t protocol, uint32_t filter)
+{
+	uint32_t i, j, count = 0;
+	hal_rq_t *rq = NULL;
+
+	for (i = 0; i < hal->config.n_rq; i++) {
+		rq = hal->hal_rq[i];
+		if (rq->protocol != protocol) {
+			continue;
+		}
+
+		/* Check if this RQ has the filter we are looking for */
+		for (j = 0; j < SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG; j++) {
+			if (rq->filter_mask & (1U << j)) {
+				if (hal->config.filter_def[j] == filter)
+					count ++;
+			}
+		}
+	}
+
+	return count;
+}
+
+uint8_t
+ocs_hal_get_mrq_set_num(ocs_hal_t *hal, uint8_t protocol)
+{
+	uint32_t i;
+	hal_rq_t *rq = NULL;
+	uint8_t mrq_set_num = UINT8_MAX;
+
+	for (i = 0; i < hal->config.n_rq; i++) {
+		rq = hal->hal_rq[i];
+		if (!rq->is_mrq)
+			continue;
+
+		if (rq->protocol == protocol) {
+			mrq_set_num = rq->mrq_set_num;
+			break;
+		}
+	}
+
+	return mrq_set_num;
+}
+
+uint8_t
+ocs_hal_get_mrq_marker_category(ocs_hal_t *hal, uint8_t protocol, uint32_t filter)
+{
+	uint8_t marker_category = SLI4_RQ_MARKER_CATEGORY_NONE;
+	uint8_t mrq_set_num = ocs_hal_get_mrq_set_num(hal, protocol);
+
+	if (mrq_set_num == 0)
+		marker_category = SLI4_RQ_MARKER_CATEGORY_MRQ_SET_1;
+	else if (mrq_set_num == 1)
+		marker_category = SLI4_RQ_MARKER_CATEGORY_MRQ_SET_2;
+
+	return marker_category;
 }
 
 /**
@@ -13652,6 +14183,7 @@ ocs_hal_reqtag_alloc(ocs_hal_t *hal, void (*callback)(void *arg, uint8_t *cqe, i
 void
 ocs_hal_reqtag_free(ocs_hal_t *hal, hal_wq_callback_t *wqcb)
 {
+	ocs_hal_assert(wqcb);
 	ocs_hal_assert(wqcb->callback != NULL);
 	wqcb->callback = NULL;
 	wqcb->arg = NULL;
@@ -13729,7 +14261,7 @@ ocs_hal_reqtag_reset(ocs_hal_t *hal)
 void
 _ocs_hal_assert(const char *cond, const char *filename, int linenum)
 {
-	ocs_printf("%s(%d): HAL assertion (%s) failed\n", filename, linenum, cond);
+	ocs_log_err(NULL, "%s(%d): HAL assertion (%s) failed\n", filename, linenum, cond);
 	ocs_abort();
 		/* no return */
 }
@@ -13748,7 +14280,7 @@ _ocs_hal_assert(const char *cond, const char *filename, int linenum)
 void
 _ocs_hal_verify(const char *cond, const char *filename, int linenum)
 {
-	ocs_printf("%s(%d): HAL verify (%s) failed\n", filename, linenum, cond);
+	ocs_log_err(NULL, "%s(%d): HAL verify (%s) failed\n", filename, linenum, cond);
 	ocs_print_stack();
 }
 
@@ -13834,14 +14366,14 @@ ocs_hal_cb_set_profile_config_v0(ocs_hal_t *hal, int32_t status, uint8_t *mqe, v
 {
 	ocs_hal_set_profile_config_v0_cb_arg_t *config_cb_arg = (ocs_hal_set_profile_config_v0_cb_arg_t *)arg;
 	sli4_cmd_sli_config_t *mbox_rsp = (sli4_cmd_sli_config_t *)mqe;
-	sli4_res_common_set_profile_config_t *res = NULL; 
+	sli4_res_common_set_profile_config_t *res = NULL;
 	ocs_dma_t *payload = NULL;
 
 	payload = &config_cb_arg->payload;
 	res = (sli4_res_common_set_profile_config_t *)payload->virt;
 	if (res->hdr.status)
 		ocs_hal_log_sli4_rsp_hdr(hal, &res->hdr);
-	
+
 	if (0 == status) {
 		if (mbox_rsp->hdr.status)
 			status = mbox_rsp->hdr.status;
@@ -13938,7 +14470,7 @@ ocs_hal_setup_vf_resc_defaults(ocs_hal_t *hal, ocs_fcfcoe_vf_resc_t *vf_resc_tbl
 
 /**
  * @ingroup port
- * @brief Set SRIOV VF resources 
+ * @brief Set SRIOV VF resources
  *
  * @par Description
  * This function configures VF resource descriptors using
@@ -14004,17 +14536,17 @@ ocs_hal_set_sriov_vf_resources(ocs_hal_t *hal, int8_t pci_func, int32_t num_vfs,
 				       num_vfs, wwnn, wwpn_tbl);
 
 	/**
- 	* Allocate memory for the descriptors we're going to send.
- 	* i.e. one for each PCI descriptor plus one ISAP descriptor.
- 	*/
+	 * Allocate memory for the descriptors we're going to send.
+	 * i.e. one for each PCI descriptor plus one ISAP descriptor.
+	 */
 	if (ocs_dma_alloc(hal->os, &config_cb_arg->payload,
 			  sizeof(sli4_req_common_set_profile_config_v0_t) +
-			  (num_vfs * sizeof(sli4_rsrc_desc_fcfcoe_v0_t)), 4)) {
+			  (num_vfs * sizeof(sli4_rsrc_desc_fcfcoe_v0_t)), 4, OCS_M_NOWAIT)) {
 		ocs_log_err(hal->os, "Failed to allocate DMA buffer\n");
 		rc = OCS_HAL_RTN_NO_MEMORY;
 		goto free_vf_resc;
 	}
-	
+
 	req = (sli4_req_common_set_profile_config_v0_t *)config_cb_arg->payload.virt;
 	sli_cmd_common_set_profile_config_v0(&hal->sli, mbxdata, SLI4_BMBX_SIZE,
 					     &config_cb_arg->payload, 0, num_vfs);
@@ -14053,6 +14585,23 @@ free_mbx:
 	return rc;
 }
 
+static int32_t
+ocs_hal_p2p_lip_handle_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
+{
+	uint32_t i;
+	ocs_domain_t *d = NULL;
+
+	for (i = 0; i < SLI4_MAX_FCFI; i++) {
+		d = hal->domains[i];
+		if (d != NULL && (hal->callback.domain != NULL)) {
+			hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_LOST, d);
+		}
+	}
+
+	ocs_hal_read_fcf(hal, SLI4_FCOE_FCF_TABLE_FIRST);
+	return 0;
+}
+
 /**
  * @brief Restarting domain in case of fabric re-login request
  *
@@ -14065,23 +14614,693 @@ free_mbx:
 int
 ocs_hal_p2p_lip_handle(ocs_hal_t *hal)
 {
-	uint32_t i;
-	ocs_domain_t *d = NULL;
-
-	if (hal == NULL) {
-		ocs_log_err(NULL, "unable to access HAL object\n");
+	if (ocs_hal_async_call(hal, ocs_hal_p2p_lip_handle_cb, NULL)) {
+		ocs_log_err(hal->os, "HAL async call is failed.\n");
 		return -1;
 	}
 
-	for (i = 0; i < SLI4_MAX_FCFI; i++) {
-		d = hal->domains[i];
-		if (d != NULL && (hal->callback.domain != NULL)) {
-			hal->callback.domain(hal->args.domain, OCS_HAL_DOMAIN_LOST, d);
-		}
+	return 0;
+}
+
+/**
+ * @brief Set persistent topology
+ *
+ * Sets the persistent topology(PT) feature using
+ * COMMON_SET_FEATURES cmd. If mbx cmd succeeds, update the
+ * topology into sli config. PT stores the value to be set into link_flags
+ * of the cmd INIT_LINK, to bring up the link.
+ *
+ * SLI specs defines following for PT:
+ *	When TF is set to 0:
+ *       0 Reserved
+ *       1 Attempt point-to-point initialization (direct attach or Fabric topology).
+ *       2 Attempt FC-AL loop initialization.
+ *       3 Reserved
+ *
+ *      When TF is set to 1:
+ *       0 Attempt FC-AL loop initialization; if it fails, attempt point-to-point initialization.
+ *       1 Attempt point-to-point initialization; if it fails, attempt FC-AL loop initialization.
+ *       2 Reserved
+ *	 3 Reserved
+ *
+ *	Note: Topology failover is only available on Lancer G5. This command will fail
+ *	if TF is set to 1 on any other ASICs
+ *
+ * @param hal Pointer to hal
+ * @param topology topology value to be set, provided through
+ *        elxsdkutil set-topology cmd
+ * @param opts Mailbox command options (OCS_CMD_NOWAIT/POLL).
+ *
+ * @return Returns 0 on success, or a non-zero value on failure.
+ */
+ocs_hal_rtn_e
+ocs_hal_set_persistent_topology(ocs_hal_t *hal, uint32_t topology, uint32_t opts)
+{
+	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
+	uint8_t buf[SLI4_BMBX_SIZE];
+	sli4_req_common_set_features_persistent_topo_param_t param;
+
+	if (!sli_persist_topology_enabled(&hal->sli)) {
+		ocs_log_warn(hal->os, "persistent topology not enabled\n");
+		return -1;
 	}
 
-	ocs_hal_read_fcf(hal, SLI4_FCOE_FCF_TABLE_FIRST);
-	return 0;
+	ocs_memset(&param, 0, sizeof(param));
+	param.persistent_topo = topology;
+
+	switch (topology) {
+	case OCS_HAL_TOPOLOGY_AUTO:
+		if (sli_get_asic_type(&hal->sli) == SLI4_ASIC_TYPE_LANCER) {
+			param.persistent_topo = SLI4_INIT_LINK_F_P2P_FAIL_OVER;
+			param.topo_failover = 1;
+		} else {
+			param.persistent_topo = SLI4_INIT_LINK_F_P2P_ONLY;;
+			param.topo_failover = 0;
+		}
+		break;
+
+	case OCS_HAL_TOPOLOGY_NPORT:
+		param.persistent_topo = SLI4_INIT_LINK_F_P2P_ONLY;
+		param.topo_failover = 0;
+		break;
+
+	case OCS_HAL_TOPOLOGY_LOOP:
+		param.persistent_topo = SLI4_INIT_LINK_F_FCAL_ONLY;
+		param.topo_failover = 0;
+		break;
+
+	default:
+		ocs_log_err(hal->os, "unsupported topology %#x\n", topology);
+		return -1;
+	}
+
+	/* build the set_features command */
+	sli_cmd_common_set_features(&hal->sli, buf, SLI4_BMBX_SIZE,
+			SLI4_SET_FEATURES_PERSISTENT_TOPOLOGY,
+			sizeof(param), &param);
+
+	if (opts == OCS_CMD_POLL)
+		rc = ocs_hal_command(hal, buf, OCS_CMD_POLL, NULL, NULL);
+	else
+		rc = ocs_hal_exec_mbx_command_generic_results(hal, buf, false, OCS_HAL_MBOX_CMD_TIMEOUT);
+
+	if (rc) {
+		ocs_log_err(hal->os, "Failed to set persistent topology, rc: %#x\n", rc);
+		return rc;
+	}
+
+	sli_config_persistent_topology(&hal->sli, param.persistent_topo, param.topo_failover);
+
+	return rc;
+}
+
+/**
+ * @brief Check if loop topology can be configured.
+ *
+ * @par Description
+ * The loop topology is not supported when link speed is
+ * greater than 8G. If the list of supported link speeds
+ * includes 64G or greater, return false since it can't support 8G.
+ *
+ * @param hal Pointer to HAL object.
+ * @param topo Requested topology
+ *
+ * @return Return true if compatible else return false
+ */
+
+bool
+ocs_hal_validate_topology_support(ocs_hal_t *hal, uint32_t topo)
+{
+	ocs_t	*ocs = hal->os;
+	uint32_t lmt;
+
+	if (topo != OCS_HAL_TOPOLOGY_LOOP)
+		return true;
+
+	lmt = sli_get_link_module_type(&hal->sli);
+
+	if (lmt >= OCS_HAL_LINK_MODULE_TYPE_64GB) {
+		ocs_log_err(ocs, "loop topology not supported with link speeds greater than 8G.\n");
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * @ingroup port
+ * @brief Set HBS mode
+ *
+ * @param hal HAL pointer
+ * @param hbs_mode 1 Enables HBS on all the ports
+ *		   0 Disables HBS on all the ports
+ *
+ * @return Returns OCS_HAL_RTN_SUCCESS on success
+ */
+ocs_hal_rtn_e
+ocs_hal_set_hbs_mode(ocs_hal_t *hal, uint32_t hbs_bufsize, uint8_t hbs_mode)
+{
+	uint8_t mbox[SLI4_BMBX_SIZE];
+	ocs_hal_rtn_e rc;
+	ocs_hbs_params_t hbs_params = {0};
+	
+	ocs_assert(hbs_mode == 1 || hbs_mode == 0, OCS_HAL_RTN_ERROR);
+
+	if (hbs_mode == 1) {
+		rc = ocs_hal_read_hbs_params(hal, &hbs_params);
+		if (rc) {
+			ocs_log_err(hal->os, "HBS read params failed\n");
+			return -1;
+		}
+
+		if (hbs_params.hbs_support_enabled) {
+			ocs_log_info(hal->os, "HBS support is already enabled.\n");
+			return OCS_HBS_ALREADY_ENABLED;
+		}
+
+		if (!hbs_bufsize || hbs_bufsize % OCS_HBS_BUFFER_CHUNK_SIZE != 0) {
+			ocs_log_err(hal->os, "Invalid HBS buffsize=%d Bytes; must be in multiples of %d Bytes\n",
+				hbs_bufsize, OCS_HBS_BUFFER_CHUNK_SIZE);
+			return OCS_HBS_BUFSIZE_INVALID;
+		}
+
+		ocs_adapter_set_hbs_bufsize(hal->os, hbs_bufsize);
+	}
+
+	sli_cmd_common_set_hbs_mode(&hal->sli, mbox, SLI4_BMBX_SIZE, hbs_mode);
+	rc = ocs_hal_exec_mbx_command_generic_results(hal, mbox, false, OCS_HAL_MBOX_CMD_TIMEOUT);
+	if (rc) {
+		ocs_log_err(hal->os, "Mbox submit failed\n");
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	ocs_log_info(hal->os, "HBS mode is %s and is effective on next chip reset\n",
+			(hbs_mode ? "enabled" : "disabled"));
+	return rc;
+}
+
+/**
+ * @ingroup port
+ * @brief Read HBS parameters HBSC, HBSAR, & HBSE from COMMON_GET_SLI4_PARAMETERS.
+ *
+ * @param hbs_params Pointer to struct ocs_hbs_params_t
+ *
+ * @return Returns OCS_HAL_RTN_SUCCESS on success
+ */
+ocs_hal_rtn_e
+ocs_hal_read_hbs_params(ocs_hal_t *hal, ocs_hbs_params_t *hbs_params)
+{
+	uint8_t mbox[SLI4_BMBX_SIZE];
+	ocs_hal_rtn_e rc;
+	sli4_res_common_get_sli4_parameters_t *parms;
+
+	sli_cmd_common_get_sli4_parameters(&hal->sli, mbox, SLI4_BMBX_SIZE);
+
+	rc = ocs_hal_exec_mbx_command_generic_results(hal, mbox, false, OCS_HAL_MBOX_CMD_TIMEOUT);
+	if (rc) {
+		ocs_log_err(hal->os, "Mbox submit failed\n");
+		return OCS_HAL_RTN_ERROR;
+	}
+
+	parms = (sli4_res_common_get_sli4_parameters_t *)
+			(mbox + offsetof(sli4_cmd_sli_config_t, payload.embed));
+
+	hbs_params->hbs_configurable = parms->hbs_configurable;
+	hbs_params->hbs_support_after_reset = parms->hbs_support_after_reset;
+	hbs_params->hbs_support_enabled = parms->hbs_support_enabled;
+
+	hbs_params->hbs_bufsize_configured = parms->hbs_support_enabled ? ocs_get_hbs_bufsize(hal->os) : 0;
+
+	ocs_log_info(hal->os, "HBS configuration params HBSC=%d, HBSAR=%d, HBSE=%d\n",
+			hbs_params->hbs_configurable, hbs_params->hbs_support_after_reset,
+			hbs_params->hbs_support_enabled);
+	return rc;
+}
+
+/**
+ * @brief Process send rq_marker wqe completion
+ *  The function is called when the rq_marker wqe posting has completed. Regardless
+ *  of the outcome, the sequence is freed.
+ *
+ *  @param arg Pointer to originator frame sequence.
+ *  @param cqe Pointer to completion queue entry.
+ *  @param status Status of operation. 
+ *
+ *  @return None.
+ **/
+static void
+ocs_rq_marker_wqe_cmpl_cb(void *arg, uint8_t *cqe, int32_t status)
+{
+        ocs_hal_rq_marker_req_t *req = arg;
+        ocs_hal_t *hal = req->hal;
+	
+        /* Free sequence */
+        ocs_hal_reqtag_free(hal, req->wqcb);
+
+        req->wqe.wqebuf = NULL;
+
+	ocs_hal_assert(!req->wqe_complete);
+
+	ocs_lock(&hal->rq_marker_lock);
+	
+	req->wqe_complete = 1;
+
+	/* If all rq compl received, free the the req */
+	if (!req->num_req_pending) {
+		ocs_list_remove(&hal->rq_marker_list, req);
+		ocs_free(hal->os, req, sizeof(ocs_hal_rq_marker_req_t));
+	}
+
+	ocs_unlock(&hal->rq_marker_lock);
+}
+
+/**
+ * @brief issue a rq marker wqe on first WQ
+ *
+ *  @param hal pointer to HAL object
+ *  @param req structure that tracks the completion and rq completions.
+ *
+ *  @return 0 on success, error values on failure
+ **/
+ocs_hal_rtn_e
+ocs_hal_send_rq_marker(ocs_hal_t *hal, ocs_hal_rq_marker_req_t *req)
+{
+	int rc;
+	uint8_t i;
+	ocs_hal_wqe_t *wqe = &req->wqe;
+	hal_wq_t *wq = NULL;
+
+	if (hal->state != OCS_HAL_STATE_ACTIVE)
+		return OCS_HAL_RTN_ERROR;
+
+	/* Fetch and populate request tag */
+	req->wqcb = ocs_hal_reqtag_alloc(hal, ocs_rq_marker_wqe_cmpl_cb, req);
+	if (req->wqcb == NULL) {
+		ocs_log_err(hal->os, "can't allocate request tag\n");
+		return OCS_HAL_RTN_NO_RESOURCES;
+	}
+
+	/* Look for a wq tied to a non-nvme eq */
+	for (i = 0; i < hal->wq_count; i++) {
+		wq = hal->hal_wq[i];
+		if (!wq->cq->eq->nvmeq)
+			break;
+	}
+
+	if (!wq) {
+		ocs_log_err(hal->os, "RQ marker not allocated\n");
+		rc = OCS_HAL_RTN_ERROR;
+		goto exit;
+	}
+
+	sli4_fcoe_marker_request_wqe(&hal->sli, wqe->wqebuf, req->ctx_tag,
+			req->wqcb->instance_index, req->category);
+
+        /* Write to WQ */
+        rc = hal_wq_write(wq, wqe);
+        if (rc) {
+                ocs_log_err(hal->os, "hal_wq_write failed: %d\n", rc);
+                rc = OCS_HAL_RTN_ERROR;
+                goto exit;
+        }
+
+        OCS_STAT(wq->use_count++);
+        return OCS_HAL_RTN_SUCCESS;
+
+exit:
+        ocs_hal_reqtag_free(hal, req->wqcb);
+        req->wqcb = NULL;
+        return rc;
+}
+
+/**
+ * @brief send LOGO to fabric
+ *
+ *  @param hal pointer to HAL object
+ *  @param sport pointer to sport object.
+ *
+ *  @return 0 on success, error values on failure
+ **/
+ocs_hal_rtn_e
+ocs_hal_sport_send_logo(ocs_hal_t *hal, ocs_sport_t *sport)
+{
+	int rc;
+	hal_wq_t *wq = NULL;
+	ocs_hal_io_t *hio;
+	ocs_hal_fabric_logo_req_t *req;
+	fc_logo_payload_t *logo;
+	sli4_sge_t	*sge = NULL;
+	fc_plogi_payload_t *sparams;
+
+	if (hal->state != OCS_HAL_STATE_ACTIVE)
+		return OCS_HAL_RTN_ERROR;
+
+	req = ocs_malloc(hal, sizeof(ocs_hal_fabric_logo_req_t), OCS_M_NOWAIT | OCS_M_ZERO);
+	if (!req) {
+		ocs_log_err(hal->os, "failed to allocate memory for LOGO request\n");
+		rc = OCS_HAL_RTN_NO_RESOURCES;
+		goto exit;
+	}
+
+	rc = ocs_dma_alloc(hal->os, &req->send, sizeof(*logo), OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT);
+	if (rc) {
+		ocs_log_err(hal->os, "failed to allocate DMA buffer to hold LOGO request\n");
+		rc = OCS_HAL_RTN_NO_RESOURCES;
+		goto exit;
+	}
+#define OCS_FABRIC_ELS_LOGO_RESP_SIZE 1024
+	rc = ocs_dma_alloc(hal->os, &req->receive, OCS_FABRIC_ELS_LOGO_RESP_SIZE, OCS_MIN_DMA_ALIGNMENT, OCS_M_NOWAIT);
+	if (rc) {
+		ocs_log_err(hal->os, "failed to allocate DMA buffer to hold LOGO response\n");
+		rc = OCS_HAL_RTN_NO_RESOURCES;
+		goto exit;
+	}
+
+	hio = ocs_hal_io_alloc(hal);
+	if (!hio) {
+		ocs_log_err(hal->os, "failed to allocate HAL IO to send fabric logo\n");
+		rc = OCS_HAL_RTN_NO_RESOURCES;
+		goto exit;
+	}
+
+	req->hio = hio;
+	req->sport = sport;
+
+	hio->type = OCS_HAL_ELS_REQ;
+
+	logo = req->send.virt;
+	sparams = (fc_plogi_payload_t*) sport->service_params;
+	ocs_memset(logo, 0, sizeof(*logo));
+
+	/* fill logo request payload info */
+	logo->command_code = FC_ELS_CMD_LOGO;
+	logo->resv1 = 0;
+	logo->port_id = fc_htobe24(sport->fc_id);
+	logo->port_name_hi = sparams->port_name_hi;
+	logo->port_name_lo = sparams->port_name_lo;
+
+	sge = hio->sgl->virt;
+
+	/* clear both the SGE */
+	ocs_memset(hio->sgl->virt, 0, 2*sizeof(sli4_sge_t));
+
+	sge[0].buffer_address_high = ocs_addr32_hi(req->send.phys);
+	sge[0].buffer_address_low  = ocs_addr32_lo(req->send.phys);
+	sge[0].sge_type = SLI4_SGE_TYPE_DATA;
+	sge[0].buffer_length = req->send.size;
+
+	sge[1].buffer_address_high = ocs_addr32_hi(req->receive.phys);
+	sge[1].buffer_address_low  = ocs_addr32_lo(req->receive.phys);
+	sge[1].sge_type = SLI4_SGE_TYPE_DATA;
+	sge[1].buffer_length = req->receive.size;
+	sge[1].last = TRUE;
+
+	/* Register callback function and its arguments */
+	hio->done = ocs_hal_sport_logo_cb; 
+	hio->arg = req;
+
+	wq = ocs_hal_queue_next_wq(hal, hio);
+	if (!wq) {
+		ocs_log_err(hal->os, "Failed to find WQE to send LOGO\n");
+		rc = OCS_HAL_RTN_ERROR;
+		goto exit;
+	}
+
+	sli_els_request64_wqe(&hal->sli, hio->wqe.wqebuf, hal->sli.config.wqe_size, hio->sgl, FC_ELS_CMD_LOGO, req->send.size, 0,
+				OCS_FC_ELS_SEND_DEFAULT_TIMEOUT, hio->indicator, hio->reqtag, SLI4_CQ_DEFAULT, NULL, req->sport);
+
+	hio->wq = wq;
+	hio->xbusy = TRUE;
+
+	/* Write to WQ */
+	rc = hal_wq_write(wq, &hio->wqe);
+	if (rc) {
+		ocs_log_err(hal->os, "hal_wq_write failed: %d\n", rc);
+		rc = OCS_HAL_RTN_ERROR;
+		hio->xbusy = FALSE;
+		goto exit;
+	}
+
+	OCS_STAT(wq->use_count++);
+	return OCS_HAL_RTN_SUCCESS;
+exit:
+	if (req) {
+		if (req->hio)
+			ocs_hal_io_free(hal, req->hio);
+
+		ocs_dma_free(hal->os, &req->send);
+		ocs_dma_free(hal->os, &req->receive);
+
+		ocs_free(hal->os, req, sizeof(*req));
+	}
+	return rc;
+}
+
+/**
+ * @brief Request to generate a rq marker request on all RQs
+ *
+ *  @param hal pointer to HAL object
+ *  @param category Marker category
+ *  @param cb  call back funtion pointer after completion
+ *  @param arg call back argument
+ *
+ *  @return 0 on success, error values on failure
+ **/
+ocs_hal_rtn_e
+ocs_hal_rq_marker_gen_req(ocs_hal_t *hal, uint8_t category, void (*cb)(void *), void *arg)
+{
+	ocs_hal_rq_marker_req_t *req;
+	int rc;
+	int num_req_pending = 0;
+
+	if (category == SLI4_RQ_MARKER_CATEGORY_ALL) {
+		num_req_pending = hal->scsi_rq_pair_count;
+	} else {
+		num_req_pending = hal->scsi_io_mrq_pair_count;
+	}
+
+	req = ocs_malloc(hal->os, sizeof(ocs_hal_rq_marker_req_t), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!req)
+		return OCS_HAL_RTN_ERROR;
+
+	ocs_lock(&hal->rq_marker_lock);
+
+	req->ctx_tag = hal->rq_marker_tag++;
+
+	if (!hal->rq_marker_tag)
+		hal->rq_marker_tag++;
+
+	req->hal = hal;
+	req->cb = cb;
+	req->cb_arg = arg;
+	req->wqe.wqebuf = req->wqebuf;
+	req->category = category;
+
+	/* Num rq completions expected */
+	req->num_req_pending = num_req_pending;
+	ocs_list_add_tail(&hal->rq_marker_list, req);
+	
+	ocs_unlock(&hal->rq_marker_lock);
+
+	rc = ocs_hal_send_rq_marker(hal, req);
+	if (rc) {
+		/* Clean up and return failure */
+		ocs_lock(&hal->rq_marker_lock);
+		ocs_list_remove(&hal->rq_marker_list, req);
+		ocs_free(hal->os, req, sizeof(ocs_hal_rq_marker_req_t));
+		ocs_unlock(&hal->rq_marker_lock);
+	}
+
+	return rc;
+}
+
+/**
+ * @brief Function called on receiving RQ marker completion on RQ
+ *
+ *  @param hal pointer to HAL object
+ *  @param tag Value used when RQ marker wqe was issued
+ *
+ *  @return None
+ **/
+void ocs_hal_rq_marker_handle_cmpl(ocs_hal_t *hal, uint32_t tag)
+{
+	ocs_hal_rq_marker_req_t *req = NULL, *req_next = NULL;
+	bool flush_done = false;
+	void (*cb)(void *);
+	void *cb_arg;
+
+	ocs_lock(&hal->rq_marker_lock);
+	
+	/* Find matching request on the list */
+	ocs_list_foreach_safe(&hal->rq_marker_list, req, req_next) {
+		if (req->ctx_tag == tag)
+			break;
+	}
+
+	ocs_hal_assert(req && req->num_req_pending);
+
+	req->num_req_pending--;
+
+	if (!req->num_req_pending) {
+		/*
+		 * Completion received on all RQs, remove from list and invoke
+		 * cb outside the lock
+		 */
+		cb = req->cb;
+		cb_arg = req->cb_arg;
+		flush_done = true;
+
+		/* If wqe completion is done, free the req */
+		if (req->wqe_complete) {
+			ocs_list_remove(&hal->rq_marker_list, req);
+			ocs_free(hal->os, req, sizeof(ocs_hal_rq_marker_req_t));
+		}
+	}
+	
+	ocs_unlock(&hal->rq_marker_lock);
+
+
+	if (flush_done) {
+		cb(cb_arg);
+	}
+}
+ 
+/**
+ * @brief Invoke callback on all pending rq flush requests and free them.
+ *        Function assumes this is invoked in recovery path only. clean
+ *        up happens without rq_marker_lock.
+ *
+ *  @param hal pointer to HAL object
+ *
+ *  @return None
+ **/
+void ocs_hal_rq_marker_clean(ocs_hal_t *hal)
+{
+	ocs_hal_rq_marker_req_t *req = NULL, *req_next = NULL;
+
+	ocs_list_foreach_safe(&hal->rq_marker_list, req, req_next) {
+	
+		ocs_list_remove(&hal->rq_marker_list, req);
+
+		req->cb(req->cb_arg);
+
+		ocs_free(hal->os, req, sizeof(ocs_hal_rq_marker_req_t));
+
+	}
+}
+
+/**
+ * @brief Callback function to update the fw revision data after
+ *	  READ_REV command completes.
+ *
+ * @param hal pointer to HAL object
+ * @param status status of the hal command completion
+ * @param mqe Pointer to mailbox completion queue entry.
+ * @param arg Caller-provided argument.
+ *
+ * @return 0 on success, error values on failure
+ **/
+static int32_t
+ocs_hal_update_fw_revision_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
+{
+	sli4_cmd_read_rev_t *read_rev = (sli4_cmd_read_rev_t *)mqe;
+
+	if (status || read_rev->hdr.status) {
+		ocs_log_err(hal->os, "READ_REV bad status %#x\n", read_rev->hdr.status);
+		ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
+		return -1;
+	}
+
+	sli_config_update_fw_revision(&hal->sli, read_rev);
+	
+	ocs_free(hal->os, mqe, SLI4_BMBX_SIZE);
+
+	return OCS_HAL_RTN_SUCCESS;
+}
+
+/**
+ * @brief Function called to update the fw revision data after
+ *	  a firmware update. Function is invoked only if the 
+ *	  firmware update doesn't require a reset.
+ *
+ * @param hal pointer to HAL object
+ *
+ * @return 0 on success, error values on failure
+ **/
+int32_t
+ocs_hal_update_fw_revision(ocs_hal_t *hal)
+{
+	uint8_t *mbxdata;
+	ocs_hal_rtn_e rc;
+
+	ocs_log_info(hal->os, "Update firmware revision info\n");
+	
+	mbxdata = ocs_malloc(hal->os, SLI4_BMBX_SIZE, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (mbxdata == NULL) {
+		ocs_log_err(hal->os, "failed to malloc mbox\n");
+		return OCS_HAL_RTN_NO_MEMORY;
+	}
+
+	sli_cmd_read_rev(&hal->sli, mbxdata, SLI4_BMBX_SIZE);
+
+	/* Send the HAL command */
+	rc = ocs_hal_command(hal, mbxdata, OCS_CMD_NOWAIT, ocs_hal_update_fw_revision_cb, NULL);
+	if (rc)
+		ocs_free(hal->os, mbxdata, SLI4_BMBX_SIZE);
+	
+	return rc;
+}
+
+/**
+ * @ingroup port
+ * @brief enable or disable Encrypt data inflight feature
+ *
+ * @param hal pointer to HAL structure
+ * @param query get the EDIF state
+ * @param mode to set the EDIF
+ *
+ * @return Returns OCS_HAL_RTN_SUCCESS on success
+ */
+ocs_hal_rtn_e
+ocs_hal_edif_mode(ocs_hal_t *hal, uint8_t query, uint8_t *mode)
+{
+	ocs_hal_rtn_e rc = OCS_HAL_RTN_SUCCESS;
+	uint8_t buf[SLI4_BMBX_SIZE];
+	sli4_req_common_set_features_edif_param_t param;
+	sli4_res_common_set_features_t *resp_cmn = NULL;
+	sli4_res_common_set_features_edif_param_t *resp;
+
+	ocs_memset(&param, 0, sizeof(param));
+
+	param.query = query;
+	param.edif = *mode;
+
+	/* build the set_features command */
+	sli_cmd_common_set_features(&hal->sli, buf, SLI4_BMBX_SIZE,
+				    SLI4_SET_FEATURES_EDIF,
+				    sizeof(param), &param);
+
+	rc = ocs_hal_exec_mbx_command_generic_results(hal, buf, false, OCS_HAL_MBOX_CMD_TIMEOUT);
+	if (rc == OCS_HAL_RTN_ERROR) {
+		ocs_log_err(hal->os, "Failed to issue edif mailbox.\n");
+		return rc;
+	}
+
+	resp_cmn = (sli4_res_common_set_features_t *)
+		   (buf + offsetof(sli4_cmd_sli_config_t, payload.embed));
+	resp = (sli4_res_common_set_features_edif_param_t *)resp_cmn->params;
+	
+	if (rc == OCS_HAL_RTN_SLI_RESP_ERROR) {
+		ocs_log_err(hal->os, "EDIF feature failed with status 0x%x\n", resp_cmn->hdr.status);
+		return resp_cmn->hdr.status;
+	}
+
+	if (query)
+		*mode = resp->edif;
+	else
+		ocs_log_info(hal->os, "EDIF feature is %s successfully\n", (*mode ? "enabled" : "disabled"));
+
+	return rc;
 }
 
 /* vim: set noexpandtab textwidth=120: */

@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -76,8 +78,8 @@ ocs_cbuf_alloc(ocs_os_handle_t os, uint32_t entry_count)
 	cbuf->pidx = 0;
 	cbuf->cidx = 0;
 
-	ocs_lock_init(NULL, &cbuf->cbuf_clock, "cbuf_c:%p", cbuf);
-	ocs_lock_init(NULL, &cbuf->cbuf_plock, "cbuf_p:%p", cbuf);
+	ocs_lock_init(NULL, &cbuf->cbuf_clock, OCS_LOCK_ORDER_IGNORE, "cbuf_c:%p", cbuf);
+	ocs_lock_init(NULL, &cbuf->cbuf_plock, OCS_LOCK_ORDER_IGNORE, "cbuf_p:%p", cbuf);
 	ocs_sem_init(&cbuf->cbuf_csem, 0, "cbuf:%p", cbuf);
 	ocs_sem_init(&cbuf->cbuf_psem, cbuf->entry_count, "cbuf:%p", cbuf);
 

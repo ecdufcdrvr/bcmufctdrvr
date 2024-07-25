@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -337,6 +339,15 @@ ocs_auth_cfg_obj_read(ocs_t *ocs, u32 offset, ocs_dma_t *dma, u32 *read_len)
 	return OCS_HAL_RTN_IS_ERROR(hal_rc) ? -EIO : 0;
 }
 
+static bool
+ocs_dhchap_auth_enabled(void)
+{
+	if (ocs_gpl_api_enabled() && ocs_crypto_api_enabled())
+		return true;
+	else
+		return false;
+}
+
 int
 ocs_auth_cfg_setup(ocs_t *ocs)
 {
@@ -346,14 +357,14 @@ ocs_auth_cfg_setup(ocs_t *ocs)
 	u32 read_len, offset;
 	int i, rc;
 
-	if (!ocs_gpl_api_enabled()) {
-		ocs_log_err(ocs, "DHCHAP authentication cannot be enabled\n");
+	if (!ocs_dhchap_auth_enabled()) {
+		ocs_log_info(ocs, "DHCHAP authentication not enabled\n");
 		return -EOPNOTSUPP;
 	}
 
-	ocs_lock_init(ocs, &ocs->auth_cfg_lock, "auth cfg lock");
+	ocs_lock_init(ocs, &ocs->auth_cfg_lock, OCS_LOCK_ORDER_IGNORE, "auth cfg lock");
 
-	rc = ocs_dma_alloc(ocs, &ocs->auth_cfg_mem, OCS_AUTH_CFG_SIZE, 4);
+	rc = ocs_dma_alloc(ocs, &ocs->auth_cfg_mem, OCS_AUTH_CFG_SIZE, 4, OCS_M_FLAGS_NONE);
 	if (rc)
 		goto err;
 	ocs_memset(ocs->auth_cfg_mem.virt, 0, OCS_AUTH_CFG_SIZE);
@@ -459,7 +470,7 @@ ocs_auth_cfg_commit(ocs_t *ocs)
 	ocs_auth_cfg_info_sync(ocs);
 
 	/* alloc temp dma memory for reading global auth cfg object */
-	rc = ocs_dma_alloc(ocs, &dma, OCS_AUTH_CFG_SIZE_GLOBAL, 4);
+	rc = ocs_dma_alloc(ocs, &dma, OCS_AUTH_CFG_SIZE_GLOBAL, 4, OCS_M_NOWAIT);
 	if (rc)
 		goto done;
 	ocs_memset(dma.virt, 0, OCS_AUTH_CFG_SIZE_GLOBAL);
@@ -1279,7 +1290,7 @@ ocs_auth_neg_parse(ocs_node_t *node, u8 *msg, u32 msg_len, __be32 trans_id)
 	struct ocs_auth_neg_dhchap_param *dhchap_param;
 	struct ocs_auth_proto_params_hdr *params_hdr;
 	struct ocs_auth_node_name *remote_name;
-	u32 hash_id, dh_grp_id = DH_GROUP_NULL;
+	u32 hash_id = UINT32_MAX, dh_grp_id = DH_GROUP_NULL;
 	struct ocs_auth_neg_hdr *neg_hdr;
 	enum ocs_auth_role new_role;
 	u8 *msg_start = msg;
@@ -1713,7 +1724,7 @@ static int
 ocs_auth_neg_recv(ocs_node_t *node, u8 *msg, u32 msg_len, __be32 trans_id)
 {
 	struct ocs_dhchap_info *dhchap = &node->auth.dhchap;
-	u8 send_dh[MAX_DH_VAL_LEN], dh_base = DH_BASE, expl;
+	u8 send_dh[MAX_DH_VAL_LEN] = {0}, dh_base = DH_BASE, expl;
 	int rc;
 
 	expl = ocs_auth_neg_parse(node, msg, msg_len, trans_id);

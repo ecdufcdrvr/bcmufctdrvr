@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,7 +41,7 @@
 
 typedef struct {
 	ocs_list_link_t link;
-	uint8_t user_allocated:1;
+	bool user_allocated;
 	uint8_t *buffer;
 	uint32_t buffer_length;
 	uint32_t buffer_written;
@@ -48,7 +50,7 @@ typedef struct {
 typedef struct {
 	ocs_t *ocs;
 	ocs_list_t segment_list;
-	uint8_t pre_allocated:1;
+	bool pre_allocated;
 	uint32_t allocation_length;
 	uint32_t total_allocation_length;
 	uint32_t max_allocation_length;

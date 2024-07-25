@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -216,7 +218,7 @@ typedef struct sli4_req_fcoe_rq_create_v1_s {
 			dnb:1;
 	uint32_t	page_size:8,
 			rqe_size:4,
-			:4,
+			rqe_count_hi:4,
 			rqe_count:16;
 	uint32_t	rsvd6;
 	uint32_t	:16,
@@ -245,7 +247,7 @@ typedef struct sli4_req_fcoe_rq_create_v2_s {
 			dnb:1;
 	uint32_t	page_size:8,
 			rqe_size:4,
-			:4,
+			rqe_count_hi:4,
 			rqe_count:16;
 	uint32_t	hdr_buffer_size:16,
 			payload_buffer_size:16;
@@ -410,6 +412,7 @@ typedef struct sli4_req_fcoe_rediscover_fcf_s {
 #define SLI4_WQE_ELS_RSP64		0x95
 #define SLI4_WQE_XMIT_SEQUENCE64	0x82
 #define SLI4_WQE_REQUEUE_XRI		0x93
+#define SLI4_WQE_RQ_MARKER_REQUEST	0xe6
 
 /**
  * WQE command types.
@@ -427,6 +430,7 @@ typedef struct sli4_req_fcoe_rediscover_fcf_s {
 #define SLI4_CMD_XMIT_SEQUENCE64_WQE	0x08
 #define SLI4_CMD_REQUEUE_XRI_WQE	0x0A
 #define SLI4_CMD_SEND_FRAME_WQE		0x0a
+#define	SLI4_CMD_RQ_MARKER_REQ_WQE	0x0a
 
 #define SLI4_WQE_SIZE			0x05
 #define SLI4_WQE_EXT_SIZE		0x06
@@ -799,7 +803,7 @@ typedef struct sli4_fcp_iwrite64_wqe_s {
 } sli4_fcp_iwrite64_wqe_t;
 
 typedef struct sli4_fcp_128byte_wqe_s {
-	uint32_t dw[32];	
+	uint32_t dw[32];
 } sli4_fcp_128byte_wqe_t;
 
 /**
@@ -1443,6 +1447,44 @@ typedef struct sli4_xmit_els_rsp64_wqe_s {
 #endif
 } sli4_xmit_els_rsp64_wqe_t;
 
+#define SLI4_RQ_MARKER_CATEGORY_NONE		0x0
+#define SLI4_RQ_MARKER_CATEGORY_ALL		0x1
+#define SLI4_RQ_MARKER_CATEGORY_ALL_MRQ_SETS	0x3
+#define SLI4_RQ_MARKER_CATEGORY_MRQ_SET_1	0x4
+#define SLI4_RQ_MARKER_CATEGORY_MRQ_SET_2	0x5
+#define SLI4_RQ_MARKER_TYPE_SCSI		0x80000000
+
+typedef struct sli4_fcoe_marker_request_wqe_s {
+        uint32_t        rsvd0[3];
+#if BYTE_ORDER == LITTLE_ENDIAN
+        uint32_t        marker_category: 4,
+                        : 28;
+        uint32_t        tag_lower;
+        uint32_t        tag_higher;
+        uint32_t        rsvd1;
+        uint32_t        : 8,
+                        command: 8,
+                        : 16;
+        uint32_t        rsvd2;
+        uint32_t        req_tag: 16,
+                        rq_id: 16;
+        uint32_t        ebde_cnt: 4,
+                        : 3,
+                        len_loc: 2,
+                        qosd: 1,
+                        rsvd3: 22;
+        uint32_t        cmd_type: 4,
+                        : 3,
+                        wqec: 1,
+                        : 8,
+                        cq_id: 16;
+        uint32_t        rsvd4[4];
+#else
+#error big endian version not defined
+#endif
+} sli4_fcoe_marker_request_wqe_t;
+
+
 /**
  * @brief Asynchronouse Event: Link State ACQE.
  */
@@ -1902,8 +1944,7 @@ extern int32_t sli_fc_process_fcoe(sli4_t *, void *);
 extern int32_t sli_cmd_fcoe_wq_create(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, bool);
 extern int32_t sli_cmd_fcoe_wq_create_v1(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, bool);
 extern int32_t sli_cmd_fcoe_wq_destroy(sli4_t *, void *, size_t, uint16_t);
-extern int32_t sli_cmd_fcoe_post_sgl_pages(sli4_t *, void *, size_t, uint16_t, uint32_t, ocs_dma_t **, ocs_dma_t **,
-ocs_dma_t *);
+extern int32_t sli_cmd_fcoe_post_sgl_pages(sli4_t *, void *, size_t, uint16_t, uint32_t, ocs_dma_t **, ocs_dma_t *);
 extern int32_t sli_cmd_fcoe_rq_create(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, uint16_t);
 extern int32_t sli_cmd_fcoe_rq_create_v1(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, uint16_t);
 extern int32_t sli_cmd_fcoe_rq_destroy(sli4_t *, void *, size_t, uint16_t);
@@ -1915,7 +1956,7 @@ extern int32_t sli_fc_rq_set_alloc(sli4_t *, uint32_t, sli4_queue_t *[], uint32_
 extern uint32_t sli_fc_get_rpi_requirements(sli4_t *, uint32_t);
 extern int32_t sli_abort_wqe(sli4_t *, void *, size_t, sli4_abort_type_e, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t);
 
-extern int32_t sli_els_request64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint8_t, uint32_t, uint32_t, uint8_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *);
+extern int32_t sli_els_request64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint8_t, uint32_t, uint32_t, uint8_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, ocs_sport_t *);
 extern int32_t sli_fcp_iread64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_fcp_iwrite64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_fcp_icmnd64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint16_t, uint16_t, uint16_t, uint32_t, ocs_remote_node_t *, uint8_t);
@@ -1928,6 +1969,7 @@ extern int32_t sli_gen_request64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint
 extern int32_t sli_send_frame_wqe(sli4_t *sli4, void *buf, size_t size, uint8_t sof, uint8_t eof, uint32_t *hdr,
 				  ocs_dma_t *payload, uint32_t req_len, uint8_t timeout,
 				  uint16_t xri, uint16_t req_tag);
+extern void sli4_fcoe_marker_request_wqe(sli4_t *sli4, void *buf, uint32_t ctx_tag, uint16_t req_tag, uint8_t category);
 extern int32_t sli_xmit_sequence64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint8_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_xmit_bcast64_wqe(sli4_t *, void *, size_t, ocs_dma_t *, uint32_t, uint8_t, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, uint8_t, uint8_t, uint8_t);
 extern int32_t sli_xmit_bls_rsp64_wqe(sli4_t *, void *, size_t, sli_bls_payload_t *, uint16_t, uint16_t, uint16_t, ocs_remote_node_t *, uint32_t);
@@ -2020,7 +2062,7 @@ extern const char *sli_fc_get_status_string(uint32_t status);
  * The FC/FCoE SLI-4 component implements the commands and processing defined by
  * the <i>SLI-4 Architecture Specification</i> and the <i>SLI-4 FC and FCoE Command Reference</i>
  * through a lightly-abstracted API. The primary objective of this component is to provide
- * a mechanism to access the Emulex SLI-4 hardware without enforcing a specific policy.
+ * a mechanism to access the Broadcom SLI-4 hardware without enforcing a specific policy.
  * For example, this API provides a mechanism to unregister an RPI (sli_cmd_unreg_rpi()),
  * but does not provide details on when to invoke this function.<br><br>
  *

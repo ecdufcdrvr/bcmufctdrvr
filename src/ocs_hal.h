@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -111,10 +113,12 @@ extern void _ocs_hal_verify(const char *cond, const char *filename, int linenum)
  */
 
 #define OCS_HAL_TIMECHECK_ITERATIONS	100
+
 #define OCS_HAL_MAX_NUM_MQ		1
+#define OCS_HAL_MIN_NUM_MQ		1
 
 #define OCS_HAL_MAX_MRQ_SETS		2
-#define OCE_HAL_MAX_NUM_MRQ_PAIRS	16 /* MAX pairs in MRQ SET */
+#define OCS_HAL_MAX_NUM_MRQ_PAIRS	16 /* MAX pairs in MRQ SET */
 
 /*
  * We have a max of 8 RX filters out of which two can be used for MRQ sets of 16.
@@ -122,18 +126,23 @@ extern void _ocs_hal_verify(const char *cond, const char *filename, int linenum)
  */
 #define OCS_HAL_MAX_RQ_PAIRS		38
 #define OCS_HAL_MAX_NUM_RQ		(OCS_HAL_MAX_RQ_PAIRS * 2)
+#define OCS_HAL_MIN_NUM_RQ		1
+
 #define OCS_HAL_MAX_NUM_EQ		128
+#define OCS_HAL_MIN_NUM_EQ		1
+
 #define OCS_HAL_MAX_NUM_WQ		128
-#define OCE_HAL_MAX_NUM_MRQ_PAIRS	16
+#define OCS_HAL_MIN_NUM_WQ		4
+#define OCS_HAL_DEF_NUM_WQ		6
 
 #define OCS_HAL_MAX_WQ_CLASS		4
 #define OCS_HAL_MAX_WQ_CPU		128
 
 /*
- * A CQ will be assinged to each WQ (CQ must have 2X entries of the WQ for abort
- * processing), plus a separate one for each RQ PAIR and one for MQ
+ * A CQ has to be assigned to each WQ, RQ and MQ.
  */
-#define OCS_HAL_MAX_NUM_CQ		((OCS_HAL_MAX_NUM_WQ * 2) + 1 + (OCS_HAL_MAX_RQ_PAIRS))
+#define OCS_HAL_MAX_NUM_CQ		(OCS_HAL_MAX_NUM_WQ + OCS_HAL_MAX_NUM_RQ + OCS_HAL_MAX_NUM_MQ)
+#define OCS_HAL_MIN_NUM_CQ		(OCS_HAL_MIN_NUM_WQ + OCS_HAL_MIN_NUM_RQ + OCS_HAL_MIN_NUM_MQ)
 
 /*
  * Q hash - size is the maximum of all the queue sizes, rounded up to the next
@@ -152,6 +161,7 @@ extern void _ocs_hal_verify(const char *cond, const char *filename, int linenum)
 #define OCS_TOW_FEATURE_AXR		0x01
 #define OCS_TOW_FEATURE_TFB		0x02
 
+#define OCS_HAL_WAIT_DELAY_US		10000	/* 10 ms */
 #define OCS_HAL_MBOX_CMD_TIMEOUT	(10 * 1000 * 1000)	/* micro second units */
 
 /**
@@ -174,6 +184,7 @@ typedef enum {
 	OCS_HAL_RTN_INVALID_ARG = -7,
 	OCS_HAL_RTN_SLI_RESP_ERROR = -8,
 	OCS_HAL_RTN_NOT_SUPPORTED = -20,
+	OCS_HAL_RTN_MBOX_SUBMISSION_DISABLED = -21,
 } ocs_hal_rtn_e;
 #define OCS_HAL_RTN_IS_ERROR(e)	((e) < 0)
 
@@ -192,6 +203,7 @@ typedef enum {
 	OCS_HAL_MAX_NODES,
 	OCS_HAL_MAX_RQ_ENTRIES,
 	OCS_HAL_TOPOLOGY,	/**< auto, nport, loop */
+	OCS_HAL_QUEUE_TOPOLOGY,
 	OCS_HAL_WWN_NODE,
 	OCS_HAL_WWN_PORT,
 	OCS_HAL_FW_REV,
@@ -249,10 +261,9 @@ typedef enum {
 	OCS_HAL_BOUNCE,
 	OCS_HAL_PORTNUM,
 	OCS_HAL_BIOS_VERSION_STRING,
+	OCS_HAL_FLASH_ID,
 	OCS_HAL_RQ_SELECT_POLICY,
-	OCS_HAL_SGL_CHAINING_CAPABLE,
-	OCS_HAL_SGL_CHAINING_ALLOWED,
-	OCS_HAL_SGL_CHAINING_HOST_ALLOCATED,
+	OCS_HAL_XPSGL_CAPABLE,
 	OCS_HAL_SEND_FRAME_CAPABLE,
 	OCS_HAL_RR_QUANTA,
 	OCS_HAL_FILTER_DEF,
@@ -263,6 +274,7 @@ typedef enum {
 	OCS_HAL_POLL_MODE,
 	OCS_HAL_NSLER_CAPABLE,
 	OCS_HAL_ENABLE_DUAL_DUMP,
+	OCS_HAL_ENABLE_RQ_NO_BUFF_WARNS,
 } ocs_hal_property_e;
 
 enum {
@@ -424,24 +436,20 @@ typedef struct ocs_hal_dif_info_s {
 	ocs_hal_dif_blk_size_e blk_size;
 	uint32_t ref_tag_cmp;
 	uint32_t ref_tag_repl;
-	uint32_t app_tag_cmp:16,
-		app_tag_repl:16;
-	uint32_t check_ref_tag:1,
-		check_app_tag:1,
-		check_guard:1,
-		auto_incr_ref_tag:1,
-		repl_app_tag:1,
-		repl_ref_tag:1,
-		dif:2,
-		dif_separate:1,
-
-		/* If the APP TAG is 0xFFFF, disable checking the REF TAG and CRC fields */
-		disable_app_ffff:1,
-
-		/* if the APP TAG is 0xFFFF and REF TAG is 0xFFFF_FFFF, disable checking the received CRC field. */
-		disable_app_ref_ffff:1,
-
-		:21;
+	uint16_t app_tag_cmp;
+	uint16_t app_tag_repl;
+	bool	check_ref_tag;
+	bool	check_app_tag;
+	bool	check_guard;
+	bool	auto_incr_ref_tag;
+	bool	repl_app_tag;
+	bool	repl_ref_tag;
+	bool	dif_separate;
+	/* If the APP TAG is 0xFFFF, disable checking the REF TAG and CRC fields */
+	bool	disable_app_ffff;
+	/* if the APP TAG is 0xFFFF and REF TAG is 0xFFFF_FFFF, disable checking the received CRC field. */
+	bool	disable_app_ref_ffff;
+	uint8_t	dif;
 	uint16_t dif_seed;
 } ocs_hal_dif_info_t;
 
@@ -592,10 +600,11 @@ typedef enum {
  * @brief HAL wqe object
  */
 typedef struct {
-	uint32_t	abort_wqe_submit_needed:1,	/**< set if abort wqe needs to be submitted */
-			send_abts:1,			/**< set to 1 to have hardware to automatically send ABTS */
-			auto_xfer_rdy_dnrx:1,		/**< TRUE if DNRX was set on this IO */
-			:29;
+	bool		abort_wqe_submit_needed;	/**< set if abort wqe needs to be submitted:
+							 * locking: wq queue */
+	bool		send_abts;			/**< set to 1 to have hardware to automatically send ABTS
+							 * locking: wq queue */
+	bool		auto_xfer_rdy_dnrx;		/**< TRUE if DNRX was set on this IO */
 	uint32_t	id;
 	uint32_t	abort_reqtag;
 	ocs_list_link_t link;
@@ -612,8 +621,10 @@ struct ocs_hal_io_s {
 	// Owned by HAL
 	ocs_list_link_t	link;		/**< used for busy, wait_free, free lists */
 	ocs_list_link_t	wqe_link;	/**< used for timed_wqe list */
-	ocs_list_link_t	timed_out_wqe_link;	/**< used for timed_out_wqe list */
+	ocs_list_link_t timed_out_wqe_link;     /**< used for timed_out_wqe list */
 	ocs_list_link_t	dnrx_link;	/**< used for io posted dnrx list */
+	ocs_list_link_t	abort_wqe_link;	/**< used for io_abort_wqe list */
+	ocs_list_link_t	cancel_wqe_link;/**< used for local cancel_wqe_list */
 	ocs_hal_io_state_e state;	/**< state of IO: free, busy, wait_free */
 	ocs_hal_wqe_t	wqe;		/**< Work queue object, with link for pending */
 	ocs_lock_t	lock;		/**< Lock to synchronize multiple WQE requests on same IO*/
@@ -634,11 +645,14 @@ struct ocs_hal_io_s {
 	size_t		length;		/**< needed for bug O127585: length of IO */
 	uint8_t		tgt_wqe_timeout; /**< timeout value for target WQEs */
 	uint64_t	submit_ticks;	/**< timestamp when current WQE was submitted */
-	uint32_t	abort_issued:1, /**< if TRUE, an abort WQE has been issued */
-			quarantine:1,	/**< set if IO to be quarantined */
-			quarantine_first_phase:1,	/**< set if first phase of IO */
-			is_port_owned:1,	/**< set if POST_XRI was used to send XRI to th chip */
-			tow_dnrx:1;
+	uint64_t	abort_wqe_submit_ticks; /**< timestamp when ABORT WQE was submitted */
+	bool		abort_issued;	/**< if TRUE, an abort WQE has been issued: locking: HIO lock */
+	bool		abort_completed;/**< if TRUE, abort WQE has been completed */
+	bool		quarantine;	/**< set if IO to be quarantined */
+	bool		quarantine_first_phase;	/**< set if first phase of IO */
+	bool		is_port_owned;	/**< set if POST_XRI was used to send XRI to the chip: locking: HIO lock */
+	bool		tow_dnrx;
+	bool		sgl_chaining_allowed;
 	hal_wq_t	*reque_xri_wq;	/**< WQ assigned to the REQUEUE_WQE */
 	hal_eq_t	*eq;		/**< EQ that this HIO came up on */
 	ocs_hal_wq_steering_e	wq_steering;	/**< WQ steering mode request */
@@ -921,7 +935,7 @@ typedef struct {
 
 typedef struct {
 	ocs_thread_t thread;
-	uint8_t started:1;
+	bool started;
 } ocs_app_watchdog_thread_t;
 
 typedef struct ocs_hal_rq_buf_drop_s {
@@ -932,6 +946,44 @@ typedef struct ocs_hal_rq_buf_drop_s {
 	unsigned long	rq_thread_pause_start;
 	unsigned long	ms_to_sleep;
 } ocs_hal_rq_buf_drop_t;
+
+/**
+ * @brief RQ marker requests object
+ */
+typedef struct ocs_hal_rq_marker_req_s {
+	ocs_list_link_t link;
+
+	ocs_hal_t *hal;
+	uint32_t ctx_tag;		/* Tag to match compl with req */
+	int 	num_req_pending;	/* Pending RQ marker responses */
+	int	wqe_complete;		/* WQE completion done */
+	uint8_t category;
+
+	void	(*cb)(void *);		/* Final Callback function */
+	void	*cb_arg;		/* Final callback argument */
+
+	hal_wq_callback_t *wqcb;	/**> WQ callback object, request tag */
+	ocs_hal_wqe_t wqe;		/**> WQE buffer object (may be queued on WQ pending list) */
+
+	uint8_t wqebuf[SLI4_WQE_EXT_BYTES];
+} ocs_hal_rq_marker_req_t;
+
+/**
+ * @brief LOGO request object
+ */
+typedef struct ocs_hal_fabric_logo_req_s {
+	ocs_hal_io_t *hio;
+	ocs_sport_t *sport;
+	ocs_dma_t send;
+	ocs_dma_t receive;
+} ocs_hal_fabric_logo_req_t;
+
+#define OCS_HAL_WQ_CTX_NUM	4
+
+typedef struct ocs_hal_wq_ctx_s {
+	ocs_lock_t	io_timed_wqe_lock;	/**< IO lock to synchronize timed target WQE list access */
+	ocs_list_t	io_timed_wqe;		/**< List of IO objects with a timed target WQE */
+} ____cacheline_aligned ocs_hal_wq_ctx_t;
 
 /**
  * @brief HAL object
@@ -948,9 +1000,12 @@ struct ocs_hal_s {
 	uint8_t		disable_fec;
 	uint8_t		enable_fw_ag_rsp;
 	ocs_hal_dual_dump_state_e dual_dump_state;
+
 	uint16_t	watchdog_timeout;
-	unsigned long	jiffies_prev;
+	uint64_t	watchdog_jiffies_prev;
 	ocs_lock_t	watchdog_lock;
+	ocs_timer_t	watchdog_timer;		/**< Timer for heartbeat */
+
 	const char	*sliport_pause_errors;
 
 	/** HAL configuration, subject to ocs_hal_set() */
@@ -974,19 +1029,19 @@ struct ocs_hal_s {
 		uint8_t		dif_mode; /**< DIF mode to use */
 		uint8_t		i_only_aab; /** Enable initiator-only auto-abort */
 		uint8_t		emulate_tgt_wqe_timeout; /** Enable driver target wqe timeouts */
-		uint32_t	bounce:1;
-		const char	*queue_topology;		/**< Queue topology string */
+		bool		bounce;
+		char		queue_topology[1024]; /**< Queue topology string */
 		uint8_t		tow_blksize_chip;
 		uint8_t		tow_t10_enable;
 		uint8_t		tow_p_type;
 		uint8_t		tow_ref_tag_lba;
 		uint8_t		tow_app_tag_valid;
 		uint8_t		rr_quanta;			/** RQ quanta if rq_selection_policy == 2 */
-		uint32_t	filter_def[SLI4_CMD_REG_FCFI_NUM_RQ_CFG];
+		uint32_t	filter_def[SLI4_CMD_REG_FCFI_MRQ_NUM_RQ_CFG];
 		uint32_t	suppress_rsp_capable;
 		uint32_t	enable_dual_dump;
 		uint8_t		poll_mode;
-		uint8_t		nsler;
+		bool		nsler;
 	} config;
 
 	/* calculated queue sizes for each type */
@@ -1006,6 +1061,8 @@ struct ocs_hal_s {
 	uint32_t	mq_count;
 	uint32_t	wq_count;
 	uint32_t	rq_count;			/**< count of SLI RQs */
+	uint32_t	scsi_rq_pair_count;		/**< count of SCSI RQ pairs */
+	uint32_t	scsi_io_mrq_pair_count;		/**< count of SCSI/FCP IO RQ pairs */
 	ocs_list_t	eq_list;
 
 	ocs_queue_hash_t *cq_hash;
@@ -1014,15 +1071,14 @@ struct ocs_hal_s {
 
 	/* Storage for HAL queue objects */
 	hal_wq_t	*hal_wq[OCS_HAL_MAX_NUM_WQ];
-	hal_wq_t	*hal_els_wq;
 	hal_rq_t	*hal_rq[OCS_HAL_MAX_NUM_RQ];
 	hal_mq_t	*hal_mq[OCS_HAL_MAX_NUM_MQ];
 	hal_cq_t	*hal_cq[OCS_HAL_MAX_NUM_CQ];
-	hal_cq_t	*hal_els_cq;
-	hal_cq_t	*hal_els_rq_cq;
 	hal_eq_t	*hal_eq[OCS_HAL_MAX_NUM_EQ];
 	uint32_t	hal_rq_count;			/**< count of hal_rq[] entries */
 	bool		hal_mrq_used;
+	int32_t		scsi_mrq_marker_category;	/**< Holds the Marker WQE category as per SLI */
+	int32_t		nvme_mrq_marker_category;
 
 	ocs_varray_t	*wq_class_array[OCS_HAL_MAX_WQ_CLASS];	/**< pool per class WQs */
 	ocs_varray_t	*wq_cpu_array[OCS_HAL_MAX_WQ_CPU];	/**< pool per CPU WQs */
@@ -1033,8 +1089,7 @@ struct ocs_hal_s {
 	hal_wq_t	*hal_sfwq[2];			/**< Ref. to Send Frame WQ in hal_wq list */
 
 	/* Target optimized write buffers - protect with io_lock */
-	uint32_t	tow_enabled:1,			/**< TRUE if TOW is enabled */
-			:31;
+	bool		tow_enabled;			/**< TRUE if TOW is enabled */
 	ocs_pool_t	*tow_buffer_pool;		/**< pool of ocs_hal_tow_buffer_t objects */
 
 	ocs_sem_t	bmbx_sem;
@@ -1044,6 +1099,7 @@ struct ocs_hal_s {
 	ocs_list_t	cmd_head;
 	ocs_list_t	cmd_pending;
 	uint32_t	cmd_head_count;
+	bool		cmd_submission_disabled;
 
 
 	sli4_link_event_t link;
@@ -1098,13 +1154,15 @@ struct ocs_hal_s {
 	uint8_t		*wqe_buffs;		/**< array of WQE buffs mapped to IO objects */
 
 	ocs_lock_t	io_lock;		/**< IO lock to synchronize list access */
-	ocs_lock_t	io_timed_wqe_lock;	/**< IO lock to synchronize timed target WQE list access */
+	ocs_lock_t	abort_io_timed_wqe_lock; /**< ABORT IO lock to synchronize timed target WQE list access */
 	ocs_list_t	io_inuse;		/**< List of IO objects in use */
-	ocs_list_t	io_timed_wqe;		/**< List of IO objects with a timed target WQE */
 	ocs_list_t	io_wait_free;		/**< List of IO objects waiting to be freed */
 	ocs_list_t	io_free;		/**< List of IO objects available for allocation */
 	ocs_list_t	io_port_owned;		/**< List of IO objects posted for chip use */
 	ocs_list_t	io_port_dnrx;		/**< List of IO objects needing TOW buffers */
+	ocs_list_t	io_abort_wqe_list;	/**< List of IO objects posted for ABORT WQEs */
+
+	ocs_hal_wq_ctx_t	wq_ctx[OCS_HAL_WQ_CTX_NUM];	/**< Track timed wqes */
 
 	ocs_dma_t	loop_map;
 
@@ -1138,11 +1196,8 @@ struct ocs_hal_s {
 	uint32_t	tcmd_wq_complete[OCS_HAL_MAX_NUM_WQ];	/**< stat: wq complete count */
 
 	ocs_timer_t	wqe_timer;		/**< Timer to periodically check for WQE timeouts */
-	ocs_timer_t	watchdog_timer;		/**< Timer for heartbeat */
-	int32_t		watchdog_timer_disable;
-	uint32_t	in_active_wqe_timer:1,	/**< TRUE if currently in active wqe timer handler */
-			active_wqe_timer_shutdown:1, /** TRUE if wqe timer is to be shutdown */
-			:30;
+	bool		in_active_wqe_timer;	/**< TRUE if currently in active wqe timer handler */
+	bool		active_wqe_timer_shutdown; /** TRUE if wqe timer is to be shutdown */
 
 	ocs_list_t	iopc_list;		/**< list of IO processing contexts */
 	ocs_lock_t	iopc_list_lock;		/**< lock for iopc_list */
@@ -1152,6 +1207,18 @@ struct ocs_hal_s {
 	ocs_atomic_t	send_frame_seq_id;	/**< send frame sequence ID */
 	ocs_hal_rq_buf_drop_t rq_buf_drop;
 	ocs_atomic_t	pend_frames_count;	/**< inbound pending frames */
+
+	uint32_t 	cq_process_max_time_msec;
+	uint32_t	oflow_sgl_used;
+
+	/* Objects related to rq marker requests */
+	ocs_lock_t	rq_marker_lock;
+	ocs_list_t	rq_marker_list;		/**< List of outstanding marker wqe requests */
+	uint32_t	rq_marker_tag;		/**< Tag to co-relate marker wqe compl */
+
+	/*Objects related to send frame requests */
+	ocs_lock_t	send_frame_wqe_lock;
+	ocs_list_t	send_frame_wqe_list;	/**< List of outstanding send frame WQE requests */
 };
 
 typedef enum {
@@ -1315,7 +1382,6 @@ struct hal_rq_s {
 };
 
 typedef struct ocs_hal_global_s {
-	const char	*queue_topology_string;			/**< queue topology string */
 	uint32_t	fw_diag_log_size;			/**< FW diagnostic log size */
 	uint32_t	fw_diag_log_level;			/**< FW diagnostic log level */
 } ocs_hal_global_t;
@@ -1334,15 +1400,14 @@ typedef struct ocs_hal_fw_dump_location_results_s {
 	uint8_t		status;
 } ocs_hal_fw_dump_location_results_t;
 
-extern hal_eq_t *hal_new_eq(ocs_hal_t *hal, uint32_t entry_count);
+extern hal_eq_t *hal_new_eq(ocs_hal_t *hal, uint32_t entry_count, uint8_t nvmeq);
 extern hal_cq_t *hal_new_cq(hal_eq_t *eq, uint32_t entry_count);
 extern uint32_t hal_new_cq_set(hal_eq_t *eqs[], hal_cq_t *cqs[], uint32_t num_cqs, uint32_t entry_count);
 extern hal_mq_t *hal_new_mq(hal_cq_t *cq, uint32_t entry_count);
 extern hal_wq_t *hal_new_wq(hal_cq_t *cq, uint32_t entry_count, uint32_t class, uint32_t ulp, bool sfq);
-extern hal_wq_t *hal_new_els_wq(ocs_hal_t *hal);
-extern hal_cq_t *hal_new_els_cq(ocs_hal_t *hal);
-extern hal_rq_t *hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp);
-extern uint32_t hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t entry_count, uint32_t ulp);
+extern hal_rq_t *hal_new_rq(hal_cq_t *cq, uint32_t entry_count, uint32_t ulp, uint8_t nvmeq);
+extern uint32_t hal_new_rq_set(hal_cq_t *cqs[], hal_rq_t *rqs[], uint32_t num_rq_pairs, uint32_t entry_count,
+			       uint32_t ulp, uint8_t nvmeq);
 extern void hal_del_eq(hal_eq_t *eq);
 extern void hal_del_cq(hal_cq_t *cq);
 extern void hal_del_mq(hal_mq_t *mq);
@@ -1356,6 +1421,7 @@ extern ocs_hal_rtn_e ocs_hal_setup(ocs_hal_t *, ocs_os_handle_t, sli4_port_type_
 extern ocs_hal_rtn_e ocs_hal_init(ocs_hal_t *);
 extern ocs_hal_rtn_e ocs_hal_teardown(ocs_hal_t *);
 extern ocs_hal_rtn_e ocs_hal_reset(ocs_hal_t *, ocs_hal_reset_e);
+extern ocs_hal_rtn_e ocs_hal_xri_resource_reinit(ocs_hal_t *hal);
 extern ocs_hal_rtn_e ocs_hal_port_migration(ocs_hal_t *);
 extern int32_t ocs_hal_get_num_eq(ocs_hal_t *);
 extern ocs_hal_rtn_e ocs_hal_get(ocs_hal_t *, ocs_hal_property_e, uint32_t *);
@@ -1379,7 +1445,7 @@ extern ocs_hal_rtn_e ocs_hal_domain_force_free(ocs_hal_t *, ocs_domain_t *);
 extern ocs_domain_t * ocs_hal_domain_get(ocs_hal_t *, uint16_t);
 extern ocs_hal_rtn_e ocs_hal_node_alloc(ocs_hal_t *, ocs_remote_node_t *, uint32_t, ocs_sli_port_t *);
 extern ocs_hal_rtn_e ocs_hal_unreg_rpi_all(ocs_hal_t *, ocs_sport_t *);
-extern ocs_hal_rtn_e ocs_hal_reg_rpi_update(ocs_hal_t *hal, ocs_remote_node_t *rnode, int32_t nsler);
+extern ocs_hal_rtn_e ocs_hal_reg_rpi_update(ocs_hal_t *hal, ocs_remote_node_t *rnode, bool nsler, void *arg);
 extern ocs_hal_rtn_e ocs_hal_node_attach(ocs_hal_t *, ocs_remote_node_t *, ocs_dma_t *);
 extern ocs_hal_rtn_e ocs_hal_node_detach(ocs_hal_t *, ocs_remote_node_t *);
 extern ocs_hal_rtn_e ocs_hal_node_free_resources(ocs_hal_t *, ocs_remote_node_t *);
@@ -1398,19 +1464,21 @@ extern ocs_hal_rtn_e _ocs_hal_io_send(ocs_hal_t *hal, ocs_hal_io_type_e type, oc
 				      void *cb, void *arg);
 extern ocs_hal_rtn_e ocs_hal_io_register_sgl(ocs_hal_t *, ocs_hal_io_t *, ocs_dma_t *, uint32_t);
 extern ocs_hal_rtn_e ocs_hal_io_init_sges(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_io_type_e type);
-extern ocs_hal_rtn_e ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *dif_info);
+extern ocs_hal_rtn_e ocs_hal_io_add_seed_sge(ocs_hal_t *hal, ocs_hal_io_t *io, ocs_hal_dif_info_t *dif_info, bool last_data_sge);
 extern ocs_hal_rtn_e ocs_hal_io_add_sge(ocs_hal_t *, ocs_hal_io_t *, uintptr_t, uint32_t);
 extern ocs_hal_rtn_e ocs_hal_io_add_dif_sge(ocs_hal_t *hal, ocs_hal_io_t *io, uintptr_t addr);
 extern ocs_hal_rtn_e ocs_hal_io_abort(ocs_hal_t *, ocs_hal_io_t *, uint32_t, void *, void *);
+extern ocs_hal_rtn_e ocs_hal_io_abort_notify_completion(ocs_hal_t *, ocs_hal_io_t *, void *, void *);
 extern void ocs_hal_io_abort_all(ocs_hal_t *);
 extern int32_t ocs_hal_io_get_xid(ocs_hal_t *, ocs_hal_io_t *);
 extern uint32_t ocs_hal_io_get_count(ocs_hal_t *, ocs_hal_io_count_type_e);
 extern uint32_t ocs_hal_rpi_active_count(ocs_hal_t *);
 extern uint32_t ocs_hal_get_rqes_produced_count(ocs_hal_t *hal);
 
-typedef void (*ocs_hal_fw_cb_t)(int32_t status, int32_t ext_status, uint32_t bytes_written,
-				uint32_t change_status, void *arg);
+typedef void (*ocs_hal_fw_cb_t)(int32_t status, int32_t ext_status, int32_t ext_status2,
+			uint32_t bytes_written, uint32_t change_status, void *arg);
 extern ocs_hal_rtn_e ocs_hal_firmware_write(ocs_hal_t *, ocs_dma_t *, uint32_t, uint32_t, int, ocs_hal_fw_cb_t, void*);
+extern ocs_hal_rtn_e ocs_hal_sfp_firmware_write(ocs_hal_t *, ocs_dma_t *, uint32_t, uint32_t, int, ocs_hal_fw_cb_t, void*);
 
 /* Function for retrieving SFP data */
 typedef void (*ocs_hal_sfp_cb_t)(void *, int32_t, uint32_t, uint32_t *, void *);
@@ -1448,10 +1516,11 @@ typedef void (*ocs_hal_host_stat_cb_t)(int32_t status,
 				       void *arg);
 extern ocs_hal_rtn_e ocs_hal_get_host_stats(ocs_hal_t *hal, uint8_t cc, ocs_hal_host_stat_cb_t, void *arg);
 
-extern ocs_hal_rtn_e ocs_hal_raise_ue(ocs_hal_t *, uint8_t);
+extern ocs_hal_rtn_e ocs_hal_raise_ue(ocs_hal_t *hal, uint8_t reset_level, bool trigger_dump);
 typedef void (*ocs_hal_dump_get_cb_t)(int32_t status, uint32_t bytes_read, uint8_t eof, void *arg);
 extern ocs_hal_rtn_e ocs_hal_dump_get(ocs_hal_t *, ocs_dma_t *, uint32_t, uint32_t, ocs_hal_dump_get_cb_t, void *);
 extern ocs_hal_rtn_e ocs_hal_run_biu_diag(ocs_hal_t *hal, void *tx_buff, size_t tx_buff_len, void *rx_buff, size_t rx_buff_len);
+extern ocs_hal_rtn_e ocs_hal_sfp_fw_upgrade(ocs_hal_t *hal, uint16_t upgrade, void *results, int res_len);
 extern ocs_hal_rtn_e ocs_hal_set_loopback_mode(ocs_hal_t *hal, uint32_t type);
 extern ocs_hal_rtn_e ocs_hal_set_trunk_mode(ocs_hal_t *hal, uint32_t trunk_mode);
 extern ocs_hal_rtn_e ocs_hal_get_trunk_info(ocs_hal_t *hal, uint32_t *trunk_config);
@@ -1494,6 +1563,9 @@ typedef void (*ocs_hal_parity_stat_cb_t)(int32_t status, uint8_t num_ulp,
 			ocs_parity_err_count_t *counter, void *arg);
 extern ocs_hal_rtn_e ocs_hal_get_itcm_parity_stats(ocs_hal_t *hal, bool clear_stats,
 			ocs_hal_parity_stat_cb_t cb, void *arg);
+typedef void (*ocs_hal_set_beacon_config_cb_t)(void *os, int32_t status, void *arg);
+extern ocs_hal_rtn_e ocs_hal_set_beacon_config(ocs_hal_t *hal, uint8_t sub_cmd, uint16_t duration,
+						ocs_hal_set_beacon_config_cb_t cb, void *arg);
 ocs_hal_rtn_e
 ocs_hal_read_common_obj_wait(ocs_hal_t *hal, char *file, uint32_t offset,
 			     ocs_dma_t *dma, uint32_t *read_len,
@@ -1509,20 +1581,25 @@ extern uint32_t ocs_hal_xri_move_to_port_owned(ocs_hal_t *hal, uint32_t num_xri)
 extern ocs_hal_rtn_e ocs_hal_xri_move_to_host_owned(ocs_hal_t *hal, uint8_t num_xri);
 extern int32_t ocs_hal_reque_xri(ocs_hal_t *hal, ocs_hal_io_t *io);
 extern int32_t ocs_hal_flush(ocs_hal_t *hal);
+extern int32_t ocs_hal_command_cancel(ocs_hal_t *hal);
 extern int32_t ocs_hal_io_cancel(ocs_hal_t *hal);
 extern ocs_hal_rtn_e ocs_hal_dump_type2(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_size);
 extern ocs_hal_rtn_e ocs_hal_update_cfg(ocs_hal_t *hal, uint16_t region_id, void *buff, size_t req_size);
+extern ocs_hal_rtn_e ocs_hal_set_hbs_mode(ocs_hal_t *hal, uint32_t hbs_bufsize, uint8_t hbs_mode);
+extern ocs_hal_rtn_e ocs_hal_read_hbs_params(ocs_hal_t *hal, ocs_hbs_params_t *hbs_params);
+extern void ocs_adapter_set_hbs_bufsize(ocs_t *ocs, int32_t hbs_bufsize);
+extern int32_t ocs_hal_update_fw_revision(ocs_hal_t *hal); 
 
 typedef struct {
+	ocs_list_link_t link;
 	/* structure elements used by HAL */
 	ocs_hal_t *hal;			/**> pointer to HAL */
 	hal_wq_callback_t *wqcb;	/**> WQ callback object, request tag */
 	ocs_hal_wqe_t wqe;		/**> WQE buffer object (may be queued on WQ pending list) */
-	void (*callback)(int32_t status, void *arg);	/**> final callback function */
-	void *arg;			/**> final callback argument */
+	void (*callback)(ocs_hal_t *hal, int32_t status, void *arg);	/**> final callback function */
+	void *cb_arg;			/**> final callback argument */
 
-	/* General purpose elements */
-	ocs_hal_sequence_t *seq;
+	ocs_hal_io_t *hio;
 	ocs_dma_t payload;		/**> a payload DMA buffer */
 	uint8_t wqebuf[SLI4_WQE_EXT_BYTES];
 } ocs_hal_send_frame_context_t;
@@ -1562,8 +1639,6 @@ typedef struct ocs_hal_set_profile_config_v0_cb_arg_s {
 	void *cb_arg;
 } ocs_hal_set_profile_config_v0_cb_arg_t;
 
-#define OCS_HAL_OBJECT_G5		0xfeaa0001
-#define OCS_HAL_OBJECT_G6		0xfeaa0003
 #define OCS_FILE_TYPE_GROUP		0xf7
 #define OCS_FILE_ID_GROUP		0xa2
 
@@ -1598,15 +1673,19 @@ extern ocs_hal_rtn_e ocs_hal_rqpair_tow_move_to_port(ocs_hal_t *hal, ocs_hal_io_
 extern void ocs_hal_rqpair_tow_move_to_host(ocs_hal_t *hal, ocs_hal_io_t *io);
 extern void ocs_hal_rqpair_teardown(ocs_hal_t *hal);
 extern int ocs_hal_stop_fw_diagnostic_logging(ocs_hal_t *hal);
+extern ocs_hal_rtn_e ocs_hal_setup_queue_topology(ocs_hal_t *hal, const char *queue_topology);
 
 extern ocs_hal_rtn_e ocs_hal_rx_allocate(ocs_hal_t *hal);
 extern ocs_hal_rtn_e ocs_hal_rx_post(ocs_hal_t *hal);
 extern void ocs_hal_rx_free(ocs_hal_t *hal);
-
+extern void ocs_hal_io_teardown(ocs_hal_t *hal);
 extern void ocs_hal_unsol_process_bounce(void *arg);
+extern int32_t ocs_hal_get_rq_count_by_filter(ocs_hal_t *hal, uint8_t protocol, uint32_t filter);
 
 typedef int32_t (*ocs_hal_async_cb_t)(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg);
 extern int32_t ocs_hal_async_call(ocs_hal_t *hal, ocs_hal_async_cb_t callback, void *arg);
+uint8_t ocs_hal_get_mrq_set_num(ocs_hal_t *hal, uint8_t protocol);
+uint8_t ocs_hal_get_mrq_marker_category(ocs_hal_t *hal, uint8_t protocol, uint32_t filter);
 
 static inline void
 ocs_hal_sequence_copy(ocs_hal_sequence_t *dst, ocs_hal_sequence_t *src)
@@ -1623,6 +1702,18 @@ ocs_hal_sequence_free(ocs_hal_t *hal, ocs_hal_sequence_t *seq)
 	return ocs_hal_rqpair_sequence_free(hal, seq);
 }
 
+static inline ocs_hal_wq_ctx_t *
+ocs_hal_get_wq_ctx(ocs_hal_t *hal, hal_wq_t *wq)
+{
+	return &hal->wq_ctx[wq->cq->eq->instance % OCS_HAL_WQ_CTX_NUM];
+}
+
+static inline uint32_t
+ocs_hal_get_eq_idx(ocs_hal_sequence_t *seq)
+{
+	return ((hal_eq_t *)seq->hal_priv)->instance;
+}
+
 /* HAL WQ request tag API */
 extern ocs_hal_rtn_e ocs_hal_reqtag_init(ocs_hal_t *hal);
 extern hal_wq_callback_t *ocs_hal_reqtag_alloc(ocs_hal_t *hal,
@@ -1631,10 +1722,26 @@ extern void ocs_hal_reqtag_free(ocs_hal_t *hal, hal_wq_callback_t *wqcb);
 extern hal_wq_callback_t *ocs_hal_reqtag_get_instance(ocs_hal_t *hal, uint32_t instance_index);
 extern void ocs_hal_reqtag_reset(ocs_hal_t *hal);
 extern int ocs_hal_p2p_lip_handle(ocs_hal_t *hal);
+extern int32_t ocs_hal_wait_for_fw_ready(ocs_hal_t *hal);
 
 int32_t ocs_first_burst_enabled(ocs_t *ocs);
-int32_t ocs_nsler_capable(ocs_t *ocs);
+bool ocs_nsler_capable(ocs_t *ocs);
+ocs_hal_rtn_e ocs_hal_set_persistent_topology(ocs_hal_t *hal, uint32_t topology, uint32_t opts);
+bool ocs_hal_validate_topology_support(ocs_hal_t *hal, uint32_t topo);
+extern void shutdown_target_wqe_timer(ocs_hal_t *hal);
+extern ocs_hal_rtn_e ocs_hal_send_rq_marker(ocs_hal_t *hal, ocs_hal_rq_marker_req_t *req);
+extern ocs_hal_rtn_e ocs_hal_rq_marker_gen_req(ocs_hal_t *hal, uint8_t category, void (*cb)(void *), void *arg);
+extern void ocs_hal_rq_marker_handle_cmpl(ocs_hal_t *hal, uint32_t tag);
+extern void ocs_hal_rq_marker_clean(ocs_hal_t *hal);
+extern ocs_hal_rtn_e ocs_hal_exec_mbx_command_generic_results(ocs_hal_t *hal, uint8_t *req_rsp_buf,
+							      bool handle_sli4_rsp, int timeout_usecs);
+ocs_hal_rtn_e ocs_hal_common_write_object(ocs_hal_t *hal, ocs_dma_t *dma, uint32_t size, uint32_t offset, int last,
+					  ocs_hal_fw_cb_t cb, void *arg, char *object_name);
 
+extern ocs_hal_rtn_e
+ocs_hal_edif_mode(ocs_hal_t *hal, uint8_t query, uint8_t *mode);
+ocs_hal_rtn_e
+ocs_hal_sport_send_logo(ocs_hal_t *hal, ocs_sport_t *sport);
 /* Uncomment to enable CPUTRACE */
 //#define ENABLE_CPUTRACE
 

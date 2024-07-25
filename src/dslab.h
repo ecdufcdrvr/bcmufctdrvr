@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -41,6 +43,10 @@
 
 #include <pthread.h>
 #include "ocs_list.h"
+
+#define DSLAB_MIN_ITEM_LEN		64
+#define DSLAB_MAX_ITEM_LEN		(1 * 1024 * 1024)
+#define DSLAB_MAX_SLAB_ENTRIES		32
 
 typedef struct dslab_item_s dslab_item_t;
 typedef struct dslab_s dslab_t;
@@ -106,7 +112,7 @@ struct dslab_dir_s {
 
 extern dslab_dir_t *dslab_dir_new(void *os, dslab_callbacks_t *callbacks, uint32_t entry_count, uint32_t max_item_len);
 extern void dslab_dir_del(dslab_dir_t *dir);
-extern dslab_item_t *dslab_item_new(dslab_dir_t *dir, uint32_t len);
+extern dslab_item_t *dslab_item_new(dslab_dir_t *dir, uint32_t len, uint32_t align);
 extern void dslab_item_del(dslab_item_t *item);
 extern void dslab_item_dump(dslab_item_t *item);
 extern void dslab_dump(dslab_t *dslab);

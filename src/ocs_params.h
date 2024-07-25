@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -99,35 +101,23 @@ typedef char * charp;
 	P(int,		loglevel,		7,	"logging level defined based on syslog level. 7=DEBUG")
 #endif
 
-#if defined(OCS_INCLUDE_FC) && !defined(OCS_INCLUDE_ISCSI)
 #define OCS_PARAM_CTRLMASK \
 	P(int,		ctrlmask,		0xA,	"control bitmask (default is 0xA)\n" \
 							"bit[0] disable autorsp on target reads\n" \
 							"bit[1] disable autorsp on target writes\n" \
 							"bit[3] enable target RSCN procesing\n" \
 							"bit[4] Tgt Always verify DIF (clear AT/ATRT)")
-#endif
-#if !defined(OCS_INCLUDE_FC) && defined(OCS_INCLUDE_ISCSI)
-#define OCS_PARAM_CTRLMASK \
-	P(int,		ctrlmask,		0,	"control bitmask (default is 0)\n" \
-							"bit[4] Tgt Always verify DIF (clear AT/ATRT)\n" \
-							"bit[5] Tgt set ref tag and CRC on format")
-#endif
-#if defined(OCS_INCLUDE_FC)
+
 #define OCS_FC_PARAM_LIST \
 	P(int,		logmask,		0,	"logging bitmask (default is 0)") \
 	P(int,		speed,			0,	"link speed in Mbps (0 - auto)") \
 	P(int,		topology,		0,	"topology, 0 - auto, 1 - N_PORT, 2 - LOOP (default is 0)") \
-	P(int,		holdoff_link_online,	0,	"hold off link online (default is 0)\n" \
-							"0 - immediately\n" \
-							"1 - until all PCI devices have been enumerated\n" \
-							"2 - until brought up by mgmt request") \
 	P(charp,	wwn_bump,		"0",	"xor'd to 64 bits of WWN's (default is 0)") \
 	P(int,		ethernet_license,	0,	"ethernet license") \
 	P(int,		tow_feature,		0,	"Target Optimized Write feature. 1 - Auto Xfer Rdy (default is 0)") \
 	P(int,		tow_io_size,		65536,	"The maximum sized write command to use for Target Optimized write feature (default is 65536)") \
 	P(int,		tow_xri_cnt,		512,	"Number of XRIs posted") \
-        P(int,		esoc,			0,	"To control the start offset computation functionality for auto transfer ready")\
+	P(int,		esoc,			0,	"To control the start offset computation functionality for auto transfer ready")\
 	P(int,		enable_hlm,		0,	"enable high login mode") \
 	P(int,		hlm_group_size,		8,	"high login mode group size") \
 	P(int,		explicit_buffer_list,	0,	"Enable Explict Buffer Lists 0 - false, 1 - true (default is false)") \
@@ -147,9 +137,16 @@ typedef char * charp;
 	P(int,		enable_fw_ag_rsp,	0,	"Enable firmware path for auto-good response (reset parameter field to 0) (default is 0)") \
 	P(charp,	fw_diag_log_size,	0,	"Enables FW diagnostic logging to host memory (range: 0 or 128K - 1M, default: 0(disabled))") \
 	P(charp,	fw_diag_log_level,	0,	"FW diagnostic logging level (range: 0-4, default: 0)") \
-	P(int	,	enable_dual_dump,	0,	"Enable/disable firmware dual dump (valid values: 0[disable] or 1[enable], default=0)") \
+	P(int,		enable_dual_dump,	0,	"Enable/disable firmware dual dump (valid values: 0[disable] or 1[enable], default=0)") \
 	P(int,		fw_dump_type,		1,	"Valid fw dump types: 1 - Dump to host, 2 - Dump to Flash, Default=1") \
-	P(int,          enable_auto_recovery,   1,      "Enable auto recovery support (Default 1)")
+	P(int,		enable_rq_no_buff_warns, 0,	"Enable RQ no buffer warnings generation (Default 0)") \
+	P(int,		enable_auto_recovery,	1,	"Enable auto recovery support (Default 1)") \
+	P(int,		max_remote_nodes,	2048,	"Max number of remote node objects to allocate") \
+	P(int,		enable_dpp,		0,	"Enable direct packet push (default is 0)") \
+	P(int,		hbs_bufsize,		OCS_HBS_DEFAULT_BUFFER_SIZE,	"Host Backing Store buffers size. Buffers are configured only when HBS is enabled.") \
+	P(int,		io_pool_cache_num,	4,	"Number of caches to hold IOs freed/alloced from an io pool") \
+	P(int,		io_pool_cache_thresh,	1000,	"Cache threshold while relasing IO to io pool") \
+	P(int,		enable_tdz,		1,	"enable target peer zoning")
 #if defined(OCS_USPACE_SPDK)
 
 #if defined(OCS_USPACE_SPDK_UPSTREAM)
@@ -162,52 +159,16 @@ typedef char * charp;
 
 #define OCS_FC_PARAM_LIST_SPDK \
 	P(int,		target_flags,		FC_PARAM_DEF_TARGET_FLAGS,	"target type bit[0]-SCSI, bit[1]-NVME (default is 1)") \
-	P(int,		enable_nsler,		0, 	"Enables Sequence Level Error Recovery (default: 0)") \
-	P(charp,        filter_def,             FC_PARAM_DEF_FILTER_DEF, "REG_FCFI routing filter definitions (default \"" FC_PARAM_DEF_FILTER_DEF "\")")
+	P(int,		enable_nsler,		0,				"Enables Sequence Level Error Recovery (default: 0)") \
+	P(charp,	filter_def,		FC_PARAM_DEF_FILTER_DEF,	"REG_FCFI routing filter definitions (default \"" FC_PARAM_DEF_FILTER_DEF "\")")
 #define OCS_FC_PARAM_LIST_NON_SPDK
-
 #else
 #define FC_PARAM_DEF_FILTER_DEF			"0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0"
 #define OCS_FC_PARAM_LIST_NON_SPDK \
-	P(int,		target_flags,		0x1,	"target type bit[0]-SCSI, bit[1]-NVME (default is 1)") \
-	P(int,		enable_nsler,		0, 	"Enables Sequence Level Error Recovery (default: 0)") \
-	P(charp,	filter_def,		FC_PARAM_DEF_FILTER_DEF, "REG_FCFI routing filter definitions (default \"" FC_PARAM_DEF_FILTER_DEF "\")") \
-	P(int,		enable_dpp,		0,	"Enable direct packet push (default is 0)")
-#define OCS_FC_PARAM_LIST_SPDK 
-
-#endif
-
-#else
-#define OCS_FC_PARAM_LIST
-#define OCS_FC_PARAM_LIST_NON_SPDK
+	P(int,		target_flags,		0x1,				"target type bit[0]-SCSI, bit[1]-NVME (default is 1)") \
+	P(int,		enable_nsler,		0,				"Enables Sequence Level Error Recovery (default: 0)") \
+	P(charp,	filter_def,		FC_PARAM_DEF_FILTER_DEF,	"REG_FCFI routing filter definitions (default \"" FC_PARAM_DEF_FILTER_DEF "\")")
 #define OCS_FC_PARAM_LIST_SPDK
-#endif
-
-#if defined(OCS_INCLUDE_ISCSI)
-#define OCS_ISCSI_PARAM_LIST \
-	P(int,		num_cxns,		1,		"number of connections (default is 1)") \
-	P(int,		enable_sgl_chaining,	1,		"enable sgl chaining functionality(default is 1)") \
-	P(int,		enable_immediate_data,	1,		"enable immediate data support (default is 1)") \
-	P(int,		enable_hdr_digest,	1,		"enable header digest support (default is 1)") \
-	P(int,		enable_data_digest,	1,		"enable data digest support (default is 1)") \
-	P(int,		enable_jumbo_frame,	1,		"enable jumbo frame support (default is 1)") \
-	P(int,		max_sge_size,		65535,		"Maximum SGE size (default is 65535)") \
-	P(int,		post_sgl_config,	0,		"Post SGL configuration\n" \
-								"0 - chip default\n" \
-								"1 - v0_32 SGEs\n" \
-								"2 - v0_256 SGEs\n" \
-								"3 - v1_32 SGEs\n" \
-								"4 - v1_256 SGEs") \
-	P(charp,	local_ip,		"192.168.0.106",	"Local IP address (default is 192.168.0.106)") \
-	P(charp,	local_subnet,		"255.255.255.0","Local subnet (default is 255.255.255.0)") \
-	P(charp,	gateway,		"",		"gateway IP address (default is no gateway)") \
-	P(int,		tcp_window_size,	65536,		"TCP window size (default is 65536)") \
-	P(int,		tcp_window_scale,	4,		"TCP window scaling shift (default is 4)") \
-	P(int,		num_tgts,		1,		"number of targets per port (default is 1)") \
-
-#else
-
-#define OCS_ISCSI_PARAM_LIST
 #endif
 
 #if defined(OCS_INCLUDE_RAMD)
@@ -232,7 +193,6 @@ typedef char * charp;
 	OCS_PARAM_CTRLMASK \
 	OCS_COMMON_PARAM_LIST \
 	OCS_FC_PARAM_LIST \
-	OCS_ISCSI_PARAM_LIST \
 	OCS_RAMD_PARAM_LIST \
 	OCS_FC_PARAM_LIST_SPDK \
 	OCS_FC_PARAM_LIST_NON_SPDK

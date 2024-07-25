@@ -1,50 +1,47 @@
 /*
- *  BSD LICENSE
+ * BSD LICENSE
  *
- *  Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *  The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *    * Neither the name of Intel Corporation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #include "ocs.h"
 #include "ocs_ocsu.h"
-#include "ocs_internal.h"
-#include "ocs_pci.h"
 #include "fc.h"
-#include "ocs_spdk.h"
+#include "spdk_probe.h"
 #include "ocs_impl_spdk.h"
 #include "nvmf_fc.h"
 
-struct spdk_ocs_t *spdk_ocs_devices[MAX_OCS_DEVICES];
-
 struct ocs_driver {
-	ocs_mutex_t	lock;
-	TAILQ_HEAD(, spdk_ocs_t)	attached_chans;
+	ocs_mutex_t lock;
+	TAILQ_HEAD(, spdk_ocs) attached_chans;
 };
 
 static struct ocs_driver g_ocs_driver = {
@@ -52,13 +49,17 @@ static struct ocs_driver g_ocs_driver = {
 	.attached_chans = TAILQ_HEAD_INITIALIZER(g_ocs_driver.attached_chans),
 };
 
-struct spdk_ocs_t *spdk_ocs_attach(void *device);
+struct ocs_enum_ctx {
+	spdk_ocs_probe_cb probe_cb;
+	spdk_ocs_attach_cb attach_cb;
+	void *cb_ctx;
+};
+
+struct spdk_ocs *spdk_ocs_devices[MAX_OCS_DEVICES];
 static uint32_t spdk_ocs_instance;
-void ocsu_exit(void);
-void ocs_pci_set_bus_master(struct spdk_ocs_t *, bool );
 
 static int
-ocs_map_pci_bar(struct spdk_ocs_t *ocs)
+ocs_map_pci_bar(struct spdk_ocs *ocs)
 {
 	int bar, rc = 0, bar_idx = 0;
 	void *addr;
@@ -95,7 +96,7 @@ ocs_map_pci_bar(struct spdk_ocs_t *ocs)
 }
 
 static int
-ocs_unmap_pci_bar(struct spdk_ocs_t *ocs)
+ocs_unmap_pci_bar(struct spdk_ocs *ocs)
 {
 	int i,rc = 0;
 
@@ -108,9 +109,9 @@ ocs_unmap_pci_bar(struct spdk_ocs_t *ocs)
 	return rc;
 }
 
-/* PCI Bus master enable or disable in config space*/
-
-void ocs_pci_set_bus_master(struct spdk_ocs_t *ocs, bool enable)
+/* PCI Bus master enable or disable in config space */
+static void
+ocs_pci_set_bus_master(struct spdk_ocs *ocs, bool enable)
 {
 	uint32_t pci_reg;
 
@@ -126,17 +127,17 @@ void ocs_pci_set_bus_master(struct spdk_ocs_t *ocs, bool enable)
 
 }
 
-struct spdk_ocs_t *
+struct spdk_ocs *
 spdk_ocs_attach(void *device)
 {
-	struct spdk_ocs_t *ocs;
+	struct spdk_ocs *ocs;
 	struct ocs_driver *driver = &g_ocs_driver;
 	uint32_t sli_intf;
 	uint64_t phys;
 
 	ocs_mutex_lock(&driver->lock);
 
-	ocs = calloc(1, sizeof(struct spdk_ocs_t));
+	ocs = calloc(1, sizeof(struct spdk_ocs));
 	if (ocs == NULL) {
 		ocs_spdk_printf(NULL,"%s: Failed to create ocs structure\n",
 			__func__);
@@ -191,18 +192,12 @@ error1:
 	return NULL;
 }
 
-struct ocs_enum_ctx {
-	spdk_ocs_probe_cb probe_cb;
-	spdk_ocs_attach_cb attach_cb;
-	void *cb_ctx;
-};
-
 /* This function must only be called while holding g_ocs_driver.lock */
 static int
 ocs_enum_cb(void *ctx, struct spdk_pci_device *pci_dev)
 {
 	struct ocs_enum_ctx *enum_ctx = ctx;
-	struct spdk_ocs_t 	     *ocs      = NULL;
+	struct spdk_ocs *ocs = NULL;
 
 	/* Verify that this device is not already attached */
 	TAILQ_FOREACH(ocs, &g_ocs_driver.attached_chans, tailq) {
@@ -244,7 +239,7 @@ spdk_ocs_probe(void *cb_ctx, spdk_ocs_probe_cb probe_cb, spdk_ocs_attach_cb atta
 }
 
 int
-spdk_ocs_detach(struct spdk_ocs_t *ocs)
+spdk_ocs_detach(struct spdk_ocs *ocs)
 {
 	struct ocs_driver	*driver = &g_ocs_driver;
 
@@ -264,11 +259,11 @@ spdk_ocs_detach(struct spdk_ocs_t *ocs)
 	return 0;
 }
 
-struct spdk_ocs_t *
+struct spdk_ocs *
 spdk_ocs_get_object(struct spdk_pci_device *dev)
 {
         int i;
-        struct spdk_ocs_t *ocs = NULL;
+        struct spdk_ocs *ocs = NULL;
         for (i = 0; i<MAX_OCS_DEVICES; i++) {
                 if ((dev != NULL) && (spdk_ocs_devices[i]->pdev == dev)) {
                         ocs = spdk_ocs_devices[i];
@@ -279,10 +274,12 @@ spdk_ocs_get_object(struct spdk_pci_device *dev)
         return ocs;
 }
 
-int spdk_ocs_get_pci_config(struct spdk_pci_device *dev, struct spdk_ocs_get_pci_config_t *pci_config)
+int
+spdk_ocs_get_pci_config(struct spdk_pci_device *dev,
+			struct spdk_ocs_get_pci_config *pci_config)
 {
 
-        struct spdk_ocs_t *ocs = spdk_ocs_get_object(dev);
+        struct spdk_ocs *ocs = spdk_ocs_get_object(dev);
         if (ocs == NULL) {
                 printf("ERR:%s: Failed to find OCS device object\n",__func__);
                 return -1;
@@ -296,6 +293,60 @@ int spdk_ocs_get_pci_config(struct spdk_pci_device *dev, struct spdk_ocs_get_pci
 
         pci_config->bar_count 	= ocs->bar_count;
         memcpy(pci_config->bars, ocs->bars, sizeof(pci_config->bars));
+
+	return 0;
+}
+
+#define SPDK_OCS_PCI_DEVICE(DEVICE_ID) RTE_PCI_DEVICE(SPDK_PCI_VID_OCS, DEVICE_ID)
+
+#define OCSU_DRIVER_NAME_UIO_GENERIC		"uio_pci_generic"
+#define OCSU_DRIVER_NAME_VFIO			"vfio_pci"
+
+static inline bool
+ocs_pci_device_match_id(uint16_t vendor_id, uint16_t device_id)
+{
+	if (vendor_id != SPDK_PCI_VID_OCS) {
+		return false;
+	}
+
+	switch (device_id) {
+	case PCI_DEVICE_ID_OCS_LANCERG5:
+	case PCI_DEVICE_ID_OCS_LANCERG6:
+	case PCI_DEVICE_ID_OCS_LANCERG7:
+	case PCI_DEVICE_ID_OCS_LANCERG7PLUS:
+	case PCI_DEVICE_ID_OCS_LANCERG7PLUS_S:
+		return true;
+	}
+
+	return false;
+}
+
+static int
+ocs_pci_enum_cb(void *enum_ctx, struct spdk_pci_device *pci_dev)
+{
+	struct ocs_pci_enum_ctx *ctx = enum_ctx;
+	uint16_t vendor_id = spdk_pci_device_get_vendor_id(pci_dev);
+	uint16_t device_id = spdk_pci_device_get_device_id(pci_dev);
+
+	if (!ocs_pci_device_match_id(vendor_id, device_id)) {
+		return 0;
+	}
+
+	return ctx->user_enum_cb(ctx->user_enum_ctx, pci_dev);
+}
+
+int
+ocs_pci_enumerate(int (*enum_cb)(void *enum_ctx, struct spdk_pci_device *pci_dev), void *enum_ctx)
+{
+	struct ocs_pci_enum_ctx ocs_enum_ctx;
+	struct spdk_pci_driver *pci_driver;
+
+	ocs_enum_ctx.user_enum_cb = enum_cb;
+	ocs_enum_ctx.user_enum_ctx = enum_ctx;
+
+	pci_driver = spdk_pci_get_driver(OCSU_DRIVER_NAME_VFIO);
+	if (pci_driver)
+		spdk_pci_enumerate(pci_driver, ocs_pci_enum_cb, &ocs_enum_ctx);
 
 	return 0;
 }

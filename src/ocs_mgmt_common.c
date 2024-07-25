@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -163,7 +165,7 @@ void ocs_mgmt_emit_property_name(ocs_textbuf_t *textbuf, int mode, const char *n
 
 void ocs_mgmt_emit_string(ocs_textbuf_t *textbuf, int mode, const char *name, const char *value)
 {
-	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\">%s</%s>\n", name, mode_string(mode), value, name);
+	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\" >%s</%s>\n", name, mode_string(mode), value, name);
 }
 
 /**
@@ -191,7 +193,7 @@ void ocs_mgmt_emit_int(ocs_textbuf_t *textbuf, int mode, const char *name, const
 	ocs_vsnprintf(valuebuf, sizeof(valuebuf), fmt, ap);
 	va_end(ap);
 
-	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\">%s</%s>\n", name, mode_string(mode), valuebuf, name);
+	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\" >%s</%s>\n", name, mode_string(mode), valuebuf, name);
 }
 
 /**
@@ -214,24 +216,21 @@ void ocs_mgmt_emit_boolean(ocs_textbuf_t *textbuf, int mode, const char *name, i
 {
 	char *valuebuf = value ? "true" : "false";
 
-	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\">%s</%s>\n", name, mode_string(mode), valuebuf, name);
+	ocs_textbuf_printf(textbuf, "<%s mode=\"%s\" >%s</%s>\n", name, mode_string(mode), valuebuf, name);
 }
+
+static char * mode_strs[MGMT_MODE_MAX] = {
+	[0]                                            = "",
+	[MGMT_MODE_EX]                                 = "x",
+	[MGMT_MODE_WR]                                 = "w",
+	[MGMT_MODE_RD]                                 = "r",
+	[(MGMT_MODE_RD | MGMT_MODE_WR)]                = "rw",
+	[(MGMT_MODE_WR | MGMT_MODE_EX)]                = "wx",
+	[(MGMT_MODE_RD | MGMT_MODE_EX)]                = "rx",
+	[(MGMT_MODE_RD | MGMT_MODE_WR | MGMT_MODE_EX)] = "rwx",
+};
 
 static char *mode_string(int mode)
 {
-	static char mode_str[4];
-
-	mode_str[0] = '\0';
-	if (mode & MGMT_MODE_RD) {
-		strcat(mode_str, "r");
-	}
-	if (mode & MGMT_MODE_WR) {
-		strcat(mode_str, "w");
-	}
-	if (mode & MGMT_MODE_EX) {
-		strcat(mode_str, "x");
-	}
-
-	return mode_str;
-
+	return mode_strs[mode & MGMT_MODE_MASK];
 }

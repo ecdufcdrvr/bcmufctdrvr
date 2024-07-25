@@ -34,34 +34,54 @@
 
 /**
  * @file
- * OCS linux driver common include file
+ * OCS linux driver UAPI protocol definitions
  */
 
-
-#if !defined(__OCS_H__)
-#define __OCS_H__
-
-#include "version.h"
-
-#define OCS_ENABLE_VPD_SUPPORT
-
-#define DRV_NAME	"ocsu"
-#define DRV_VERSION	STR_BE_MAJOR "." STR_BE_MINOR "." STR_BE_BUILD "." STR_BE_BRANCH
+#if !defined(__OCS_UAPI_H__)
+#define __OCS_UAPI_H__
 
 #include "ocs_os.h"
-#include "ocs_driver.h"
-#include "ocs_impl_spdk.h"
+#include "ocs_list.h"
+#include "ocs_ioctl.h"
 
-#define BIT_2		(1<<2)
+#define OCS_UAPI_TIMER_SEC 30
+#define OCS_UAPI_MMAP_MAX_CNT 65535
 
-typedef struct {
-	ocs_thread_t ioctl_thr;
-	dslab_dir_t *slabdir;		/*>> dma slab allocator */
-	uint32_t attached;
-	bool shutting_down;		/* target shutdown initiated */
-} ocs_drv_t;
+struct ocs_uapi_mmap_tag {
+	uint16_t instance;
+	ocs_dma_t dma;
+};
 
-#include "ocs_spdk_nvmet.h"
-#include "ocs_drv_fc.h"
+typedef void (*ocs_uapi_req_callback)(ocs_t *ocs, ocs_uapi_msg_type_t msg_type,
+		void *arg, ocs_uapi_status_t status);
 
-#endif // __OCS_H__
+typedef struct ocs_ioctl_uapi_list_elem_s {
+	ocs_list_link_t req_link;
+	ocs_list_link_t rsp_link;
+	ocs_t *ocs;
+	void *args;
+	ocs_uapi_req_callback cb;
+	uint64_t submit_ticks;
+	ocs_ioctl_get_uapi_req_t *req;
+} ocs_ioctl_uapi_list_elem_t;
+
+void ocs_uapi_init(ocs_t *ocs);
+void ocs_uapi_clean(ocs_t *ocs);
+void ocs_uapi_clean_reqs(ocs_t *ocs);
+void ocs_uapi_app_lost(ocs_t *ocs);
+void ocs_uapi_rdy_notify(ocs_t *ocs);
+ocs_ioctl_get_uapi_req_t * ocs_uapi_get_req(ocs_t *ocs);
+
+void ocs_uapi_queue_req(ocs_t *ocs, ocs_ioctl_get_uapi_req_t *req, ocs_uapi_req_callback cb, void *args);
+
+ocs_ioctl_uapi_list_elem_t *
+ocs_uapi_get_pend_req(ocs_t *ocs, ocs_ioctl_set_uapi_resp_t *rsp);
+
+int32_t ocs_ioctl_uapi_process_rsp(ocs_t *ocs, ocs_ioctl_set_uapi_resp_t *rsp);
+
+struct ocs_uapi_mmap_tag * ocs_uapi_mmap_tag_get(ocs_t *ocs);
+void ocs_uapi_mmap_tag_put(ocs_t *ocs, struct ocs_uapi_mmap_tag *tag);
+struct ocs_uapi_mmap_tag * ocs_uapi_mmap_tag_pool_instance(ocs_t *ocs, uint32_t idx);
+extern char *ocs_uapi_msg_type_strs[OCS_UAPI_FC_EVENT_MAX + 1];
+
+#endif

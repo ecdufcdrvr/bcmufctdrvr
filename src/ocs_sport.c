@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -40,6 +42,7 @@
 #include "ocs_fabric.h"
 #include "ocs_els.h"
 #include "ocs_device.h"
+#include "ocs_nvme_stub.h"
 
 static void ocs_vport_update_spec(ocs_sport_t *sport);
 static void ocs_vport_link_down(ocs_sport_t *sport);
@@ -51,8 +54,6 @@ int ocs_mgmt_sport_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *s
 int ocs_mgmt_sport_set(char *parent, char *name, char *value, void *sport);
 int ocs_mgmt_sport_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
 			void *arg_out, uint32_t arg_out_length, void *object);
-static int32_t ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args, uint32_t fdmi_cmd_code);
-static void ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data);
 
 static ocs_mgmt_functions_t sport_mgmt_functions = {
 	.get_list_handler = ocs_mgmt_sport_list,
@@ -87,6 +88,13 @@ ocs_port_cb(void *arg, ocs_hal_port_event_e event, void *data)
 	ocs_t *ocs = arg;
 	ocs_sli_port_t *sport = data;
 
+	if (!ocs_ref_get_unless_zero(&sport->ref)) {
+		ocs_log_err(ocs, "failed to get sport ref count\n");
+		return -1;
+	}
+
+	ocs_sport_lock(sport);
+
 	switch (event) {
 	case OCS_HAL_PORT_ALLOC_OK:
 		ocs_log_debug(ocs, "OCS_HAL_PORT_ALLOC_OK\n");
@@ -115,6 +123,8 @@ ocs_port_cb(void *arg, ocs_hal_port_event_e event, void *data)
 	default:
 		ocs_log_test(ocs, "unknown event %#x\n", event);
 	}
+	ocs_sport_unlock(sport);
+	ocs_ref_put(&sport->ref);
 
 	return 0;
 }
@@ -164,7 +174,7 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		}
 	}
 
-	sport = ocs_malloc(domain->ocs, sizeof(*sport), OCS_M_ZERO);
+	sport = ocs_malloc(domain->ocs, sizeof(*sport), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (sport) {
 		sport->ocs = domain->ocs;
 		ocs_snprintf(sport->display_name, sizeof(sport->display_name), "------");
@@ -173,6 +183,8 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		sport->instance_index = domain->sport_instance_count++;
 		ocs_sport_lock_init(sport);
 		ocs_list_init(&sport->node_list, ocs_node_t, link);
+		ocs_lock_init(sport->ocs, &sport->node_shutdown_lock, OCS_LOCK_ORDER_IGNORE, "node_shutdown_list_lock[%d]", sport->instance_index);
+		ocs_list_init(&sport->node_shutdown_list, ocs_node_t, shutdown_link);
 		sport->sm.app = sport;
 		sport->enable_ini = enable_ini;
 		sport->ini_fc_types = ini_fc_types;
@@ -193,7 +205,7 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		ocs_snprintf(sport->wwnn_str, sizeof(sport->wwnn_str), "%016" PRIX64, wwnn);
 
 		/* Initialize node group list */
-		ocs_lock_init(sport->ocs, &sport->node_group_lock, "node_group_lock[%d]", sport->instance_index);
+		ocs_lock_init(sport->ocs, &sport->node_group_lock, OCS_LOCK_ORDER_IGNORE, "node_group_lock[%d]", sport->instance_index);
 		ocs_list_init(&sport->node_group_dir_list, ocs_node_group_dir_t, link);
 
 		/* if this is the "first" sport of the domain, then make it the "phys" sport */
@@ -208,7 +220,7 @@ ocs_sport_alloc(ocs_domain_t *domain, uint64_t wwpn, uint64_t wwnn, uint32_t fc_
 		sport->mgmt_functions = &sport_mgmt_functions;
 		ocs_ref_init(&sport->ref, _ocs_sport_free, sport);
 
-		ocs_log_debug(domain->ocs, "[%s] allocate sport\n", sport->display_name);
+		ocs_log_debug(domain->ocs, "[%s] allocate sport with initiator %d, target: %d\n", sport->display_name, sport->enable_ini, sport->enable_tgt);
 	}
 	return sport;
 }
@@ -289,35 +301,6 @@ ocs_sport_free(ocs_sport_t *sport)
 	/* Just put the refcount */
 	ocs_assert(ocs_ref_read_count(&sport->ref) > 0);
 	ocs_ref_put(&sport->ref); /* ocs_ref_get(): ocs_sport_alloc() */
-}
-
-/**
- * @ingroup sport_sm
- * @brief Free memory resources of a SLI port object.
- *
- * @par Description
- * After the sport object is freed, its child objects are freed.
- *
- * @param sport Pointer to the SLI port object.
- *
- * @return None.
- */
-
-void ocs_sport_force_free(ocs_sport_t *sport)
-{
-	ocs_node_t *node;
-	ocs_node_t *next;
-
-	ocs_sport_lock(sport);
-		ocs_list_foreach_safe(&sport->node_list, node, next) {
-			ocs_node_force_free(node);
-		}
-	ocs_sport_unlock(sport);
-
-	if (sport->is_vport)
-		ocs_vport_link_down(sport);
-
-	ocs_sport_free(sport);
 }
 
 /**
@@ -532,8 +515,6 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 			if (ocs_hal_port_free(&ocs->hal, sport))
 				ocs_log_err(ocs, "ocs_hal_port_free failed\n");
 		} else {
-			bool unreg_rpi_all_now = TRUE;
-
 			//sm: node list is not empty / shutdown nodes
 			ocs_sm_transition(ctx, __ocs_sport_wait_shutdown, NULL);
 			ocs_device_lock(ocs);
@@ -541,44 +522,17 @@ __ocs_sport_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, 
 
 					/* Issue unreg_rpi_all only if at least one node is active on this particular sport */
 					ocs_node_lock(node);
-					if (node->attached && !node->unreg_rpi) {
+					if ((node->attached || node->wait_attached) && !node->unreg_rpi) {
 						node->unreg_rpi = 1;
 						sport->unreg_rpi_all = 1;
 					}
 					ocs_node_unlock(node);
 
-					/*
-					 * If this is a vport, logout of the fabric controller so that it deletes
-					 * the vport on the switch. Also defer unreg_rpi_all till logo completes.
-					 */
-					if (sport->is_vport && node->rnode.fc_id == FC_ADDR_FABRIC) {
-						/* If link is down, don't send logo */
-						if (sport->ocs->hal.link.status == SLI_LINK_STATUS_DOWN ||
-						    sport->ocs->hal.state != OCS_HAL_STATE_ACTIVE) {
-							ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
-						} else {
-							ocs_log_debug(ocs, "[%s] sport shutdown vport, sending logo to node\n",
-								      node->display_name);
-
-							if (ocs_send_logo(node, OCS_FC_ELS_SEND_DEFAULT_TIMEOUT,
-									  0, NULL, NULL) == NULL) {
-								/* Failed to send LOGO, go ahead and cleanup node anyways */
-								node_printf(node, "Failed to send LOGO\n");
-								ocs_node_post_event(node, OCS_EVT_SHUTDOWN_EXPLICIT_LOGO, NULL);
-							} else {
-								/* Defer unreg_rpi_all till logo of fabric node completes */
-								unreg_rpi_all_now = FALSE;
-								ocs_node_transition(node, __ocs_d_wait_logo_rsp, NULL);
-							}
-						}
-					} else {
-						ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
-					}
+					ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
 				}
 
-				if (sport->unreg_rpi_all && unreg_rpi_all_now)
+				if (sport->unreg_rpi_all)
 					ocs_hal_unreg_rpi_all(&ocs->hal, sport);
-
 			ocs_device_unlock(ocs);
 		}
 		break;
@@ -667,6 +621,7 @@ __ocs_sport_vport_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		if (ocs_hal_port_alloc(&ocs->hal, sport, sport->domain,
 			(sport->wwpn == 0) ? NULL : (uint8_t *)&be_wwpn)) {
 			ocs_log_err(ocs, "Can't allocate port\n");
+			ocs_sport_free(sport);
 			break;
 		}
 
@@ -824,13 +779,16 @@ __ocs_sport_attached(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			}
 		ocs_sport_unlock(sport);
 		sport->tgt_id = sport->fc_id;
-		if (ocs->enable_ini) {
+		if (ocs_ini_scsi_enabled(ocs))
 			ocs_scsi_ini_new_sport(sport);
-		}
-		if (ocs->enable_tgt) {
+		if (ocs_tgt_scsi_enabled(ocs))
 			ocs_scsi_tgt_new_sport(sport);
+
+		if (ocs_tgt_nvme_enabled(ocs))
 			ocs_nvme_tgt_new_sport(sport);
-		}
+		if (ocs_ini_nvme_enabled(ocs))
+			ocs_nvme_ini_new_sport(sport);
+
 		/* Update the vport (if its not the physical sport) parameters */
 		if (sport->is_vport) {
 			ocs_vport_update_spec(sport);
@@ -855,6 +813,54 @@ __ocs_sport_attached(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	default:
 		__ocs_sport_common(__func__, ctx, evt, arg);
 		return NULL;
+	}
+	return NULL;
+}
+/**
+ * @ingroup sport_sm
+ * @brief SLI port state machine: Wait for the LOGO to complete.
+ *
+ * @par Description
+ * Waits for LOGO WQE completion then post sport SM event 
+ *
+ * @param ctx Remote node state machine context.
+ * @param evt Event to process.
+ * @param arg Per event optional argument.
+ *
+ * @return Returns NULL.
+ */
+
+void *
+__ocs_sport_wait_port_logo(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
+{
+	std_sport_state_decl();
+
+	sport_sm_trace(sport);
+
+	switch(evt) {
+	case OCS_EVT_SRRS_ELS_REQ_OK:
+	case OCS_EVT_SRRS_ELS_REQ_RJT:
+	case OCS_EVT_SRRS_ELS_REQ_FAIL: {
+
+		ocs_log_debug(ocs, "Fabric logo response received\n");
+
+		/* Notify NPIV LOGO */
+		ocs_vport_logout_notify(sport);
+
+		/* Remove the sport from the domain's sparse vector lookup table */
+		ocs_lock(&domain->lookup_lock);
+			spv_set(domain->lookup, sport->fc_id, NULL);
+		ocs_unlock(&domain->lookup_lock);
+
+		ocs_sm_transition(ctx, __ocs_sport_wait_port_free, NULL);
+		if (ocs_hal_port_free(&ocs->hal, sport))
+			ocs_log_err(ocs, "ocs_hal_port_free failed\n");
+
+		break;
+	}
+	default:
+		__ocs_sport_common(__func__, ctx, evt, arg);
+		break;
 	}
 	return NULL;
 }
@@ -890,6 +896,21 @@ __ocs_sport_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 
 	case OCS_EVT_ALL_CHILD_NODES_FREE: {
+		/* Send LOGO to fabric in case of NPIV shutdown */
+		if (sport->is_vport) {
+			if ((sport->ocs->hal.link.status != SLI_LINK_STATUS_DOWN) &&
+			    (sport->ocs->hal.state == OCS_HAL_STATE_ACTIVE)) {
+				if (!ocs_hal_sport_send_logo(&sport->ocs->hal, sport)) {
+					ocs_sm_transition(ctx, __ocs_sport_wait_port_logo, NULL);
+					break;
+				} else {
+					ocs_log_err(ocs, "failed to send LOGO\n");
+				}
+			}
+			/* Notify NPIV LOGO */
+			ocs_vport_logout_notify(sport);
+		}
+
 		/* Remove the sport from the domain's sparse vector lookup table */
 		ocs_lock(&domain->lookup_lock);
 			spv_set(domain->lookup, sport->fc_id, NULL);
@@ -906,6 +927,13 @@ __ocs_sport_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		return NULL;
 	}
 	return NULL;
+}
+
+static void ocs_sport_flush_callback(void *arg)
+{
+	ocs_sport_t *sport = arg;
+
+	ocs_sm_post_event(&sport->sm, OCS_EVT_SPORT_FLUSH_COMPLETE, NULL);
 }
 
 /**
@@ -946,17 +974,52 @@ __ocs_sport_wait_port_free(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			ocs_log_debug(ocs, "[%s] SPORT deattached WWPN %016" PRIx64 " WWNN %016" PRIx64 "\n",
 				      sport->display_name, sport->wwpn, sport->wwnn);
 
-			if (ocs->enable_ini)
-				ocs_scsi_ini_del_sport(sport);
-
-			if (ocs->enable_tgt) {
+			if (ocs_tgt_scsi_enabled(ocs))
 				ocs_scsi_tgt_del_sport(sport);
+			if (ocs_ini_scsi_enabled(ocs))
+				ocs_scsi_ini_del_sport(sport);
+			if (ocs_tgt_nvme_enabled(ocs))
 				ocs_nvme_tgt_del_sport(sport);
-			}
-
+			if (ocs_ini_nvme_enabled(ocs))
+				ocs_nvme_ini_del_sport(sport);
 			ocs_domain_unlock(domain);
+
+			sport->async_flush_state = OCS_ASYNC_FLUSH_START;
+			if (ocs_hal_rq_marker_gen_req(&domain->ocs->hal, SLI4_RQ_MARKER_CATEGORY_ALL,
+						  ocs_sport_flush_callback,
+						  (void *) sport) != 0) {
+				/* Could not trigger flush trigger sport free from here */
+				sport->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+				ocs_sport_free(sport);
+			}
+		}
+		break;
+	}
+	case OCS_EVT_SPORT_FREE_FAIL: {
+		ocs_log_info(ocs, "[%s] SPORT port free failed\n", sport->display_name);
+		if (ocs_tgt_scsi_enabled(ocs))
+			ocs_scsi_tgt_del_sport(sport);
+		if (ocs_ini_scsi_enabled(ocs))
+			ocs_scsi_ini_del_sport(sport);
+		if (ocs_tgt_nvme_enabled(ocs))
+			ocs_nvme_tgt_del_sport(sport);
+		if (ocs_ini_nvme_enabled(ocs))
+			ocs_nvme_ini_del_sport(sport);
+
+		sport->async_flush_state = OCS_ASYNC_FLUSH_START;
+		if (ocs_hal_rq_marker_gen_req(&domain->ocs->hal, SLI4_RQ_MARKER_CATEGORY_ALL,
+				ocs_sport_flush_callback,
+				(void *) sport) != 0) {
+			/* Could not trigger flush trigger sport free from here */
+			sport->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
 			ocs_sport_free(sport);
 		}
+		break;
+	}
+	case OCS_EVT_SPORT_FLUSH_COMPLETE: {
+		ocs_log_info(ocs, "[%s] sport async flush complete\n", sport->display_name);
+		sport->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+		ocs_sport_free(sport);
 		break;
 	}
 	default:
@@ -1144,9 +1207,10 @@ int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uin
 		instance = domain->instance_index;
 	}
 
+	ocs_device_lock(ocs);
+
 	if (delete_vport) {
 		/* walk the ocs_vport_list and remove from there */
-		ocs_device_lock(ocs);
 		ocs_list_foreach_safe(&xport->vport_list, vport, next) {
 			if ((vport->domain_instance == instance) &&
 				(vport->wwpn == wwpn) && (vport->wwnn == wwnn)) {
@@ -1155,15 +1219,10 @@ int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uin
 				break;
 			}
 		}
-		ocs_device_unlock(ocs);
 	}
-
-	if (domain == NULL) {
-		// No domain means no sport to look for
-		return 0;
-	}
-
-	ocs_domain_lock(domain);
+	domain = ocs_domain_get_instance(ocs, instance);
+	if (domain) {
+		ocs_domain_lock(domain);
 		ocs_list_foreach(&domain->sport_list, sport) {
 			if ((sport->wwpn == wwpn) && (sport->wwnn == wwnn)) {
 				found = 1;
@@ -1174,7 +1233,10 @@ int32_t ocs_sport_vport_del(ocs_t *ocs, ocs_domain_t *domain, uint64_t wwpn, uin
 			/* Shutdown this SPORT */
 			ocs_sm_post_event(&sport->sm, OCS_EVT_SHUTDOWN, NULL);
 		}
-	ocs_domain_unlock(domain);
+		ocs_domain_unlock(domain);
+	}
+	ocs_device_unlock(ocs);
+
 	return 0;
 }
 
@@ -1231,6 +1293,7 @@ ocs_ddump_sport(ocs_textbuf_t *textbuf, ocs_sli_port_t *sport)
 	ocs_ddump_value(textbuf, "enable_ini", "%d", sport->enable_ini);
 	ocs_ddump_value(textbuf, "enable_tgt", "%d", sport->enable_tgt);
 	ocs_ddump_value(textbuf, "shutting_down", "%d", sport->shutting_down);
+	ocs_ddump_value(textbuf, "async_flush_state", "%d", sport->async_flush_state);
 	ocs_ddump_value(textbuf, "topology", "%d", sport->topology);
 	ocs_ddump_value(textbuf, "p2p_winner", "%d", sport->p2p_winner);
 	ocs_ddump_value(textbuf, "p2p_port_id", "%06x", sport->p2p_port_id);
@@ -1289,7 +1352,6 @@ ocs_ddump_sport(ocs_textbuf_t *textbuf, ocs_sli_port_t *sport)
 	return retval;
 }
 
-
 void
 ocs_mgmt_sport_list(ocs_textbuf_t *textbuf, void *object)
 {
@@ -1306,6 +1368,9 @@ ocs_mgmt_sport_list(ocs_textbuf_t *textbuf, void *object)
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "is_vport");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "enable_ini");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "enable_tgt");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "max_frame_size");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "fabric_name");
+	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "num_disc_ports");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "p2p");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "p2p_winner");
 	ocs_mgmt_emit_property_name(textbuf, MGMT_MODE_RD, "p2p_port_id");
@@ -1353,6 +1418,17 @@ ocs_mgmt_sport_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *objec
 			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "index") == 0) {
 			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "index", "%d", sport->index);
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "max_frame_size") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "max_frame_size", "%d",
+					  ocs_sport_get_max_frame_size(sport));
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "fabric_name") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "fabric_name", "0x%016" PRIx64 "",
+					  ocs_sport_get_fabric_name(sport));
+			retval = 0;
+		} else if (ocs_strcmp(unqualified_name, "num_disc_ports") == 0) {
+			ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_disc_ports", "%d", sport->num_disc_ports);
 			retval = 0;
 		} else if (ocs_strcmp(unqualified_name, "display_name") == 0) {
 			ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "display_name", sport->display_name);
@@ -1413,6 +1489,9 @@ ocs_mgmt_sport_get_all(ocs_textbuf_t *textbuf, void *object)
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "indicator", "0x%x", sport->indicator);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "fc_id", "0x%06x", sport->fc_id);
 	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "index", "%d", sport->index);
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "max_frame_size", "%d", ocs_sport_get_max_frame_size(sport));
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "fabric_name", "0x%016" PRIx64 "", ocs_sport_get_fabric_name(sport));
+	ocs_mgmt_emit_int(textbuf, MGMT_MODE_RD, "num_disc_ports", "%d", sport->num_disc_ports);
 	ocs_mgmt_emit_string(textbuf, MGMT_MODE_RD, "display_name", sport->display_name);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "is_vport",  sport->is_vport);
 	ocs_mgmt_emit_boolean(textbuf, MGMT_MODE_RD, "enable_ini",  sport->enable_ini);
@@ -1463,17 +1542,147 @@ ocs_mgmt_sport_set(char *parent, char *name, char *value, void *object)
 	return retval;
 }
 
-typedef struct ocs_fdmi_get_cmd_results_s {
-	ocs_lock_t cb_lock;
-	int32_t status;
-	ocs_atomic_t refcnt;
-	uint16_t fdmi_cmd_code;
-	void *fdmi_get_cmd_rsp_buf;
-	size_t fdmi_get_cmd_rsp_buf_len;
+void
+ocs_tdz_issue_fabric_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
+{
 	ocs_sport_exec_arg_t *sport_exec_args;
-} ocs_fdmi_get_cmd_results_t;
+	ocs_tdz_rsp_info_t *rsp = cb_data;
+	ocs_t *ocs = node->ocs;
+	int rc = 0;
 
-static void
+	if (rsp) {
+		sport_exec_args = rsp->sport_exec_args;
+
+		/* Command submission has failed, set the error state and report to caller */
+		if (rsp->status || !node_data || node_data->status || node_data->ext_status) {
+			rc = -EFAULT;
+			goto tdz_exit;
+		}
+
+		switch (rsp->cmd_code) {
+		case FC_GS_TDZ_GFEZ:
+			rc = ocs_process_tdz_gfez_rsp_buf(node, node_data->els->els_info->els_rsp.virt, rsp->rsp_buf);
+			break;
+		case FC_GS_TDZ_GAPZ:
+			rc = ocs_process_tdz_gapz_rsp_buf(node, node_data->els->els_info->els_rsp.virt, rsp->rsp_buf);
+			break;
+		case FC_GS_TDZ_AAPZ:
+		case FC_GS_TDZ_RAPZ:
+			rc = ocs_process_tdz_rsp_hdr(node, node_data->els->els_info->els_rsp.virt, rsp->rsp_buf);
+			break;
+		default:
+			rc = -EINVAL;
+			ocs_log_err(ocs, "Unsupported TDZ command code(0x%x)\n", rsp->cmd_code);
+			break;
+		}
+
+tdz_exit:
+		if (sport_exec_args) {
+			if ((0 == rc) || (FCCT_HDR_CMDRSP_REJECT == rc)) {
+				if (!ocs_memcpy(sport_exec_args->arg_out, rsp->rsp_buf, rsp->rsp_buf_size)) {
+					ocs_log_err(ocs, "Failed to copy TDZ response to user buffer\n");
+					rc = -EFAULT;
+				}
+			} else {
+				ocs_log_err(ocs, "Failed to process TDZ response payload\n");
+			}
+
+			sport_exec_args->retval = rc;
+			sport_exec_args->exec_cb(node->sport, sport_exec_args);
+		}
+
+		ocs_free(ocs, rsp->rsp_buf, rsp->rsp_buf_size);
+		ocs_free(ocs, rsp, sizeof(*rsp));
+	}
+}
+
+/**
+ * @brief Issue TDZ fabric command.
+ *
+ * @param sport: Pointer to sport
+ * @param sport_exec_args: sport exec arguments
+ * @param tdz_cmd_code: TDZ command code
+ *
+ * @return Returns 0 on success, or a negative value on failure.
+ */
+static int32_t
+ocs_sport_tdz_issue_fabric_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args, uint32_t tdz_cmd_code)
+{
+	int rc = 0;
+	ocs_t *ocs = sport->ocs;
+	ocs_tdz_rsp_info_t *rsp = NULL;
+	ocs_tdz_req_info_t *cmd_req = NULL;
+
+	rsp = ocs_malloc(ocs, sizeof(*rsp), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!rsp) {
+		ocs_log_err(ocs, "Failed to allocate memory for TDZ rsp\n");
+		return -ENOMEM;
+	}
+
+	cmd_req = ocs_malloc(ocs, sizeof(*cmd_req), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (!cmd_req) {
+		ocs_log_err(ocs, "Failed to allocate memory for TDZ cmd\n");
+		ocs_free(ocs, rsp, sizeof(*rsp));
+		return -ENOMEM;
+	}
+
+	rsp->sport_exec_args = sport_exec_args;
+	switch (tdz_cmd_code) {
+	case FC_GS_TDZ_GFEZ:
+		rsp->rsp_buf_size = sizeof(ocs_tdz_status_t);
+		cmd_req->cmd_req_size = sizeof(fcct_tdz_gfez_req_t);
+		cmd_req->cmd_rsp_size = sizeof(fcct_tdz_gfez_rsp_t);
+		break;
+	case FC_GS_TDZ_GAPZ:
+		rsp->rsp_buf_size = sizeof(ocs_tdz_get_peer_zone_rsp_t);
+		cmd_req->cmd_req_size = sizeof(fcct_tdz_gapz_req_t);
+		cmd_req->cmd_rsp_size = sizeof(fcct_tdz_gapz_rsp_t);
+		ocs_strncpy(cmd_req->zone_info.zone.name, sport_exec_args->arg_in, sport_exec_args->arg_in_length);
+		break;
+	case FC_GS_TDZ_AAPZ:
+		rsp->rsp_buf_size = sizeof(ocs_tdz_status_t);
+		cmd_req->cmd_req_size = sizeof(fcct_tdz_aapz_req_t);
+		cmd_req->cmd_rsp_size = sizeof(fcct_tdz_aapz_rsp_t);
+		ocs_memcpy(&cmd_req->zone_info, sport_exec_args->arg_in, sport_exec_args->arg_in_length);
+		break;
+	case FC_GS_TDZ_RAPZ:
+		rsp->rsp_buf_size = sizeof(ocs_tdz_status_t);
+		cmd_req->cmd_req_size = sizeof(fcct_tdz_rapz_req_t);
+		cmd_req->cmd_rsp_size = sizeof(fcct_tdz_rapz_rsp_t);
+		ocs_strncpy(cmd_req->zone_info.zone.name, sport_exec_args->arg_in, sport_exec_args->arg_in_length);
+		break;
+	default:
+		ocs_log_err(ocs, "Unsupported TDZ cmd code: 0x%x\n", tdz_cmd_code);
+		ocs_free(ocs, cmd_req, sizeof(*cmd_req));
+		ocs_free(ocs, rsp, sizeof(*rsp));
+		return -EFAULT;
+	}
+
+	/* Allocate memory to hold TDZ command response */
+	rsp->rsp_buf = ocs_malloc(ocs, rsp->rsp_buf_size, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (rsp->rsp_buf == NULL) {
+		ocs_log_err(ocs, "Failed to allocate memory for TDZ rsp_buf\n");
+		ocs_free(ocs, cmd_req, sizeof(*cmd_req));
+		ocs_free(ocs, rsp, sizeof(*rsp));
+		return -ENOMEM;
+	}
+
+	rsp->cmd_code = tdz_cmd_code;
+	cmd_req->cmd_code = tdz_cmd_code;
+
+	rc = ocs_tdz_issue_fabric_cmd(sport, ocs_tdz_issue_fabric_cmd_cb, rsp, cmd_req);
+	if (rc) {
+		ocs_log_err(ocs, "Failed to submit TDZ cmd(0x%x) ELS IO\n", tdz_cmd_code);
+		ocs_free(ocs, rsp->rsp_buf, rsp->rsp_buf_size);
+		ocs_free(ocs, rsp, sizeof(*rsp));
+		rc = -EFAULT;
+	}
+
+	ocs_free(ocs, cmd_req, sizeof(*cmd_req));
+	return rc;
+}
+
+void
 ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
 {
 	ocs_fdmi_get_cmd_results_t *result = cb_data;
@@ -1483,6 +1692,12 @@ ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
 
 	if (result) {
 		sport_exec_args = result->sport_exec_args;
+
+		/* Command submission has failed, set the error state and report to caller */
+		if (result->status || !node_data || node_data->status || node_data->ext_status) {
+			rc = -EFAULT;
+			goto fdmi_exit;
+		}
 
 		switch (result->fdmi_cmd_code) {
 		case FC_GS_FDMI_GRHL:
@@ -1504,21 +1719,28 @@ ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
 		default:
 			rc = -EINVAL;
 			ocs_log_err(ocs, "Unsupported FDMI command code(0x%x)\n", result->fdmi_cmd_code);
+			break;
 		}
 
-		if (rc) {
-			ocs_log_err(ocs, "failed to process FDMI response payload\n");
-			sport_exec_args->retval = rc;
-		}
-
+fdmi_exit:
 		if (sport_exec_args) {
-			if (!ocs_memcpy((uint8_t *)sport_exec_args->arg_out, (uint8_t *)result->fdmi_get_cmd_rsp_buf,
-					MIN(sport_exec_args->arg_out_length, result->fdmi_get_cmd_rsp_buf_len))) {
-				ocs_log_err(ocs, "Failed to copy resp to user buffer\n");
-				sport_exec_args->retval = -EFAULT;
+			if (rc) {
+				ocs_log_err(ocs, "Failed to process FDMI response payload\n");
+			} else {
+				uint8_t *src = (uint8_t *)result->fdmi_get_cmd_rsp_buf;
+				uint8_t *dst = (uint8_t *)sport_exec_args->arg_out;
+				size_t len = result->fdmi_get_cmd_rsp_buf_len;
+
+				if (!ocs_memcpy(dst, src, len)) {
+					ocs_log_err(ocs, "Failed to copy FDMI response to user buffer\n");
+					rc = -EFAULT;
+				}
 			}
+
+			sport_exec_args->retval = rc;
 			sport_exec_args->exec_cb(node->sport, sport_exec_args);
 		}
+
 		ocs_free(ocs, result->fdmi_get_cmd_rsp_buf, result->fdmi_get_cmd_rsp_buf_len);
 		ocs_free(ocs, result, sizeof(*result));
 	}
@@ -1527,9 +1749,10 @@ ocs_fdmi_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
 /**
  * @brief send FDMI get command.
  *
- * @param sport : Pointer to sport
+ * @param sport: Pointer to sport
  * @param sport_exec_args: sport exec arguments
  * @param fdmi_cmd_code: FDMI command code
+ *
  * @return Returns 0 on success, or a negative value on failure.
  */
 static int32_t
@@ -1542,6 +1765,11 @@ ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args
 	uint64_t identifier = 0;
 	void *wwpn = sport_exec_args->arg_in;
 
+	if (sport->topology != OCS_SPORT_TOPOLOGY_FABRIC) {
+		ocs_log_err(ocs, "FDMI Get cmds are supported with fabric mode topology only (non-P2P mode)\n");
+		return -EFAULT;
+	}
+
 	if ((fdmi_cmd_code != FC_GS_FDMI_GRHL) && !wwpn) {
 		ocs_log_err(ocs, "Error: Please provide WWPN as input\n");
 		return -EFAULT;
@@ -1549,7 +1777,7 @@ ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args
 
 	result = ocs_malloc(ocs, sizeof(*result), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (result == NULL) {
-		ocs_log_err(ocs, "failed to allocate memory\n");
+		ocs_log_err(ocs, "Failed to allocate memory\n");
 		return -ENOMEM;
 	}
 
@@ -1579,17 +1807,16 @@ ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args
 		ocs_free(ocs, result, sizeof(*result));
 		return -EFAULT;
 	}
+
 	/* Allocate memory to hold FDMI command response */
-	result->fdmi_get_cmd_rsp_buf = ocs_malloc(ocs, result->fdmi_get_cmd_rsp_buf_len,
-			      OCS_M_ZERO | OCS_M_NOWAIT);
+	result->fdmi_get_cmd_rsp_buf = ocs_malloc(ocs, result->fdmi_get_cmd_rsp_buf_len, OCS_M_ZERO | OCS_M_NOWAIT);
 	if (result->fdmi_get_cmd_rsp_buf == NULL) {
-		ocs_log_err(ocs, "failed to allocate memory for fdmi_get_cmd_rsp_buf\n");
+		ocs_log_err(ocs, "Failed to allocate memory for FDMI rsp_buf\n");
 		ocs_free(ocs, result, sizeof(*result));
 		return -ENOMEM;
 	}
 
 	result->fdmi_cmd_code = fdmi_cmd_code;
-
 	fdmi_cmd_req.cmd_code = fdmi_cmd_code;
 	fdmi_cmd_req.identifier = identifier;
 
@@ -1604,12 +1831,112 @@ ocs_sport_fdmi_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args
 	return rc;
 }
 
-void ocs_mgmt_sport_exec_cb(ocs_sport_t *sport, void *arg_in)
+void
+ocs_ganxt_get_cmd_cb(ocs_node_t *node, ocs_node_cb_t *node_data, void *cb_data)
+{
+	ocs_ganxt_get_cmd_results_t *result = cb_data;
+	ocs_sport_exec_arg_t *sport_exec_args;
+	ocs_t *ocs = node->ocs;
+	int rc = 0;
+
+	if (result) {
+		sport_exec_args = result->sport_exec_args;
+
+		/* Command submission has failed, set the error state and report to caller */
+		if (result->status || !node_data || node_data->status || node_data->ext_status) {
+			rc = -EFAULT;
+			goto ganxt_exit;
+		}
+
+		rc = ocs_process_ganxt_payload(node, node_data->els->els_info->els_rsp.virt,
+					node_data->els->els_info->els_rsp.len, result->ganxt_get_cmd_rsp_buf);
+		
+ganxt_exit:
+		if (sport_exec_args) {
+			if (rc) {
+				ocs_log_err(ocs, "Failed to process GA_NXT response payload\n");
+			} else {
+				uint8_t *src = (uint8_t *)result->ganxt_get_cmd_rsp_buf;
+				uint8_t *dst = (uint8_t *)sport_exec_args->arg_out;
+				size_t len = result->ganxt_get_cmd_rsp_buf_len;
+
+				if (!ocs_memcpy(dst, src, len)) {
+					ocs_log_err(ocs, "Failed to copy GA_NXT response to user buffer\n");
+					rc = -EFAULT;
+				}
+			}
+
+			sport_exec_args->retval = rc;
+			sport_exec_args->exec_cb(node->sport, sport_exec_args);
+		}
+
+		ocs_free(ocs, result->ganxt_get_cmd_rsp_buf, result->ganxt_get_cmd_rsp_buf_len);
+		ocs_free(ocs, result, sizeof(*result));
+	}
+}
+
+/**
+ * @brief send NS GA NXT get command.
+ *
+ * @param sport: Pointer to sport
+ * @param sport_exec_args: sport exec arguments
+ *
+ * @return Returns 0 on success, or a negative value on failure.
+ */
+static int32_t
+ocs_sport_ganxt_get_cmd(ocs_sport_t *sport, ocs_sport_exec_arg_t *sport_exec_args)
+{
+	int rc = 0;
+	ocs_ganxt_get_cmd_results_t *result = NULL;
+	ocs_ganxt_get_cmd_req_info_t ganxt_cmd_req;
+	ocs_t *ocs = sport->ocs;
+	uint32_t *fcid; 
+
+	
+	if (sport->topology != OCS_SPORT_TOPOLOGY_FABRIC) {
+		ocs_log_err(ocs, "Name Server Get cmds are supported with fabric mode topology only (non-P2P mode)\n");
+		return -EFAULT;
+	}
+
+	result = ocs_malloc(ocs, sizeof(*result), OCS_M_ZERO | OCS_M_NOWAIT);
+	if (result == NULL) {
+		ocs_log_err(ocs, "Failed to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	fcid =  (uint32_t *) sport_exec_args->arg_in;
+	result->sport_exec_args = sport_exec_args;
+	result->ganxt_get_cmd_rsp_buf_len = sizeof(ocs_ganxt_port_info_t);
+	ganxt_cmd_req.ct_cmd_req_size = sizeof(fcct_ganxt_req_t);
+
+	/* Allocate memory to hold GA_NXT command response */
+	result->ganxt_get_cmd_rsp_buf = ocs_malloc(ocs, result->ganxt_get_cmd_rsp_buf_len, OCS_M_ZERO | OCS_M_NOWAIT);
+	if (result->ganxt_get_cmd_rsp_buf == NULL) {
+		ocs_log_err(ocs, "Failed to allocate memory for GA_NXT rsp_buf\n");
+		ocs_free(ocs, result, sizeof(*result));
+		return -ENOMEM;
+	}
+
+	ganxt_cmd_req.port_id = *fcid;
+
+	rc = ocs_ganxt_get_cmd(sport, ocs_ganxt_get_cmd_cb, result, &ganxt_cmd_req);
+	if (rc) {
+		ocs_free(ocs, result->ganxt_get_cmd_rsp_buf, result->ganxt_get_cmd_rsp_buf_len);
+		ocs_free(ocs, result, sizeof(*result));
+		return -EFAULT;
+	}
+
+	return rc;
+}
+
+void
+ocs_mgmt_sport_exec_cb(ocs_sport_t *sport, void *arg_in)
 {
 	ocs_sport_exec_arg_t *sport_exec_args = arg_in;
 
 	if (sport_exec_args) {
 		ocs_domain_exec_arg_t *domain_exec_args = sport_exec_args->domain_exec_args;
+
 		domain_exec_args->retval = sport_exec_args->retval;
 		domain_exec_args->exec_cb(sport->domain, domain_exec_args);
 	}
@@ -1632,7 +1959,15 @@ ocs_mgmt_sport_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_le
 		char *unqualified_name = action + strlen(qualifier) + 1;
 
 		/* See if it's an action I can perform */
-		if (ocs_strcmp(unqualified_name, "get_fdmi_hba_list") == 0) {
+		if (ocs_strcmp(unqualified_name, "get_peer_zone_support") == 0) {
+			retval = ocs_sport_tdz_issue_fabric_cmd(sport, sport_exec_args, FC_GS_TDZ_GFEZ);
+		} else if (ocs_strcmp(unqualified_name, "get_peer_zone_info") == 0) {
+			retval = ocs_sport_tdz_issue_fabric_cmd(sport, sport_exec_args, FC_GS_TDZ_GAPZ);
+		} else if (ocs_strcmp(unqualified_name, "add_peer_zone") == 0) {
+			retval = ocs_sport_tdz_issue_fabric_cmd(sport, sport_exec_args, FC_GS_TDZ_AAPZ);
+		} else if (ocs_strcmp(unqualified_name, "remove_peer_zone") == 0) {
+			retval = ocs_sport_tdz_issue_fabric_cmd(sport, sport_exec_args, FC_GS_TDZ_RAPZ);
+		} else if (ocs_strcmp(unqualified_name, "get_fdmi_hba_list") == 0) {
 			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GRHL);
 		} else if (ocs_strcmp(unqualified_name, "get_fdmi_hba_info") == 0) {
 			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GHAT);
@@ -1640,6 +1975,10 @@ ocs_mgmt_sport_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_le
 			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GRPL);
 		} else if (ocs_strcmp(unqualified_name, "get_fdmi_port_info") == 0) {
 			retval = ocs_sport_fdmi_get_cmd(sport, sport_exec_args, FC_GS_FDMI_GPAT);
+		} else if (ocs_strcmp(unqualified_name, "send_fpin") == 0) {
+			retval = ocs_sport_fpin_send_event(sport, sport_exec_args);
+		} else if (ocs_strcmp(unqualified_name, "get_ganxt_port_info") == 0) {
+			retval = ocs_sport_ganxt_get_cmd(sport, sport_exec_args);
 		} else {
 			/* If I didn't know how to do this action pass the request to each of my children */
 			ocs_sport_lock(sport);
@@ -1711,13 +2050,13 @@ ocs_vport_update_spec(ocs_sport_t *sport)
  * @return None.
  */
 
-int8_t 
+int8_t
 ocs_vport_create_spec(ocs_t *ocs, uint64_t wwnn, uint64_t wwpn, uint32_t fc_id, uint32_t enable_ini, uint32_t ini_fc_types, uint32_t enable_tgt, uint32_t tgt_fc_types, void *tgt_data, void *ini_data)
 {
 	ocs_xport_t *xport = ocs->xport;
 	ocs_vport_spec_t *vport;
 
-	/* walk the ocs_vport_list and return failure if a valid(vport with non zero WWPN and WWNN) vport entry 
+	/* walk the ocs_vport_list and return failure if a valid(vport with non zero WWPN and WWNN) vport entry
 	   is already created */
 	ocs_list_foreach(&xport->vport_list, vport) {
 		if ((wwpn && (vport->wwpn == wwpn)) && (wwnn && (vport->wwnn == wwnn))) {
@@ -1726,7 +2065,7 @@ ocs_vport_create_spec(ocs_t *ocs, uint64_t wwnn, uint64_t wwpn, uint32_t fc_id, 
 		}
 	}
 
-	vport = ocs_malloc(ocs, sizeof(*vport), OCS_M_ZERO);
+	vport = ocs_malloc(ocs, sizeof(*vport), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (vport == NULL) {
 		ocs_log_err(ocs, "ocs_malloc failed\n");
 		return -1;
@@ -1952,7 +2291,7 @@ ocs_remote_node_group_alloc(ocs_node_group_dir_t *node_group_dir)
 	ocs = sport->ocs;
 
 
-	node_group = ocs_malloc(ocs, sizeof(*node_group), OCS_M_ZERO);
+	node_group = ocs_malloc(ocs, sizeof(*node_group), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (node_group != NULL) {
 
 		/* set pointer to node group directory */

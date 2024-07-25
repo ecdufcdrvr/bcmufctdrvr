@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -75,6 +77,7 @@
 #define OCS_LOG_ENABLE_Q_FULL_BUSY_MSG(ocs)	(((ocs) != NULL) ? (((ocs)->logmask & (1U << 5)) != 0) : 0)
 #define OCS_LOG_ENABLE_IO_ERRORS(ocs)		(((ocs) != NULL) ? (((ocs)->logmask & (1U << 6)) != 0) : 0)
 #define OCS_LOG_ENABLE_CMD_TRACE(ocs)		(((ocs) != NULL) ? (((ocs)->logmask & (1U << 7)) != 0) : 0)
+#define OCS_LOG_ENABLE_SCSI_IO_SGL_TRACE(ocs)	(((ocs) != NULL) ? (((ocs)->logmask & (1U << 8)) != 0) : 0)
 
 extern void ocs_dump32(uint32_t, ocs_os_handle_t, const char *, void *, uint32_t);
 extern void ocs_debug_enable(uint32_t mask);

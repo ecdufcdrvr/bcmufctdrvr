@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,6 +46,7 @@
 #include "ocs_fabric.h"
 #include "ocs_device.h"
 #include "spv.h"
+#include "ocs_nvme_stub.h"
 
 #define domain_sm_trace(domain)  \
 	do { \
@@ -77,6 +80,35 @@ static ocs_mgmt_functions_t domain_mgmt_functions = {
 	.exec_handler = ocs_mgmt_domain_exec,
 };
 
+static void
+ocs_domain_handle_domain_free(ocs_domain_t *domain, ocs_sm_ctx_t *ctx)
+{
+	ocs_t *ocs;
+
+	ocs_assert(domain);
+
+	ocs = domain->ocs;
+
+	ocs_domain_lock(domain);
+	if (!ocs_list_empty(&domain->sport_list)) {
+		/* if there are sports, transition to wait state and send
+		 * shutdown to each sport */
+		ocs_sport_t	*sport = NULL;
+		ocs_sport_t	*sport_next = NULL;
+		ocs_sm_transition(ctx, __ocs_domain_wait_sports_free, NULL);
+		ocs_list_foreach_safe(&domain->sport_list, sport, sport_next) {
+			ocs_sm_post_event(&sport->sm, OCS_EVT_SHUTDOWN, NULL);
+		}
+		ocs_domain_unlock(domain);
+	} else {
+		ocs_domain_unlock(domain);
+		/* no sports exist, free domain */
+		ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
+		if (ocs_hal_domain_free(&ocs->hal, domain)) {
+			ocs_log_err(ocs, "ocs_hal_domain_free() failed\n");
+		}
+	}
+}
 /**
  * @brief Accept domain callback events from the HAL.
  *
@@ -224,15 +256,15 @@ ocs_domain_alloc(ocs_t *ocs, uint64_t fcf_wwn)
 
 	ocs_assert(ocs, NULL);
 
-	domain = ocs_malloc(ocs, sizeof(*domain), OCS_M_ZERO);
+	domain = ocs_malloc(ocs, sizeof(*domain), OCS_M_ZERO | OCS_M_NOWAIT);
 	if (domain) {
 
 		domain->ocs = ocs;
 		domain->instance_index = ocs->domain_instance_count++;
 		domain->drvsm.app = domain;
-		ocs_rlock_init(ocs, &domain->drvsm_lock, "Domain SM lock");
+		ocs_rlock_init(ocs, &domain->drvsm_lock, OCS_LOCK_ORDER_DOMAIN_SM, "Domain SM lock");
 		ocs_domain_lock_init(domain);
-		ocs_lock_init(ocs, &domain->lookup_lock, "Domain lookup[%d]", domain->instance_index);
+		ocs_lock_init(ocs, &domain->lookup_lock, OCS_LOCK_ORDER_IGNORE, "Domain lookup[%d]", domain->instance_index);
 
 		/* Allocate a sparse vector for sport FC_ID's */
 		domain->lookup = spv_new(ocs);
@@ -290,8 +322,9 @@ ocs_domain_free(ocs_domain_t *domain)
 	/* Hold frames to clear the domain pointer from the xport lookup */
 	ocs_domain_hold_frames(domain);
 
-	/* purge pending frames */
-	ocs_domain_purge_pending(domain);
+	/* Purge pending frames only if we haven't re-allocated the domain */
+	if (!domain->domain_found_pending)
+		ocs_domain_purge_pending(domain);
 
 	ocs = domain->ocs;
 
@@ -308,6 +341,8 @@ ocs_domain_free(ocs_domain_t *domain)
 			if (ocs->domain)
 				ocs_log_debug(ocs, "setting new domain, old=%p new=%p\n", domain, ocs->domain);
 		}
+		/* Decrement outstanding domain instance counter*/
+		ocs->domain_instance_count--;
 	ocs_device_unlock(ocs);
 
 	ocs_lock(&ocs->domain_list_empty_cb_lock);
@@ -341,7 +376,7 @@ ocs_domain_free(ocs_domain_t *domain)
 void
 ocs_scsi_wait_domain_force_free(ocs_domain_t *domain)
 {
-#if !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
 	ocs_sport_t *sport, *next;
 
 	ocs_list_foreach_safe(&domain->sport_list, sport, next) {
@@ -360,20 +395,51 @@ ocs_scsi_wait_domain_force_free(ocs_domain_t *domain)
  *
  * @return None.
  */
-
 void
 ocs_domain_force_free(ocs_domain_t *domain)
 {
-	ocs_sport_t *sport;
-	ocs_sport_t *next;
+	int rc;
+	ocs_t *ocs;
 
-	ocs_domain_lock(domain);
-		ocs_list_foreach_safe(&domain->sport_list, sport, next) {
-			ocs_sport_force_free(sport);
+	if (!domain)
+		return;
+
+	ocs = domain->ocs;
+
+	/* Reset hal state to block mailbox commands. */
+	ocs->hal.state = OCS_HAL_STATE_QUEUES_ALLOCATED;
+
+	/* Process already completed commands. */
+	ocs_hal_flush(&ocs->hal);
+
+	/* Cancel any outstanding mailbox commands with HW */
+	ocs_hal_command_cancel(&ocs->hal);
+
+	/* Cancel any outstanding IOs with HW */
+	ocs_scsi_tgt_cancel_io(ocs);
+
+	/* Stop WQE timer */
+	shutdown_target_wqe_timer(&ocs->hal);
+
+	/* Now trigger domain lost */
+	ocs->hal.callback.domain(ocs->hal.args.domain,
+			OCS_HAL_DOMAIN_LOST,
+			ocs->domain);
+
+	/* Quiesce nvme queues. */
+	if (ocs_tgt_nvme_enabled(ocs))
+		ocs_nvme_hw_port_quiesce(ocs);
+
+	/* Wait for domain to complete */
+	if (ocs_register_domain_list_empty_cb(ocs)) {
+		ocs_log_debug(ocs, "waiting for domain hard shutdown to complete\n");
+		rc = ocs_drain_shutdown_events(ocs, &ocs->domain_list_empty_cb_sem);
+		if (rc) {
+			ocs_log_err(ocs, "Domain hard shutdown failed.\n");
+			ocs_ddump(ocs, NULL, OCS_DDUMP_FLAGS_DEFAULT, -1);
 		}
-	ocs_domain_unlock(domain);
-	ocs_hal_domain_force_free(&domain->ocs->hal, domain);
-	ocs_domain_free(domain);
+		ocs_unregister_domain_list_empty_cb(ocs);
+	}
 }
 
 /**
@@ -403,19 +469,26 @@ ocs_unregister_domain_list_empty_cb(ocs_t *ocs)
  *
  * @param ocs Pointer to a device object.
  *
- * @return None.
+ * @return bool(TRUE/FALSE): domain callback registered/not.
  */
-void
+bool
 ocs_register_domain_list_empty_cb(ocs_t *ocs)
 {
+	bool cb_reg = TRUE;
+
 	ocs_lock(&ocs->domain_list_empty_cb_lock);
-		if (ocs->domain_list_empty_cb == NULL) {
+		if (ocs_list_empty(&ocs->domain_list)) {
+			cb_reg = FALSE;
+			ocs_log_info(ocs, "Domain list is empty\n");
+		} else if (ocs->domain_list_empty_cb == NULL) {
 			ocs_sem_init(&ocs->domain_list_empty_cb_sem, 0,
 				     "domain_list_empty_cb_sem");
 			ocs->domain_list_empty_cb_arg = &ocs->domain_list_empty_cb_sem;
 			ocs->domain_list_empty_cb = ocs_xport_domain_list_empty_cb;
 		}
 	ocs_unlock(&ocs->domain_list_empty_cb_lock);
+
+	return cb_reg;
 }
 
 /**
@@ -473,9 +546,12 @@ __ocs_domain_common(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_event_t evt,
 	case OCS_EVT_ENTER:
 	case OCS_EVT_REENTER:
 	case OCS_EVT_EXIT:
-	case OCS_EVT_ALL_CHILD_NODES_FREE:
-		/* this can arise if an FLOGI fails on the SPORT, and the SPORT is shutdown */
 		break;
+
+	case OCS_EVT_DOMAIN_FLUSH_COMPLETE:
+		domain->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+		break;
+
 	default:
 		ocs_log_warn(domain->ocs, "%-20s %-20s not handled\n", funcname, ocs_sm_event_name(evt));
 		break;
@@ -518,6 +594,10 @@ __ocs_domain_common_shutdown(const char *funcname, ocs_sm_ctx_t *ctx, ocs_sm_eve
 	case OCS_EVT_DOMAIN_LOST: // clear drec available
 		//sm: / unmark domain_found_pending
 		domain->domain_found_pending = FALSE;
+		break;
+	case OCS_EVT_DOMAIN_FLUSH_COMPLETE:
+		ocs_log_debug(domain->ocs, "Domain flush completed\n");
+		domain->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
 		break;
 
 	default:
@@ -658,13 +738,14 @@ __ocs_domain_init(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		}
 
 		/* Initiate HAL domain alloc */
+		ocs_sm_transition(ctx, __ocs_domain_wait_alloc, arg);
 		if (ocs_hal_domain_alloc(&ocs->hal, domain, drec->index, vlan)) {
 			ocs_log_err(ocs, "Failed to initiate HAL domain allocation\n");
 			break;
 		}
-		ocs_sm_transition(ctx, __ocs_domain_wait_alloc, arg);
 		break;
 	}
+	
 	default:
 		__ocs_domain_common(__func__, ctx, evt, arg);
 		return NULL;
@@ -702,6 +783,15 @@ __ocs_domain_wait_alloc(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		char prop_buf[32];
 		uint64_t wwn_bump = 0;
 		fc_plogi_payload_t *sp;
+		ocs_xport_stats_t link_status;
+
+		/* Make sure link is still up */
+		if (ocs_xport_status(ocs->xport, OCS_XPORT_PORT_STATUS, &link_status) ||
+				     link_status.value != OCS_XPORT_PORT_ONLINE) {
+			ocs_log_debug(ocs, "Link down during domain alloc.\n");
+			ocs_domain_handle_domain_free(domain, ctx);
+			break;
+		}
 
 		if (ocs_get_property("wwn_bump", prop_buf, sizeof(prop_buf)) == 0) {
 			wwn_bump = ocs_strtoull(prop_buf, 0, 0);
@@ -791,10 +881,15 @@ __ocs_domain_wait_alloc(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	}
 
 	case OCS_EVT_DOMAIN_ALLOC_FAIL:
-		// TODO: hal/device reset
-		ocs_log_err(ocs, "%s recv'd waiting for DOMAIN_ALLOC_OK; shutting down domain\n",
+		ocs_log_warn(ocs, "%s received while waiting for DOMAIN_ALLOC_OK. Shutting down domain\n",
+										ocs_sm_event_name(evt));
+		ocs_domain_handle_domain_free(domain, ctx);
+		break;
+
+	case OCS_EVT_ALL_CHILD_NODES_FREE:
+		ocs_log_warn(ocs, "%s recv'd waiting for DOMAIN_ALLOC_OK; shutting down domain\n",
 			ocs_sm_event_name(evt));
-		domain->req_domain_free = 1;
+		domain->req_domain_free = TRUE;
 		break;
 
 	case OCS_EVT_DOMAIN_FOUND:
@@ -803,7 +898,7 @@ __ocs_domain_wait_alloc(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 
 	case OCS_EVT_DOMAIN_LOST:
-		ocs_log_debug(ocs, "%s received while waiting for ocs_hal_domain_alloc() to complete\n", ocs_sm_event_name(evt));
+		ocs_log_info(ocs, "%s received while waiting for ocs_hal_domain_alloc() to complete\n", ocs_sm_event_name(evt));
 		ocs_sm_transition(ctx, __ocs_domain_wait_domain_lost, NULL);
 		break;
 
@@ -872,34 +967,13 @@ __ocs_domain_allocated(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		ocs_assert(evt, NULL);
 		break;
 
-	case OCS_EVT_DOMAIN_LOST: {
-		int32_t rc;
-		ocs_log_debug(ocs, "%s received while waiting for OCS_EVT_DOMAIN_REQ_ATTACH\n",
+	case OCS_EVT_DOMAIN_LOST:
+	case OCS_EVT_DOMAIN_ATTACH_FAIL:
+	case OCS_EVT_ALL_CHILD_NODES_FREE:
+		ocs_log_warn(ocs, "%s received while waiting for OCS_EVT_DOMAIN_REQ_ATTACH. Shut down domain\n",
 			ocs_sm_event_name(evt));
-		ocs_domain_lock(domain);
-		if (!ocs_list_empty(&domain->sport_list)) {
-			/* if there are sports, transition to wait state and send
-			* shutdown to each sport */
-			ocs_sport_t	*sport = NULL;
-			ocs_sport_t	*sport_next = NULL;
-			ocs_sm_transition(ctx, __ocs_domain_wait_sports_free, NULL);
-			ocs_list_foreach_safe(&domain->sport_list, sport, sport_next) {
-				ocs_sm_post_event(&sport->sm, OCS_EVT_SHUTDOWN, NULL);
-			}
-			ocs_domain_unlock(domain);
-		} else {
-			ocs_domain_unlock(domain);
-			/* no sports exist, free domain */
-			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
-			rc = ocs_hal_domain_free(&ocs->hal, domain);
-			if (rc) {
-				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
-				//TODO: hal/device reset needed
-			}
-		}
-
+		ocs_domain_handle_domain_free(domain, ctx);
 		break;
-	}
 
 	default:
 		__ocs_domain_common(__func__, ctx, evt, arg);
@@ -945,12 +1019,20 @@ __ocs_domain_wait_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		domain->attached = 1;
 
 		/* Register with SCSI API */
-		if (ocs->enable_tgt) {
+		if (ocs_tgt_scsi_enabled(ocs)) {
+			ocs_domain_lock(domain);
 			ocs_scsi_tgt_new_domain(domain);
-			ocs_nvme_tgt_new_domain(domain);
+			ocs_domain_unlock(domain);
 		}
-		if (ocs->enable_ini)
+
+		if (ocs_ini_scsi_enabled(ocs))
 			ocs_scsi_ini_new_domain(domain);
+
+		if (ocs_tgt_nvme_enabled(ocs))
+			ocs_nvme_tgt_new_domain(domain);
+
+		if (ocs_ini_nvme_enabled(ocs))
+			ocs_nvme_ini_new_domain(domain);
 
 		/* Transition to ready */
 		//sm: / forward event to all sports and nodes
@@ -977,8 +1059,9 @@ __ocs_domain_wait_attach(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	}
 
 	case OCS_EVT_DOMAIN_ATTACH_FAIL:
-		ocs_log_debug(ocs, "%s received while waiting for hal attach to complete\n", ocs_sm_event_name(evt));
-		//TODO: hal/device reset
+	case OCS_EVT_ALL_CHILD_NODES_FREE:
+		ocs_log_warn(ocs, "%s received while waiting for hal attach to complete\n", ocs_sm_event_name(evt));
+		ocs_domain_handle_domain_free(domain, ctx);
 		break;
 
 	case OCS_EVT_DOMAIN_FOUND:
@@ -1036,28 +1119,7 @@ __ocs_domain_ready(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 		break;
 	}
 	case OCS_EVT_DOMAIN_LOST: {
-		int32_t rc;
-		ocs_domain_lock(domain);
-		if (!ocs_list_empty(&domain->sport_list)) {
-			/* if there are sports, transition to wait state and send
-			* shutdown to each sport */
-			ocs_sport_t	*sport = NULL;
-			ocs_sport_t	*sport_next = NULL;
-			ocs_sm_transition(ctx, __ocs_domain_wait_sports_free, NULL);
-			ocs_list_foreach_safe(&domain->sport_list, sport, sport_next) {
-				ocs_sm_post_event(&sport->sm, OCS_EVT_SHUTDOWN, NULL);
-			}
-			ocs_domain_unlock(domain);
-		} else {
-			ocs_domain_unlock(domain);
-			/* no sports exist, free domain */
-			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
-			rc = ocs_hal_domain_free(&ocs->hal, domain);
-			if (rc) {
-				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
-				//TODO: hal/device reset needed
-			}
-		}
+		ocs_domain_handle_domain_free(domain, ctx);
 		break;
 	}
 
@@ -1154,24 +1216,27 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	domain_sm_trace(domain);
 
 	switch(evt) {
-	case OCS_EVT_DOMAIN_FREE_OK: {
-		int rc = OCS_CALL_COMPLETE;
-
-		if (ocs->enable_ini)
+	case OCS_EVT_DOMAIN_FREE_FAIL:
+		ocs_log_debug(ocs, "domain free failed\n");
+		FALL_THROUGH; /* fall through */
+	case OCS_EVT_DOMAIN_FREE_OK:
+		if (ocs_ini_scsi_enabled(ocs))
 			ocs_scsi_ini_del_domain(domain);
-		if (ocs->enable_tgt) {
+		if (ocs_tgt_scsi_enabled(ocs))
 			ocs_scsi_tgt_del_domain(domain);
+
+		if (ocs_tgt_nvme_enabled(ocs))
 			ocs_nvme_tgt_del_domain(domain);
-		}
+		if (ocs_ini_nvme_enabled(ocs))
+			ocs_nvme_ini_del_domain(domain);
 
-		if (rc == OCS_CALL_COMPLETE) {
-			ocs_sm_post_event(&domain->drvsm, OCS_EVT_DOMAIN_TGT_FREE_OK, NULL);
-		}
-
+		ocs_sm_post_event(&domain->drvsm, OCS_EVT_DOMAIN_TGT_FREE_OK, NULL);
 		break;
 
 	case OCS_EVT_DOMAIN_TGT_FREE_OK:
 		//sm: / domain_free
+		domain->req_domain_free = TRUE;
+
 		if (domain->domain_found_pending) {
 			/* save fcf_wwn and drec from this domain, free current domain and allocate
 			 * a new one with the same fcf_wwn
@@ -1179,28 +1244,27 @@ __ocs_domain_wait_shutdown(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 			 */
 			uint64_t fcf_wwn = domain->fcf_wwn;
 			ocs_domain_record_t drec = domain->pending_drec;
+			ocs_domain_t *new_domain = NULL;
 
 			ocs_log_debug(ocs, "Reallocating domain\n");
-			domain->req_domain_free = 1;
-			domain = ocs_domain_alloc(ocs, fcf_wwn);
-
-			if (domain == NULL) {
+			new_domain = ocs_domain_alloc(ocs, fcf_wwn);
+			if (!new_domain) {
 				ocs_log_err(ocs, "ocs_domain_alloc() failed\n");
+				domain->domain_found_pending = FALSE;
 				//TODO: hal/device reset needed
 				return NULL;
 			}
+
 			/*
 			 * got a new domain; at this point, there are at least two domains
 			 * once the req_domain_free flag is processed, the associated domain
 			 * will be removed.
 			 */
-			ocs_sm_transition(&domain->drvsm, __ocs_domain_init, NULL);
-			ocs_sm_post_event(&domain->drvsm, OCS_EVT_DOMAIN_FOUND, &drec);
-		} else {
-			domain->req_domain_free = 1;
+			ocs_sm_transition(&new_domain->drvsm, __ocs_domain_init, NULL);
+			ocs_sm_post_event(&new_domain->drvsm, OCS_EVT_DOMAIN_FOUND, &drec);
 		}
+
 		break;
-	}
 
 	default:
 		__ocs_domain_common_shutdown(__func__, ctx, evt, arg);
@@ -1236,28 +1300,7 @@ __ocs_domain_wait_domain_lost(ocs_sm_ctx_t *ctx, ocs_sm_event_t evt, void *arg)
 	switch(evt) {
 	case OCS_EVT_DOMAIN_ALLOC_OK:
 	case OCS_EVT_DOMAIN_ATTACH_OK: {
-		int32_t rc;
-		ocs_domain_lock(domain);
-		if (!ocs_list_empty(&domain->sport_list)) {
-			/* if there are sports, transition to wait state and send
-			* shutdown to each sport */
-			ocs_sport_t	*sport = NULL;
-			ocs_sport_t	*sport_next = NULL;
-			ocs_sm_transition(ctx, __ocs_domain_wait_sports_free, NULL);
-			ocs_list_foreach_safe(&domain->sport_list, sport, sport_next) {
-				ocs_sm_post_event(&sport->sm, OCS_EVT_SHUTDOWN, NULL);
-			}
-			ocs_domain_unlock(domain);
-		} else {
-			ocs_domain_unlock(domain);
-			/* no sports exist, free domain */
-			ocs_sm_transition(ctx, __ocs_domain_wait_shutdown, NULL);
-			rc = ocs_hal_domain_free(&ocs->hal, domain);
-			if (rc) {
-				ocs_log_err(ocs, "ocs_hal_domain_free() failed: %d\n", rc);
-				//TODO: hal/device reset needed
-			}
-		}
+		ocs_domain_handle_domain_free(domain, ctx);
 		break;
 	}
 	case OCS_EVT_DOMAIN_ALLOC_FAIL:
@@ -1335,12 +1378,95 @@ ocs_domain_attach(ocs_domain_t *domain, uint32_t s_id)
 	ocs_rlock_release(&domain->drvsm_lock);
 }
 
+static int32_t
+ocs_domain_attach_async_cb(ocs_hal_t *hal, int32_t status, uint8_t *mqe, void *arg)
+{
+	ocs_domain_attach_async_args_t *async_args = arg;
+	ocs_domain_t *domain = NULL;
+	ocs_node_t *node = NULL;
+
+	ocs_assert(arg, 0);
+	domain = ocs_domain_get_instance(hal->os, async_args->domain_index);
+	if (domain) {
+		ocs_sport_t *sport;
+
+		/* acquire domain SM lock first as this event will handle domain attach */
+		ocs_rlock_acquire(&domain->drvsm_lock);	
+		ocs_domain_lock(domain);
+		sport = domain->sport;
+		if (sport) {
+			node = ocs_node_find(sport, async_args->node_id);
+			if (node) {
+				ocs_node_post_event(node, OCS_EVT_DOMAIN_WAIT_ASYNC_CB_OK, arg);
+			} else {
+				ocs_log_err(hal->os, "Unable to find fabric node for sport index: %d node FC ID: 0x%x\n",
+					    sport->instance_index, async_args->node_id);
+			}
+		} else {
+			ocs_log_err(hal->os, "No sport avalible for domain : %d\n", async_args->domain_index);
+		}
+		ocs_domain_unlock(domain);
+		ocs_rlock_release(&domain->drvsm_lock);
+	} else {
+		ocs_log_err(hal->os, "Unable to find domain for index: %d\n", async_args->domain_index);
+	}
+
+	ocs_free(hal->os, async_args, sizeof(*async_args));
+
+	return 0;
+}
+
+/**
+ * @brief Asynchronous Initiator domain attach
+ *
+ * <h3 class="desc">Description</h3>
+ * The HAL domain attach function is started.
+ *
+ * @param domain Pointer to the domain object.
+ * @param s_id FC_ID of which to register this domain.
+ * @param state node state machine to be moved after async completion
+ * @node node object
+ *
+ * @return None.
+ */
+
+void
+ocs_domain_attach_async(ocs_domain_t *domain, uint32_t s_id, ocs_sm_function_t state, ocs_node_t *node)
+{
+	ocs_domain_attach_async_args_t *args;
+
+	args = ocs_malloc(domain->ocs, sizeof(ocs_domain_attach_async_args_t), OCS_M_NOWAIT | OCS_M_ZERO);
+	if (!args) {
+		ocs_log_err(domain->ocs, "memory alloc failed. shutting down node\n");
+		ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
+	} else {
+		args->domain_index = domain->instance_index;
+		args->s_id = s_id;
+		args->state = state;
+		args->node_id = node->rnode.fc_id;
+
+		ocs_node_transition(node, __ocs_d_wait_domain_async, NULL);
+
+		if (ocs_hal_async_call(&domain->ocs->hal, ocs_domain_attach_async_cb, args)) {
+			ocs_log_err(domain->ocs, "HAL async call is failed. shutting down node\n");
+			ocs_node_post_event(node, OCS_EVT_SHUTDOWN, NULL);
+			ocs_free(domain->ocs, args, sizeof(*args));
+		}
+	}
+
+}
+static void ocs_domain_flush_callback(void *arg)
+{
+	ocs_domain_t *domain = arg;
+
+	ocs_domain_post_event(domain, OCS_EVT_DOMAIN_FLUSH_COMPLETE, NULL);
+}
+
 int
 ocs_domain_post_event(ocs_domain_t *domain, ocs_sm_event_t event, void *arg)
 {
 	int rc;
 	int accept_frames = 0;
-	int req_domain_free = 0;
 
 	ocs_rlock_acquire(&domain->drvsm_lock);
 		domain->evtdepth++;
@@ -1352,13 +1478,22 @@ ocs_domain_post_event(ocs_domain_t *domain, ocs_sm_event_t event, void *arg)
 		accept_frames = domain->req_accept_frames;
 		domain->req_accept_frames = 0;
 
-		if ((domain->evtdepth == 0) && domain->req_domain_free) {
-			req_domain_free = 1;
+		if ((domain->evtdepth == 0) && domain->req_domain_free &&
+		     !domain->async_flush_state) {
+
+			domain->async_flush_state = OCS_ASYNC_FLUSH_START;
+
+			if (ocs_hal_rq_marker_gen_req(&domain->ocs->hal, SLI4_RQ_MARKER_CATEGORY_ALL,
+  						  ocs_domain_flush_callback,
+						  (void *) domain) != 0) {
+				/* Could not trigger flush request - free domain */
+				domain->async_flush_state = OCS_ASYNC_FLUSH_COMPLETE;
+			}
 		}
 
 	ocs_rlock_release(&domain->drvsm_lock);
 
-        if (req_domain_free) {
+        if (domain->async_flush_state == OCS_ASYNC_FLUSH_COMPLETE) {
                 ocs_domain_free(domain);
         } else if (accept_frames) {
                 ocs_domain_accept_frames(domain);
@@ -1424,6 +1559,7 @@ ocs_ddump_domain(ocs_textbuf_t *textbuf, ocs_domain_t *domain)
 	ocs_ddump_value(textbuf, "attached", "%d", domain->attached);
 	ocs_ddump_value(textbuf, "is_loop", "%d", domain->is_loop);
 	ocs_ddump_value(textbuf, "is_nlport", "%d", domain->is_nlport);
+	ocs_ddump_value(textbuf, "async_flush_state", "%d", domain->async_flush_state);
 
 	ocs_scsi_ini_ddump(textbuf, OCS_SCSI_DDUMP_DOMAIN, domain);
 	ocs_scsi_tgt_ddump(textbuf, OCS_SCSI_DDUMP_DOMAIN, domain);

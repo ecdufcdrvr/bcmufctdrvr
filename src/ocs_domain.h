@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,12 +44,19 @@ extern ocs_domain_t *ocs_domain_find(ocs_t *ocs, uint64_t fcf_wwn);
 extern ocs_domain_t *ocs_domain_alloc(ocs_t *ocs, uint64_t fcf_wwn);
 extern void ocs_domain_free(ocs_domain_t *domain);
 extern void ocs_domain_force_free(ocs_domain_t *domain);
-extern void ocs_notify_domain_force_free(ocs_domain_t *domain);
 extern void ocs_scsi_wait_domain_force_free(ocs_domain_t *domain);
-extern void ocs_register_domain_list_empty_cb(ocs_t *ocs);
+extern bool ocs_register_domain_list_empty_cb(ocs_t *ocs);
 extern void ocs_unregister_domain_list_empty_cb(ocs_t *ocs);
 extern void ocs_xport_domain_list_empty_cb(ocs_t *ocs, void *arg);
 extern uint64_t ocs_get_wwn(ocs_hal_t *hal, ocs_hal_property_e prop);
+
+typedef struct ocs_domain_attach_async_args_s {
+	uint32_t domain_index;
+	uint32_t s_id;
+	uint32_t node_id;
+	ocs_sm_function_t state;
+} ocs_domain_attach_async_args_t;
+
 
 static inline void
 ocs_domain_lock_init(ocs_domain_t *domain)
@@ -91,4 +100,6 @@ extern int ocs_domain_post_event(ocs_domain_t *domain, ocs_sm_event_t, void *);
 
 extern int ocs_ddump_domain(ocs_textbuf_t *textbuf, ocs_domain_t *domain);
 extern void __ocs_domain_attach_internal(ocs_domain_t *domain, uint32_t s_id);;
+extern void
+ocs_domain_attach_async(ocs_domain_t *domain, uint32_t s_id, ocs_sm_function_t state, ocs_node_t *node);
 #endif // __OCS_DOMAIN_H__

@@ -1,34 +1,35 @@
 /*
- *   BSD LICENSE
+ * BSD LICENSE
  *
- *   Copyright (c) 2018 Broadcom.  All Rights Reserved.
- *   The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #include "fc_lld.h"
@@ -44,8 +45,9 @@
 #include "spdk/likely.h"
 #include "spdk/trace.h"
 #include "spdk_nvmf_xport.h"
-#include "fc.h"
 #include "spdk/barrier.h"
+
+#include "fc.h"
 
 spdk_nvmf_transport_destroy_done_cb g_transport_destroy_done_cb_fn;
 void *g_transport_destroy_done_cb_arg;
@@ -53,7 +55,7 @@ void *g_transport_destroy_done_cb_arg;
 static void *
 ocs_get_virt(struct spdk_nvmf_fc_xchg *xchg);
 
-static uint64_t 
+static uint64_t
 ocs_get_phys(struct spdk_nvmf_fc_xchg *xchg);
 
 /*
@@ -282,8 +284,10 @@ ocs_get_phys(struct spdk_nvmf_fc_xchg *xchg);
 /* Support for sending ABTS in case of sequence errors */
 #define BCM_SUPPORT_ABTS_FOR_SEQ_ERRORS		true
 
-#define BCM_MARKER_CATAGORY_ALL_RQ		0x1
-#define BCM_MARKER_CATAGORY_ALL_RQ_EXCEPT_ONE	0x2
+#define BCM_MARKER_CATEGORY_ALL_RQ		0x1
+#define BCM_MARKER_CATEGORY_ALL_RQ_EXCEPT_ONE	0x2
+#define BCM_MARKER_CATEGORY_MRQ_SET_1		0x4
+#define BCM_MARKER_CATEGORY_MRQ_SET_2		0x5
 
 /* FC CQE Types */
 typedef enum {
@@ -1235,8 +1239,8 @@ typedef struct bcm_gen_request64_wqe_s {
 
 typedef struct bcm_marker_wqe_s {
 	uint32_t	rsvd0[3];
-	uint32_t	marker_catagery: 2,
-			: 30;
+	uint32_t	marker_category: 4,
+			: 28;
 	uint32_t	tag_lower;
 	uint32_t	tag_higher;
 	uint32_t	rsvd1;
@@ -1289,17 +1293,19 @@ struct virt_phys {
 };
 
 static void *
-ocs_get_virt(struct spdk_nvmf_fc_xchg *xchg) {
+ocs_get_virt(struct spdk_nvmf_fc_xchg *xchg)
+{
 	struct virt_phys *vp;
-		
+
 	vp = (void *)(((char *)xchg) + sizeof(struct spdk_nvmf_fc_xchg));
 	return vp->sgl_virt;
 }
 
 static uint64_t
-ocs_get_phys(struct spdk_nvmf_fc_xchg *xchg) {
+ocs_get_phys(struct spdk_nvmf_fc_xchg *xchg)
+{
 	struct virt_phys *vp;
-		
+
 	vp = (void *)(((char *)xchg) + sizeof(struct spdk_nvmf_fc_xchg));
 	return vp->sgl_phys;
 }
@@ -1674,6 +1680,7 @@ nvmf_fc_read_queue_entry(bcm_sli_queue_t *q, uint8_t *entry)
 static int
 nvmf_fc_write_queue_entry(bcm_sli_queue_t *q, uint8_t *entry)
 {
+	int i;
 	uint8_t	*qe, *tmp;
 	void *dpp_reg = NULL;
 	bool dpp_q = false;
@@ -1708,9 +1715,9 @@ nvmf_fc_write_queue_entry(bcm_sli_queue_t *q, uint8_t *entry)
 
 	if (dpp_q) {
 		/* Write wqe to dpp db */
-    		dpp_reg = (void *) q->dpp_doorbell_reg;
-                tmp = (uint8_t *)entry;
-                for (int i = 0; i < q->size; i += sizeof(uint64_t)) 
+		dpp_reg = (void *) q->dpp_doorbell_reg;
+		tmp = (uint8_t *)entry;
+		for (i = 0; i < q->size; i += sizeof(uint64_t))
 			*((uint64_t *) (dpp_reg + i)) = *((uint64_t *)(tmp + i));
 	}
 
@@ -2091,6 +2098,7 @@ nvmf_fc_lld_start(void)
 	ocs_spdk_start_pollers();
 }
 
+
 int
 nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port)
 {
@@ -2098,7 +2106,6 @@ nvmf_fc_lld_port_add(struct spdk_nvmf_fc_port *fc_port)
 	uint32_t io_xri_base, io_xri_count, io_sgl_offset;
 	struct bcm_nvmf_hw_queues *hwq, *ls_hwq;
 	uint32_t i;
-
 
 	assert(fc_hw_port->sgl_list);
 
@@ -2248,14 +2255,7 @@ nvmf_fc_lld_port_remove(struct spdk_nvmf_fc_port *fc_port)
 	return 0;
 }
 
-void
-nvmf_fc_reinit_q(void *queues_prev, void *queues_curr)
-{
-	/* Remove this after WIP work. */
-	return;
-}
-
-int
+static int
 nvmf_fc_init_rqpair_buffers(struct spdk_nvmf_fc_hwqp *hwqp)
 {
 	int rc = 0;
@@ -2538,7 +2538,6 @@ nvmf_fc_def_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 	SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD, "DEF WQE Compl(%d) \n", status);
 }
 
-
 static void
 nvmf_fc_process_fused_command(struct spdk_nvmf_fc_request *fc_req)
 {
@@ -2610,8 +2609,8 @@ nvmf_fc_io_cmpl_cb(void *ctx, uint8_t *cqe, int32_t status, void *arg)
 		goto io_done;
 	}
 
-	if (fc_req->fc_conn->qpair.state != SPDK_NVMF_QPAIR_ACTIVE ||
-		fc_req->fc_conn->conn_state != SPDK_NVMF_FC_OBJECT_CREATED) {
+	if (!spdk_nvmf_qpair_is_active(&fc_req->fc_conn->qpair) ||
+	    fc_req->fc_conn->conn_state != SPDK_NVMF_FC_OBJECT_CREATED) {
 		goto io_done;
 	}
 
@@ -2701,15 +2700,15 @@ nvmf_fc_process_wqe_release(struct spdk_nvmf_fc_hwqp *hwqp, uint16_t wqid)
 static uint32_t
 nvmf_fc_fill_sgl(struct spdk_nvmf_fc_request *fc_req)
 {
-	uint32_t i;
+	uint8_t i;
 	uint32_t offset = 0;
 	uint64_t iov_phys;
 	bcm_sge_t *sge = NULL;
 	void *sgl = ocs_get_virt(fc_req->xchg);
 
-	assert((fc_req->req.iovcnt) <= BCM_MAX_IOVECS);
-	if ((fc_req->req.iovcnt) > BCM_MAX_IOVECS) {
-		SPDK_ERRLOG("Error: (fc_req->req.iovcnt) > BCM_MAX_IOVECS\n");
+	assert((fc_req->req.iovcnt) <= SPDK_NVMF_MAX_SGL_ENTRIES);
+	if ((fc_req->req.iovcnt) > SPDK_NVMF_MAX_SGL_ENTRIES) {
+		SPDK_ERRLOG("Error: (fc_req->req.iovcnt) > SPDK_NVMF_MAX_SGL_ENTRIES\n");
 		return 0;
 	}
 	assert(fc_req->req.iovcnt != 0);
@@ -2767,7 +2766,7 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	/* BZ 217434 - Disable pbde use till proper fix to work around prism asic issue */
         bool disable_pbde = true;
 
-//	assert(fc_req->xchg->sgl_virt != NULL);
+	assert(ocs_get_virt(fc_req->xchg) != NULL);
 
 	if (!fc_req->req.iovcnt) {
 		return -1;
@@ -2857,11 +2856,16 @@ nvmf_fc_recv_data(struct spdk_nvmf_fc_request *fc_req)
 	return rc;
 }
 
+#define BCM_MARKER_TYPE_SCSI	0x80000000
+
 static void
 nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 {
 	bcm_fc_async_rcqe_marker_t *marker = (void *)cqe;
 	struct spdk_nvmf_fc_poller_api_queue_sync_done_args *poller_args;
+
+	if (marker->tag_higher & BCM_MARKER_TYPE_SCSI)
+		return;
 
 	poller_args = calloc(1, sizeof(struct spdk_nvmf_fc_poller_api_queue_sync_done_args));
 	if (poller_args) {
@@ -2878,10 +2882,10 @@ nvmf_fc_process_marker_cqe(struct spdk_nvmf_fc_hwqp *hwqp, uint8_t *cqe)
 static int
 nvmf_fc_process_rqpair(struct spdk_nvmf_fc_hwqp *hwqp, fc_eventq_t *cq, uint8_t *cqe)
 {
-	int rc = 0, rq_index = 0;
+	int rc = 0;
 	uint16_t rq_id = 0;
 	int32_t rq_status;
-	uint32_t buff_idx = 0;
+	uint32_t buff_idx = 0, rq_index = 0;
 	struct spdk_nvmf_fc_frame_hdr *frame = NULL;
 	struct spdk_nvmf_fc_buffer_desc *payload_buffer = NULL;
 	bcm_fc_async_rcqe_t *rcqe = (bcm_fc_async_rcqe_t *)cqe;
@@ -2908,7 +2912,7 @@ nvmf_fc_process_rqpair(struct spdk_nvmf_fc_hwqp *hwqp, fc_eventq_t *cq, uint8_t 
 		switch (rq_status) {
 		case BCM_FC_ASYNC_RQ_BUF_LEN_EXCEEDED:
 		case BCM_FC_ASYNC_RQ_DMA_FAILURE:
-			if (rq_index < 0 || rq_index >= BCM_HWQP(hwqp)->rq_hdr.q.max_entries) {
+			if (rq_index == UINT32_MAX || rq_index >= BCM_HWQP(hwqp)->rq_hdr.q.max_entries) {
 				SPDK_DEBUGLOG(SPDK_LOG_NVMF_FC_LLD,
 					      "status=%#x: rq_id lookup failed for id=%#x\n",
 					      rq_status, rq_id);
@@ -3039,7 +3043,7 @@ nvmf_fc_process_cq_entry(struct spdk_nvmf_fc_hwqp *hwqp, struct fc_eventq *cq)
 static void
 nvmf_fc_process_pending(struct spdk_nvmf_fc_hwqp *hwqp)
 {
-	if (hwqp->hwqp_id > 16) {
+	if (hwqp->is_ls_queue) {
 		nvmf_fc_hwqp_process_pending_ls_rqsts(hwqp);
 	} else if (hwqp->fgroup) {
 		nvmf_fc_hwqp_process_pending_reqs(hwqp);
@@ -3673,10 +3677,10 @@ nvmf_fc_issue_q_sync(struct spdk_nvmf_fc_hwqp *hwqp, uint64_t u_id, uint16_t ski
 	bcm_marker_wqe_t *marker = (bcm_marker_wqe_t *)wqe;
 
 	if (skip_rq != UINT16_MAX) {
-		marker->marker_catagery = BCM_MARKER_CATAGORY_ALL_RQ_EXCEPT_ONE;
+		marker->marker_category = BCM_MARKER_CATEGORY_ALL_RQ_EXCEPT_ONE;
 		marker->rq_id = skip_rq;
 	} else {
-		marker->marker_catagery = BCM_MARKER_CATAGORY_ALL_RQ;
+		marker->marker_category = BCM_MARKER_CATEGORY_ALL_RQ;
 	}
 
 	marker->tag_lower	= PTR_TO_ADDR32_LO(u_id);
@@ -3771,16 +3775,15 @@ nvmf_fc_dump_queue_entries(struct spdk_nvmf_fc_queue_dump_info *dump_info,
 {
 #define NVMF_TGT_FC_QDUMP_RADIUS 1
 	char     name[64];
-	int32_t  index = 0;
 	uint8_t *entry = NULL;
-	uint32_t i;
+	uint32_t i, index = 0;
 
 	index = q->tail;
 
-	index -= NVMF_TGT_FC_QDUMP_RADIUS;
-	if (index < 0) {
+	if (index < NVMF_TGT_FC_QDUMP_RADIUS)
 		index += q->max_entries;
-	}
+
+	index -= NVMF_TGT_FC_QDUMP_RADIUS;
 
 	/*
 	 * Print the NVMF_TGT_FC_QDUMP_RADIUS number of entries before and

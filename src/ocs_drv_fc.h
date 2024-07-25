@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,8 +41,6 @@
 #if !defined(__OCS_DRV_FC_H__)
 #define __OCS_DRV_FC_H__
 
-#define OCS_INCLUDE_FC
-
 #include "ocs_os.h"
 #include "ocs_debug.h"
 #include "ocs_fc_config.h"
@@ -72,13 +72,10 @@ struct ocs_s {
 	ocs_list_t domain_list;			/*>> linked list of virtual fabric objects */
 	ocs_io_pool_t *io_pool;			/**< pointer to IO pool */
 	ocs_ramlog_t *ramlog;
+	int32_t ramlog_size;
 	ocs_drv_t drv_ocs;
-#if defined(OCS_USPACE_SPDK_UPSTREAM)
-	struct ocs_nvme_tgt tgt_ocs;
-#else
-	ocs_scsi_tgt_t tgt_ocs;
-#endif
-	ocs_scsi_ini_t ini_ocs;
+	ocs_tgt_t tgt_ocs;
+	ocs_ini_t ini_ocs;
 	ocs_xport_e ocs_xport;
 	ocs_xport_t *xport;			/*>> Pointer to transport object */
 	bool enable_ini;
@@ -86,7 +83,7 @@ struct ocs_s {
 	bool enable_tgt;
 	uint8_t tgt_fc_types;			/*>> Target type - SCSI/NVME */
 	int ctrlmask;
-	int logmask;
+	uint32_t logmask;
 	uint32_t max_isr_time_msec;		/*>> Maximum ISR time */
 	char *hal_war_version;
 	ocs_pm_context_t pm_context;		/*<< power management context */
@@ -98,6 +95,9 @@ struct ocs_s {
 	time_t delay_value_msec;		/**< for injecting delays */
 	uint16_t sriov_nr_vfs;
 	bool sriov_probe_vfs;
+#if !defined(OCS_USPACE) && defined (OCS_LOCK_ORDER_CHECK)
+	struct ocs_lock_order_data_s __percpu *lock_order_data;
+#endif
 
 	const char *desc;
 	uint32_t instance_index;
@@ -110,6 +110,8 @@ struct ocs_s {
 	const char *model;
 	const char *driver_version;
 	const char *fw_version;
+	
+	const char *queue_topology; /*>> pointer to queue topology string */
 
 	ocs_hal_t hal;
 
@@ -124,12 +126,14 @@ struct ocs_s {
 	bool explicit_buffer_list;
 	bool external_loopback;
 	uint32_t num_vports;
+	uint32_t cur_vport_count;
 	uint32_t hal_bounce;
 	uint32_t rq_threads;
 	uint32_t rq_selection_policy;
+	uint32_t cq_process_limit;
 	uint32_t worker_poll_no_tmo;
 	uint32_t rr_quanta;
-	char *filter_def;
+	char filter_def[1024];
 	uint32_t max_remote_nodes;
 	uint32_t enable_dual_dump;
 	uint64_t soft_wwpn_restore;
@@ -168,6 +172,10 @@ struct ocs_s {
 	int topology;
 	int ethernet_license;
 	int num_scsi_ios;
+
+	int io_pool_cache_num;			/*>> Number of io pool caches */
+	int io_pool_cache_thresh;		/*>> Cache threshold to free IOs to a pool */
+
 	bool soft_wwn_enable;
 	bool enable_hlm;			/*>> high login mode is enabled */
 	bool enable_dpp;			/*>> DPP Mode enabled */
@@ -178,17 +186,36 @@ struct ocs_s {
 	bool cfg_suppress_rsp;			/*>> Config Suppress Response feature */
 
 	bool esoc;
+	int32_t stub_res6_rel6;
+	char *external_dif;
+	int32_t thread_cmds;
+	int32_t ramd_threading;
+	int32_t p_type;
+	int32_t global_ramdisc;
+	char *ramdisc_size;
+	int32_t ramdisc_blocksize;
+	int32_t num_luns;
+
 	uint8_t ocs_req_fw_upgrade;
+	uint8_t ocs_req_fw_reset;
 	uint8_t enable_auto_recovery;
 	uint16_t sw_feature_cap;
+	int32_t dif_separate;
+	int32_t watchdog_timeout;
+	int32_t tow_feature;
+	int32_t tow_io_size;
+	int32_t tow_xri_cnt;
 
+	uint64_t ticks_report_unrecoverable_err;
+	uint64_t ticks_trigger_fw_error;
 	ocs_textbuf_t ddump_saved;
 	uint8_t ddump_state;
 	bool ddump_pre_alloc;
 	struct ocs_fw_dump fw_dump;
 	int ddump_max_size;
+	int32_t ddump_saved_size;
 
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
+#if !defined(OCS_USPACE)
 	unsigned long ocs_pci_flags;
 	struct work_struct pci_dev_disable;
 #endif
@@ -203,12 +230,13 @@ struct ocs_s {
 	uint8_t enable_fw_ag_rsp;
 
 	uint8_t enable_bbcr;
-	uint16_t watchdog_timeout;
+	uint8_t enable_tdz;
 	const char *sliport_pause_errors;
-#ifdef OCS_USPACE_SPDK
+
+#if defined(OCS_USPACE_SPDK) || defined(OCS_USPACE_SPDK_UPSTREAM)
 	bool dont_linkup;
-	uint64_t scsi_lcore_id;
 #endif
+	uint64_t scsi_lcore_id;
 
 	/* Auth cfg data store */
 	ocs_dma_t			auth_cfg_mem;
@@ -217,6 +245,44 @@ struct ocs_s {
 	struct ocs_auth_cfg_info	auth_cfg_info;
 	/* Lock used for safe access to cfg_page and cfg_info */
 	ocs_lock_t			auth_cfg_lock;
+
+	int32_t hbs_bufsize;
+	
+	/* user_* will be used over driver module param values. */
+	uint8_t user_ini_fc_types;
+	uint8_t user_tgt_fc_types;
+	char	user_queue_topology[1024];
+	char	user_filter_def[1024];
+	bool	update_protocols;
+	bool 	early_port_type_stored;
+	bool 	need_reset;
+
+	void    *nvme_args;
+
+#ifdef OCS_GEN_ABORTS
+	bool				gen_aborts;
+	bool				gen_single_abort;
+	uint8_t				duplicate_aborts;
+	uint64_t			gen_abort_interval_msecs;
+	ocs_thread_t			abts_gen_thread;
+#endif
+
+#if !defined(OCS_USPACE)
+	bool				uapi_enable;
+	bool				uapi_rdy;
+	uint64_t			uapi_req_idx;
+	ocs_lock_t			uapi_list_lock;
+	uint32_t			uapi_num_req;
+	uint32_t			uapi_num_rsp;
+	ocs_list_t			uapi_req_q;
+	ocs_list_t			uapi_rsp_pend_list;
+	ocs_wait_queue_t		uapi_req_rdy;
+	ocs_timer_t			uapi_timer;
+	ocs_pool_t			*uapi_mmap_tag_pool;
+	struct ocs_uapi_hw_port_init_args *uapi_nvme_args;
+	struct file			*userapp_handle;
+	ocs_uapi_unknown_frame_callback unknown_frame_cb;
+#endif
 };
 
 #define ocs_is_fc_initiator_enabled()		(ocs->enable_ini)
@@ -229,7 +295,7 @@ struct ocs_s {
 static inline void
 ocs_device_lock_init(ocs_t *ocs)
 {
-	ocs_rlock_init(ocs, &ocs->lock, "ocsdevicelock");
+	ocs_rlock_init(ocs, &ocs->lock, OCS_LOCK_ORDER_DEVICE, "ocsdevicelock");
 }
 
 static inline void
@@ -278,14 +344,14 @@ extern ocs_t *ocs_get_instance(uint32_t index);
 extern int32_t ocs_get_bus_dev_func(ocs_t *ocs, uint8_t* bus, uint8_t* dev, uint8_t* func);
 
 static inline ocs_io_t *
-ocs_io_alloc(ocs_t *ocs, ocs_io_pool_type_e pool_type)
+ocs_io_alloc(ocs_t *ocs, ocs_io_pool_type_e pool_type, uint32_t eq_idx)
 {
 	ocs_io_t *io;
 
 	if (pool_type == OCS_IO_POOL_ELS)
-		io = ocs_io_pool_io_alloc(ocs->xport->els_io_pool);
+		io = ocs_io_pool_io_alloc(ocs->xport->els_io_pool, eq_idx);
 	else
-		io = ocs_io_pool_io_alloc(ocs->xport->io_pool);
+		io = ocs_io_pool_io_alloc(ocs->xport->io_pool, eq_idx);
 
 	if (io)
 		io->io_pool_type = pool_type;
@@ -296,14 +362,13 @@ ocs_io_alloc(ocs_t *ocs, ocs_io_pool_type_e pool_type)
 static inline void
 ocs_io_free(ocs_t *ocs, ocs_io_t *io)
 {
-	ocs_assert(io->io_type != OCS_IO_TYPE_MAX);
- 
 	/* Release to respective IO pool based on the type */
 	if (io->io_pool_type == OCS_IO_POOL_ELS)
 		ocs_io_pool_io_free(ocs->xport->els_io_pool, io);
 	else
 		ocs_io_pool_io_free(ocs->xport->io_pool, io);
 }
+
 static inline bool
 ocs_bbcr_enabled(ocs_t *ocs)
 {
@@ -314,25 +379,25 @@ ocs_bbcr_enabled(ocs_t *ocs)
 static inline bool
 ocs_tgt_nvme_enabled(ocs_t *ocs)
 {
-	return ((ocs->tgt_fc_types & OCS_TARGET_TYPE_NVME && ocs->enable_tgt) ? 1 : 0);
+	return ((ocs->tgt_fc_types & OCS_TARGET_TYPE_NVME && ocs->enable_tgt) ? TRUE : FALSE);
 }
 
 static inline bool
 ocs_tgt_scsi_enabled(ocs_t *ocs)
 {
-	return ((ocs->tgt_fc_types & OCS_TARGET_TYPE_FCP && ocs->enable_tgt) ? 1 : 0);
+	return ((ocs->tgt_fc_types & OCS_TARGET_TYPE_FCP && ocs->enable_tgt) ? TRUE : FALSE);
 }
 
 static inline bool
 ocs_ini_nvme_enabled(ocs_t *ocs)
 {
-	return ((ocs->ini_fc_types & OCS_INITIATOR_TYPE_NVME && ocs->enable_ini) ? 1 : 0);
+	return ((ocs->ini_fc_types & OCS_INITIATOR_TYPE_NVME && ocs->enable_ini) ? TRUE : FALSE);
 }
 
 static inline bool
 ocs_ini_scsi_enabled(ocs_t *ocs)
 {
-	return ((ocs->ini_fc_types & OCS_INITIATOR_TYPE_FCP && ocs->enable_ini) ? 1 : 0);
+	return ((ocs->ini_fc_types & OCS_INITIATOR_TYPE_FCP && ocs->enable_ini) ? TRUE : FALSE);
 }
 
 static inline bool
@@ -353,15 +418,38 @@ ocs_dual_protocol_enabled(ocs_t *ocs)
 	return (ocs_nvme_protocol_enabled(ocs) && ocs_scsi_protocol_enabled(ocs));
 }
 
+static inline bool
+ocs_tdz_enabled(ocs_t *ocs)
+{
+	return (ocs->enable_tdz ? TRUE: FALSE);
+}
+
 extern void ocs_stop_event_processing(ocs_os_t *ocs_os);
 extern int32_t ocs_start_event_processing(ocs_os_t *ocs_os);
 extern void ocs_notify_link_state_change(ocs_t *ocs, uint8_t link_state);
+extern void ocs_notify_peer_zone_rscn(ocs_t *ocs, uint32_t fc_id);
 
 extern uint16_t ocs_sriov_get_max_nr_vfs(ocs_t *ocs);
 extern uint16_t ocs_sriov_get_nr_vfs(ocs_t *ocs);
+extern bool ocs_sriov_config_validate(ocs_t *ocs);
 extern bool ocs_sriov_config_required(ocs_t *ocs);
 extern int32_t ocs_set_soft_wwpn(ocs_t *ocs, const char *buf, size_t count);
 extern int32_t ocs_set_soft_wwnn(ocs_t *ocs, const char *buf, size_t count);
+
+extern ocs_t* ocs_get_instance(uint32_t index);
+static inline ocs_t* ocs_get_next_active_instance(uint32_t index)
+{
+	ocs_t * ocs;
+	do {
+		ocs = ocs_get_instance(index++);
+	} while (!ocs && index < MAX_OCS_DEVICES);
+	return ocs;
+}
+
+#define for_each_active_ocs(i, ocs)				\
+	for (i = 0;						\
+	    (ocs = ocs_get_next_active_instance(i));		\
+	    (i = ocs->instance_index + 1))
 
 /* useful for logging WWN */
 #define WWN_FMT         "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x"

@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -45,12 +47,13 @@
 #include <stdarg.h>
 #include <sys/user.h>
 
+#if defined(ENABLE_DMABUF_SLAB)
+
 #include <dslab.h>
 
+#define DSLAB_MIN_ALIGN	16
 #define roundup(x,y)	((((x) + (y) - 1) / (y)) * (y))
 #define min(a,b)		((a) < (b) ? (a) : (b))
-
-#define DSLAB_MIN_ITEM_LEN		64
 
 static int dslab_entry_init(dslab_dir_t *dir, dslab_entry_t *entry, uint32_t item_len);
 static void dslab_entry_free(dslab_entry_t *entry);
@@ -156,8 +159,15 @@ dslab_slab_new(dslab_entry_t *entry)
 	assert(entry->dir);
 
 	dir = entry->dir;
+
+	if (entry->item_len > dir->max_item_len) {
+		printf("Error: %s: DSLAB requested item length (%d) > max. item length (%d)\n",
+			__func__, entry->item_len, dir->max_item_len);
+		return -1;
+	}
+
 	reqsize = roundup(entry->item_len * 64, PAGE_SIZE);
-	reqsize  = min(reqsize, 1*1024*1024);
+	reqsize = min(reqsize, dir->max_item_len);
 
 	/* Allocate a dslab_t */
 	dslab = zalloc(sizeof(*dslab));
@@ -234,15 +244,15 @@ dslab_item_init(dslab_t *dslab, dslab_item_t *item, uintptr_t paddr, void *vaddr
 }
 
 dslab_item_t *
-dslab_item_new(dslab_dir_t *dir, uint32_t len)
+dslab_item_new(dslab_dir_t *dir, uint32_t len, uint32_t align)
 {
 	dslab_item_t *item = NULL;
 	dslab_entry_t *entry;
 
 	pthread_mutex_lock(&dir->lock);
 
-	/* round up len to multiple of 16 */
-	len = roundup(len, 16);
+	/* round up len by align */
+	len = roundup(len, align);
 
 	/* adjust for minimum length */
 	if (len < dir->min_item_len) {
@@ -443,11 +453,11 @@ int main(int argc, char *argv[])
 	if (dir == NULL) {
 		printf ("dslab_dir_new failed\n");
 	}
-	item[0] = dslab_item_new(dir, 128);
+	item[0] = dslab_item_new(dir, 128, DSLAB_MIN_ALIGN);
 	if (item[0] == NULL) printf("dslab_item_alloc() failed\n");
-	item[1] = dslab_item_new(dir, 272);
+	item[1] = dslab_item_new(dir, 272, DSLAB_MIN_ALIGN);
 	if (item[1] == NULL) printf("dslab_item_alloc() failed\n");
-	item[2] = dslab_item_new(dir, 128);
+	item[2] = dslab_item_new(dir, 128, DSLAB_MIN_ALIGN);
 	if (item[2] == NULL) printf("dslab_item_alloc() failed\n");
 	dslab_item_del(item[0]);
 	dslab_item_del(item[1]);
@@ -460,3 +470,4 @@ int main(int argc, char *argv[])
 }
 #endif
 
+#endif // if defined(ENABLE_DMABUF_SLAB)

@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,8 +50,52 @@ extern int32_t ocs_dispatch_unsolicited_bls(ocs_node_t *node, ocs_hal_sequence_t
 extern void ocs_domain_hold_frames(ocs_domain_t *domain);
 extern void ocs_domain_accept_frames(ocs_domain_t *domain);
 extern void ocs_seq_coalesce_cleanup(ocs_hal_io_t *hio, uint8_t abort_io);
+extern ocs_hal_sequence_t* ocs_frame_next(ocs_list_t *pend_list, ocs_lock_t *list_lock);
 extern int32_t ocs_sframe_send_bls_acc(ocs_node_t *node, ocs_hal_sequence_t *seq);
 extern int32_t ocs_sframe_send_bls_rjt(ocs_node_t *node, ocs_hal_sequence_t *seq);
-extern ocs_hal_sequence_t* ocs_frame_next(ocs_list_t *pend_list, ocs_lock_t *list_lock);
+extern int32_t ocs_sframe_send_logo(ocs_node_t *node, uint32_t s_id, uint32_t d_id,
+				    uint16_t ox_id, uint16_t rx_id);
+extern int32_t ocs_sframe_send_abts(ocs_node_t *node, ocs_hal_sequence_t *seq);
+extern void ocs_port_owned_abort(ocs_t *ocs, ocs_hal_io_t *hio);
+extern int32_t ocs_sframe_send_ls_acc(ocs_node_t *node, uint32_t s_id, uint32_t d_id,
+			uint16_t ox_id, uint16_t rx_id);
+extern int32_t ocs_sframe_send_prlo_acc(ocs_node_t *node, uint32_t s_id, uint32_t d_id,
+			uint16_t ox_id, uint16_t rx_id, uint8_t fc_type);
 
+typedef struct ocs_sframe_args_s {
+	uint8_t r_ctl;
+	uint8_t info;
+	uint32_t f_ctl;
+	uint8_t type;
+	void *payload;
+	size_t payload_len;
+	uint32_t s_id;
+	uint32_t d_id;
+	uint16_t ox_id;
+	uint16_t rx_id;
+	void (*callback)(ocs_hal_t *hal, int32_t status, void *arg);
+	void *cb_arg;
+} ocs_sframe_args_t;
+
+extern int32_t ocs_sframe_common_send(ocs_node_t *node, ocs_sframe_args_t *sframe_args);
+
+#define frame_printf(ocs, hdr, fmt, ...) \
+	do { \
+		char s_id_text[16]; \
+		ocs_node_fcid_display(fc_be24toh((hdr)->s_id), s_id_text, sizeof(s_id_text)); \
+		ocs_log_debug(ocs, "[%06x.%s] %x%x/%02x %04x/%04x: " fmt, fc_be24toh((hdr)->d_id), \
+			s_id_text, (hdr)->r_ctl, (hdr)->info, (hdr)->type, \
+			ocs_be16toh((hdr)->ox_id), ocs_be16toh((hdr)->rx_id), ##__VA_ARGS__); \
+	} while(0)
+
+#define frame_printf_ratelimited(ocs, hdr, fmt, ...) \
+	do { \
+		char s_id_text[16]; \
+		ocs_node_fcid_display(fc_be24toh((hdr)->s_id), s_id_text, sizeof(s_id_text)); \
+		ocs_log_debug_ratelimited(ocs, "[%06x.%s] %x%x/%02x %04x/%04x: " fmt, fc_be24toh((hdr)->d_id), \
+			s_id_text, (hdr)->r_ctl, (hdr)->info, (hdr)->type, \
+			ocs_be16toh((hdr)->ox_id), ocs_be16toh((hdr)->rx_id), ##__VA_ARGS__); \
+	} while(0)
+extern int32_t
+ocs_sframe_common_send(ocs_node_t *node, ocs_sframe_args_t *sframe_args);
 #endif // __OSC_UNSOL_H__

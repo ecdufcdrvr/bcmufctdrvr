@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,6 +41,7 @@
 #if !defined(__OCS_MGMT_H__)
 #define __OCS_MGMT_H__
 
+#include "ocs_ioctl.h"
 #include "ocs_textbuf.h"
 
 #define OCS_MGMT_MAX_NAME 128
@@ -48,12 +51,10 @@
 #define MGMT_MODE_WR	2
 #define MGMT_MODE_EX	1
 #define MGMT_MODE_RW	(MGMT_MODE_RD | MGMT_MODE_WR)
+#define MGMT_MODE_MASK  (MGMT_MODE_RD | MGMT_MODE_WR | MGMT_MODE_EX)
+#define MGMT_MODE_MAX   (MGMT_MODE_MASK + 1)
 
 #define OCS_ISCSI_MGMT_CMD_PARAMS_LEN 256
-
-#define SFP_PAGE_SIZE	128
-#define SFP_PAGE_A0	0xa0
-#define SFP_PAGE_A2	0xa2
 
 /*
  * This structure is used in constructing a table of internal handler functions.
@@ -87,7 +88,6 @@ typedef struct ocs_mgmt_functions_s {
 	ocs_mgmt_exec_handler		exec_handler;
 } ocs_mgmt_functions_t;
 
-
 // Helper functions
 extern void ocs_mgmt_start_section(ocs_textbuf_t *textbuf, const char *name, int index);
 extern void ocs_mgmt_start_unnumbered_section(ocs_textbuf_t *textbuf, const char *name);
@@ -99,14 +99,35 @@ __attribute__((format(printf,4,5)))
 extern void ocs_mgmt_emit_int(ocs_textbuf_t *textbuf, int access, const char *name, const char *fmt, ...);
 extern void ocs_mgmt_emit_boolean(ocs_textbuf_t *textbuf, int access, const char *name, const int value);
 extern int parse_wwn(char *wwn_in, uint64_t *wwn_out);
+extern void format_wwn(uint64_t wwn_in, char *wwn_out);
 
 // Top level management functions - called by the ioctl
 extern void ocs_mgmt_get_list(ocs_t *ocs, ocs_textbuf_t *textbuf);
 extern void ocs_mgmt_get_all(ocs_t *ocs, ocs_textbuf_t *textbuf);
+extern void ocs_mgmt_get_hba_info(ocs_t *ocs, ocs_textbuf_t *textbuf);
 extern int ocs_mgmt_get(ocs_t *ocs, char *name, ocs_textbuf_t *textbuf);
 extern int ocs_mgmt_set(ocs_t *ocs, char *name, char *value);
 extern int ocs_mgmt_exec(ocs_t *ocs, char *action, void *arg_in, uint32_t arg_in_length,
-		void *arg_out, uint32_t arg_out_length);
+			 void *arg_out, uint32_t arg_out_length);
+
+extern void ocs_mgmt_driver_list(ocs_textbuf_t *textbuf, void *driver);
+extern void ocs_mgmt_driver_get_all(ocs_textbuf_t *textbuf, void *driver);
+extern int ocs_mgmt_driver_get(ocs_textbuf_t *textbuf, char *parent, char *name, void *driver);
+extern int ocs_mgmt_driver_exec(char *parent, char *action, void *arg_in, uint32_t arg_in_length,
+				void *arg_out, uint32_t arg_out_length, void *driver);
+
+extern int ocs_run_link_loopback(ocs_t *ocs, void *tx_buf, uint32_t tx_buflen,
+				 void *rx_buf, uint32_t rx_buflen, uint32_t num_frames);
+extern int ocs_sfp_fw_upgrade(ocs_t *ocs, void *arg_in, uint32_t arg_in_len,
+                     void *arg_out, uint32_t arg_out_len);
+extern int ocs_run_pci_loopback(ocs_t *ocs, void *tx_buf, uint32_t tx_buflen, void *rx_buf, uint32_t rx_buflen);
+extern int ocs_set_loopback_mode(ocs_t *ocs, uint32_t arg_in);
+extern int ocs_set_fc_trunk_mode(ocs_t *ocs, uint32_t trunk_mode);
+extern int ocs_get_fc_trunk_info(ocs_t *ocs, uint32_t *trunk_config);
+extern void ocs_capture_ras_global_params(void);
+extern int ocs_ras_collect_diag_logs(ocs_t *ocs, void *tx_buf, uint32_t tx_buflen, void *rx_buf, uint32_t rx_buflen);
+extern int ocs_get_dual_dump_state(ocs_t *ocs, uint32_t *dump_state);
+extern int32_t ocs_read_temperature_lancer(ocs_t *ocs, void *buf, uint32_t buf_len);
 extern int32_t ocs_mgmt_get_sfp(ocs_t *ocs, uint16_t page, void *buf, uint32_t buf_len);
 
 #endif

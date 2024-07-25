@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2020 Broadcom. All Rights Reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,9 +40,9 @@
 
 #include "ocs.h"
 #include "ocs_ddump.h"
+#include "ocs_compat.h"
 
 #define DEFAULT_SAVED_DUMP_SIZE		(4*1024*1024)
-#define OCS_DDUMP_MAX_SIZE		(32*1024*1024)
 
 void hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal);
 
@@ -80,7 +82,7 @@ ocs_ddump_sli4_queue(ocs_textbuf_t *textbuf, const char *name, ocs_hal_t *hal,
 		ocs_ddump_value(textbuf, "proc_limit", "%d", q->proc_limit);
 		ocs_ddump_value(textbuf, "posted_limit", "%d", q->posted_limit);
 		ocs_ddump_value(textbuf, "max_num_processed", "%d", q->max_num_processed);
-		ocs_ddump_value(textbuf, "max_process_time", "%ld", q->max_process_time);
+		ocs_ddump_value(textbuf, "max_process_time", "%ld", (long)q->max_process_time);
 
 		/* queue-specific information */
 		switch (q->type) {
@@ -186,6 +188,24 @@ ocs_ddump_sli(ocs_textbuf_t *textbuf, sli4_t *sli4)
 {
 	sli4_sgl_chaining_params_t *cparams = &sli4->config.sgl_chaining_params;
 	const char *p;
+	int i;
+	sli4_reg_t sli_reg;
+
+	ocs_ddump_section(textbuf, "sli4_register_set_dump", 0);
+
+	for (i = 0 ; i < SLI4_REG_MAX; i++) {
+		char buf[256] = {0,};
+
+		sli_reg_get(sli4, i, &sli_reg);
+		if ((UINT32_MAX != sli_reg.rset) && (UINT32_MAX != sli_reg.off)) {
+			ocs_snprintf(buf, sizeof(buf), "%x set: 0x%x offset: 0x%x value: %08x",
+					i, sli_reg.rset, sli_reg.off,
+					ocs_reg_read32(sli4->os, sli_reg.rset, sli_reg.off));
+                	ocs_ddump_value(textbuf, "register", "%s", buf);
+		}
+	}
+
+	ocs_ddump_endsection(textbuf, "sli4_register_set_dump", 0);
 
 	ocs_ddump_section(textbuf, "sli4", 0);
 
@@ -208,6 +228,9 @@ ocs_ddump_sli(ocs_textbuf_t *textbuf, sli4_t *sli4)
 		break;
 	case SLI4_ASIC_TYPE_LANCERG7:
 		p = "LancerG7";
+		break;
+	case SLI4_ASIC_TYPE_LANCERG7PLUS:
+		p = "LancerG7 PLUS";
 		break;
 	default:
 		p = "Unknown";
@@ -239,6 +262,9 @@ ocs_ddump_sli(ocs_textbuf_t *textbuf, sli4_t *sli4)
 		break;
 	case SLI4_ASIC_REV_D0:
 		p = "D0";
+		break;
+	case SLI4_ASIC_REV_T:
+		p = "T";
 		break;
 	default:
 		p = "Unknown";
@@ -333,6 +359,7 @@ ocs_ddump_hal_io(ocs_textbuf_t *textbuf, ocs_hal_io_t *io)
 
 	/* just to make it obvious, display abort bit from tag */
 	ocs_ddump_value(textbuf, "abort_issued", "0x%x", io->abort_issued);
+	ocs_ddump_value(textbuf, "abort_completed", "0x%x", io->abort_completed);
 	ocs_ddump_value(textbuf, "wq_index", "%d", (io->wq == NULL ? 0xffff : io->wq->instance));
 	ocs_ddump_value(textbuf, "type", "%d", io->type);
 	ocs_ddump_value(textbuf, "xbusy", "%d", io->xbusy);
@@ -506,6 +533,7 @@ ocs_ddump_hal(ocs_textbuf_t *textbuf, ocs_hal_t *hal, uint32_t flags, uint32_t q
 	ocs_ddump_value(textbuf, "n_rq", "%d", hal->rq_count);
 	ocs_ddump_value(textbuf, "n_wq", "%d", hal->wq_count);
 	ocs_ddump_value(textbuf, "n_sgl", "%d", hal->config.n_sgl);
+	ocs_ddump_value(textbuf, "watchdog_timeout", "%d", hal->watchdog_timeout);
 
 	ocs_ddump_sli(textbuf, &hal->sli);
 
@@ -675,6 +703,43 @@ hal_queue_ddump(ocs_textbuf_t *textbuf, ocs_hal_t *hal)
 	ocs_ddump_endsection(textbuf, "hal_queue", 0);
 }
 
+#define OCS_PCI_CONFIG_SPACE_SIZE	4096
+
+void
+ocs_ddump_pci_config_space(ocs_t *ocs, ocs_textbuf_t *textbuf)
+{
+	void *config_space;
+	uint32_t offset;
+
+	config_space = ocs_malloc(ocs, OCS_PCI_CONFIG_SPACE_SIZE, OCS_M_NOWAIT | OCS_M_ZERO);
+	if (!config_space) {
+		ocs_log_err(ocs, "failed to allocate memory\n");
+		return;
+	}
+
+	
+	ocs_ddump_section(textbuf, "PCI config space data", ocs->instance_index);
+	for (offset = 0; offset < OCS_PCI_CONFIG_SPACE_SIZE; offset += sizeof(uint32_t)) {
+		*((uint32_t*)(config_space + offset)) = ocs_config_read32(ocs, offset);
+	}
+
+	ocs_ddump_buffer(textbuf, "PCI config space data", ocs->instance_index,
+			config_space, OCS_PCI_CONFIG_SPACE_SIZE);
+
+	ocs_ddump_endsection(textbuf, "PCI config space data", ocs->instance_index);
+
+	ocs_ddump_section(textbuf, "PCI bar map dump ", ocs->instance_index);
+
+	/* Dump BAR0 address space */
+	if (ocs->ocs_os.bars[0].vaddr) {
+		ocs_ddump_buffer(textbuf, "PCI_bar_address_map_dump_BAR0", ocs->instance_index,
+				ocs->ocs_os.bars[0].vaddr, ocs->ocs_os.bars[0].size);
+	}
+	ocs_ddump_endsection(textbuf, "PCI bar map dump", ocs->instance_index);
+
+	ocs_free(ocs, config_space, OCS_PCI_CONFIG_SPACE_SIZE);
+}
+
 /**
  * @brief Initiate ddump
  *
@@ -707,6 +772,9 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 	ocs_ddump_section(textbuf, "ocs_os", ocs->instance_index);
 	ocs_ddump_value(textbuf, "numa_node", "%d", ocs->ocs_os.numa_node);
 
+	/* PCI config dump */
+	ocs_ddump_pci_config_space(ocs, textbuf);
+
 	ocs_ddump_endsection(textbuf, "ocs_os", ocs->instance_index);
 
 	ocs_ddump_value(textbuf, "drv_name", "%s", DRV_NAME);
@@ -717,24 +785,20 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 	ocs_ddump_value(textbuf, "enable_hlm", "%d", ocs->enable_hlm);
 	ocs_ddump_value(textbuf, "hlm_group_size", "%d", ocs->hlm_group_size);
 	ocs_ddump_value(textbuf, "fw_dump_type", "%d", ocs->fw_dump.type);
+	ocs_ddump_value(textbuf, "max_isr_time_msec", "%d", ocs->max_isr_time_msec);
 
 	/* Dump XPORT data */
 	if (xport) {
+		ocs_ddump_value(textbuf, "lip_count", "%d", xport->lip_count);
 		ocs_ddump_value(textbuf, "nodes_count", "%d", xport->nodes_count);
 		ocs_ddump_value(textbuf, "io_alloc_failed_count", "%d", ocs_atomic_read(&xport->io_alloc_failed_count));
-#if !defined(OCSU_FC_RAMD) && !defined(OCSU_FC_WORKLOAD) && !defined(OCS_USPACE_SPDK)
-		ocs_ddump_value(textbuf, "io_active_count", "%lld", percpu_counter_sum_positive(&xport->io_active_count));
-		ocs_ddump_value(textbuf, "io_total_alloc", "%lld", percpu_counter_sum_positive(&xport->io_total_alloc));
-		ocs_ddump_value(textbuf, "io_total_free", "%lld", percpu_counter_sum_positive(&xport->io_total_free));
-#else
 		ocs_ddump_value(textbuf, "io_active_count", "%d", ocs_atomic_read(&xport->io_active_count));
 		ocs_ddump_value(textbuf, "io_total_alloc", "%d", ocs_atomic_read(&xport->io_total_alloc));
 		ocs_ddump_value(textbuf, "io_total_free", "%d", ocs_atomic_read(&xport->io_total_free));
-#endif
 		ocs_ddump_value(textbuf, "io_pending_count", "%d", ocs_atomic_read(&xport->io_pending_count));
 		ocs_ddump_value(textbuf, "io_total_pending", "%d", ocs_atomic_read(&xport->io_total_pending));
 		ocs_ddump_value(textbuf, "io_pending_recursing", "%d", ocs_atomic_read(&xport->io_pending_recursing));
-		ocs_ddump_value(textbuf, "max_isr_time_msec", "%d", ocs->max_isr_time_msec);
+
 		for (i = 0; i < SLI4_MAX_FCFI; i++) {
 			ocs_lock(&xport->fcfi[i].pend_frames_lock);
 			if (!ocs_list_empty(&xport->fcfi[i].pend_frames)) {
@@ -795,7 +859,7 @@ ocs_ddump(ocs_t *ocs, ocs_textbuf_t *textbuf, uint32_t flags, uint32_t qentries)
 			ocs_ddump_value(textbuf, "name", "%s", l->name);
 			ocs_ddump_value(textbuf, "inuse", "%d", l->inuse);
 			ocs_ddump_value(textbuf, "caller", "%p", l->caller[0]);
-			ocs_ddump_value(textbuf, "pid", "%08x", l->pid.l);
+			ocs_ddump_value(textbuf, "pid", "%08x", l->pid.id);
 			ocs_ddump_endsection(textbuf, "lock", idx);
 			idx++;
 		}
@@ -878,7 +942,7 @@ ocs_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries)
 
 /**
  * @brief Set the driver dump state
- * 
+ *
  * Valid state changes
  * DDUMP_NONE ---> DDUMP_ALLOCATING
  * DDUMP_ALLOCATING --> DDUMP_ALLOCATED
@@ -973,7 +1037,7 @@ ocs_save_ddump_all(uint32_t flags, uint32_t qentries, uint32_t alloc_flag)
 	uint32_t i;
 	int32_t rc = 0;
 
-	for (i = 0; (ocs = ocs_get_instance(i)) != NULL; i++) {
+	for_each_active_ocs(i, ocs) {
 		rc = ocs_get_saved_ddump(ocs, flags, qentries, alloc_flag);
 		if (rc < 0) {
 			ocs_log_err(ocs, "save ddump failed\n");
@@ -995,7 +1059,7 @@ ocs_adapter_ddump_clear_and_save(ocs_t *ocs, uint8_t bus, uint8_t dev,
 	uint8_t other_bus, other_dev, other_func;
 	int32_t index = 0, rc = 0;
 
-	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+	for_each_active_ocs(index, other_ocs) {
 		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 		if ((bus == other_bus) && (dev == other_dev)) {
 			if (alloc_flag) {
@@ -1023,7 +1087,7 @@ ocs_adapter_ddump_clear_and_save(ocs_t *ocs, uint8_t bus, uint8_t dev,
 
 clear_ddump:
 	index = 0;
-	while ((other_ocs = ocs_get_instance(index++)) != NULL) {
+	for_each_active_ocs(index, other_ocs) {
 		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 		if ((bus == other_bus) && (dev == other_dev))
 			ocs_clear_saved_ddump(other_ocs);
@@ -1038,7 +1102,11 @@ ocs_get_saved_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries, uint32_t allo
 	int rc = 0;
 
 	if (alloc_flag && ocs_ddump_state_set(ocs, OCS_DDUMP_ALLOCATING)) {
-		ocs->ddump_max_size = OCS_DDUMP_MAX_SIZE;
+		if (sli_get_asic_type(&ocs->hal.sli) == SLI4_ASIC_TYPE_LANCERG7PLUS)
+			ocs->ddump_max_size = OCS_DDUMP_MAX_SIZE;
+		else
+			ocs->ddump_max_size = OCS_DDUMP_MAX_SIZE / 3;
+
 		ocs_log_debug(ocs, "Allocating driver dump buffer pool\n");
 		rc = ocs_textbuf_pool_alloc(ocs, &ocs->ddump_saved, ocs->ddump_max_size);
 		if (rc) {
@@ -1093,8 +1161,14 @@ ocs_adapter_save_ddump(ocs_t *ocs, uint32_t flags, uint32_t qentries, uint32_t a
 	uint8_t bus, dev, func;
 	uint8_t other_bus, other_dev, other_func;
 
+	/* Check if the device is initialized and attached */
+	if (!ocs->drv_ocs.attached) {
+		ocs_log_info(ocs, "ocs device not initialized yet, skip driver dump\n");
+		return rc;
+	}
+
 	ocs_get_bus_dev_func(ocs, &bus, &dev, &func);
-	for (i = 0; (other_ocs = ocs_get_instance(i)) != NULL; i++) {
+	for_each_active_ocs(i, other_ocs) {
 		ocs_get_bus_dev_func(other_ocs, &other_bus, &other_dev, &other_func);
 		if ((bus == other_bus) && (dev == other_dev)) {
 			if (!adapter_dump && (func != other_func))

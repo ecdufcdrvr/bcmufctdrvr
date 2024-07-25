@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2011-2015, Emulex
- * All rights reserved.
+ * BSD LICENSE
+ *
+ * Copyright (C) 2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -80,6 +82,8 @@ typedef struct ocs_s ocs_t;
 #include <semaphore.h>
 #include <execinfo.h>
 #include <linux/types.h>
+#include <stdbool.h>
+
 //TODO: include when user space NUMA is implemented
 //#include <numa.h>
 
@@ -103,7 +107,7 @@ typedef struct ocs_s ocs_t;
 typedef void * ocs_os_handle_t;
 
 #include "ocsu_ioctl.h"
-#ifdef OCS_USPACE_SPDK
+#if defined(OCS_USPACE_SPDK) || defined(OCS_USPACE_SPDK_UPSTREAM)
 #include "ocs_impl_spdk.h"
 #else
 #include "ocs_impl_uspace.h"
@@ -150,12 +154,11 @@ typedef void * ocs_os_handle_t;
 
 /* Per driver instance (ocs_t) definitions */
 #define OCS_MAX_DOMAINS			1		/* maximum number of domains */
-#define OCS_MAX_REMOTE_NODES		2048		/* maximum number of remote nodes */
 //#define OCS_DEBUG_MEMORY
 
 extern void ocs_print_stack(void);
 
-#define ocs_abort(...)			exit(-1)
+#define ocs_abort(...)			abort()
 
 /* These datatypes are used prolifically in the linux kernel */
 typedef uint8_t		u8;
@@ -189,6 +192,16 @@ static inline bool
 ocs_gpl_api_enabled(void)
 {
 #ifdef OCS_CONFIG_GPL_API
+	return true;
+#else
+	return false;
+#endif
+}
+
+static inline bool
+ocs_crypto_api_enabled(void)
+{
+#ifdef OCS_CONFIG_CRYPTO_API
 	return true;
 #else
 	return false;
@@ -418,6 +431,8 @@ static inline uint32_t ocs_swap16(uint16_t val)
 #define ocs_isdigit(c)			isdigit(c)
 #define ocs_isxdigit(c)			isxdigit(c)
 #define ocs_strdup			strdup
+#define ocs_scnprintf			ocs_snprintf
+#define ocs_time_after64(a, b)          ((__s64)((b) - (a)) < 0)
 
 extern uint64_t ocs_get_tsc(void);
 char *ocs_get_options(const char *str, int nints, int *ints);
@@ -436,7 +451,7 @@ char *ocs_get_options(const char *str, int nints, int *ints);
 
 #if !defined(OCS_USPACE_SPDK_UPSTREAM)
 /*
- * SPDK Upsream picks these defines (except for LOG_TEST)
+ * SPDK Upstream picks these defines (except for LOG_TEST)
  * from /usr/include/sys/syslog.h
  */
 #define LOG_CRIT	0
@@ -447,7 +462,7 @@ char *ocs_get_options(const char *str, int nints, int *ints);
 #define LOG_DEBUG	5
 #else
 #define LOG_WARN        LOG_WARNING
-#define LOG_TEST	LOG_WARNING
+#define LOG_TEST	LOG_DEBUG
 #endif
 
 extern const char *ocs_display_name(void *os);
@@ -457,12 +472,12 @@ extern int loglevel;
 
 extern void _ocs_log(void *os, const char *func, int line, const char *fmt, ...);
 
-#define ocs_log_crit(os, fmt, ...)      ocs_log(os, LOG_CRIT, "CRIT: " fmt, ##__VA_ARGS__);
-#define ocs_log_err(os, fmt, ...)       ocs_log(os, LOG_ERR, "ERR: " fmt, ##__VA_ARGS__);
-#define ocs_log_warn(os, fmt, ...)      ocs_log(os, LOG_WARN, "WARN: " fmt, ##__VA_ARGS__);
-#define ocs_log_info(os, fmt, ...)      ocs_log(os, LOG_INFO, fmt, ##__VA_ARGS__);
-#define ocs_log_test(os, fmt, ...)      ocs_log(os, LOG_TEST, "TEST: " fmt, ##__VA_ARGS__);
-#define ocs_log_debug(os, fmt, ...)     ocs_log(os, LOG_DEBUG, "DEBUG: " fmt, ##__VA_ARGS__);
+#define ocs_log_crit(os, fmt, ...)      ocs_log(os, LOG_CRIT, "CRIT: " fmt, ##__VA_ARGS__)
+#define ocs_log_err(os, fmt, ...)       ocs_log(os, LOG_ERR, "ERR: " fmt, ##__VA_ARGS__)
+#define ocs_log_warn(os, fmt, ...)      ocs_log(os, LOG_WARN, "WARN: " fmt, ##__VA_ARGS__)
+#define ocs_log_info(os, fmt, ...)      ocs_log(os, LOG_INFO, fmt, ##__VA_ARGS__)
+#define ocs_log_test(os, fmt, ...)      ocs_log(os, LOG_TEST, "TEST: " fmt, ##__VA_ARGS__)
+#define ocs_log_debug(os, fmt, ...)     ocs_log(os, LOG_DEBUG, "DEBUG: " fmt, ##__VA_ARGS__)
 
 #define ocs_log(os, level, fmt, ...) \
 	do { \
@@ -511,7 +526,7 @@ typedef struct {
 #endif
 	int32_t numa_node;
 
-#ifdef OCS_USPACE_SPDK
+#if defined(OCS_USPACE_SPDK) || defined(OCS_USPACE_SPDK_UPSTREAM)
 	uint64_t lcore_mask;
 	struct spdk_pci_device  *spdk_pdev;
 	char queue_topology[256];
@@ -530,6 +545,8 @@ typedef struct {
 #define OCS_M_ZERO	BIT(0)
 #define OCS_M_NOWAIT	BIT(1)
 #define OCS_M_NONUMA	BIT(2)
+
+#define OCS_M_FLAGS_NONE 0
 
 #ifdef OCS_DEBUG_MEMORY
 void ocs_track_memory_allocation(void* ptr, size_t size, uint8_t isDma, void*);
@@ -664,7 +681,7 @@ static inline uint32_t ocs_max_dma_alloc(ocs_os_handle_t os, size_t align)
  *
  * @return 0 on success, non-zero otherwise
  */
-extern int32_t ocs_dma_alloc(ocs_os_handle_t os, ocs_dma_t *dma, size_t size, size_t align);
+extern int32_t ocs_dma_alloc(ocs_os_handle_t os, ocs_dma_t *dma, size_t size, size_t align, uint8_t flags);
 
 /**
  * @ingroup os
@@ -730,9 +747,38 @@ ocs_mkpid(void)
 	return pid;
 }
 
+static inline bool ocs_intr_is_nvme(ocs_os_handle_t ocs_os, int eq_index) { return false; }
+
 /***************************************************************************
  * Locking
  */
+typedef enum {
+	OCS_LOCK_ORDER_DOMAIN_SM,
+	OCS_LOCK_ORDER_DEVICE,
+	OCS_LOCK_ORDER_NODE,
+	OCS_LOCK_ORDER_TGT_NODE,
+	OCS_LOCK_ORDER_ACTIVE_IOS,
+	OCS_LOCK_ORDER_XPORT_IO_PENDING,
+	OCS_LOCK_ORDER_IO_PENDING,      // needs to be ahead of HAL IO
+	OCS_LOCK_ORDER_HAL_IO,
+	OCS_LOCK_ORDER_HIO_TOW,
+	OCS_LOCK_ORDER_HIO,             // needs to be ahead of io_timed_wqe_lock
+	OCS_LOCK_ORDER_IO_TIMED_WQE,
+	OCS_LOCK_ORDER_FC_STATS,
+	OCS_LOCK_ORDER_HAL_CMD,
+	/* the following could have been assigned OCS_LOCK_ORDER_LAST, but we want
+	 * to ignore them in the release mode, so assign them a specific order here
+	 * so they can be ignored in the release mode but checked in the debug mode
+	 */
+	OCS_LOCK_ORDER_ABORT_IO_TIMED_WQE,
+	OCS_LOCK_ORDER_IO_POOL,
+	OCS_LOCK_ORDER_UAPI,
+
+	OCS_LOCK_ORDER_LAST = 31,
+	OCS_LOCK_ORDER_IGNORE = 32,
+	OCS_LOCK_ORDER_MAX
+} ocs_lock_order_e;
+
 
 /**
  * @ingroup os
@@ -756,10 +802,11 @@ typedef struct ocs_lock_s {
  * @brief Initialize a lock
  *
  * @param lock lock to initialize
+ * @param lock order: Note: This is NOP in uspace
  * @param name string identifier for the lock
  */
 static inline void
-ocs_lock_init(void *osarg, ocs_lock_t *lock, const char *name, ...)
+ocs_lock_init(void *osarg, ocs_lock_t *lock, ocs_lock_order_e order, const char *name, ...)
 {
 #if defined(ENABLE_LOCK_DEBUG)
 	ocs_os_t *os = osarg;
@@ -934,7 +981,7 @@ ocs_sem_v(ocs_sem_t *sem)
 	(void)sem_post(&sem->sem);
 }
 
-extern void ocs_rlock_init(ocs_t *ocs, ocs_rlock_t *lock, const char *name);
+extern void ocs_rlock_init(ocs_t *ocs, ocs_rlock_t *lock, ocs_lock_order_e order, const char *name);
 extern void ocs_rlock_free(ocs_rlock_t *lock);
 extern int32_t ocs_rlock_try(ocs_rlock_t *lock);
 extern int32_t ocs_rlock_try_timeout(ocs_rlock_t *lock, uint32_t timeout_ms);
@@ -1133,7 +1180,7 @@ typedef struct ocs_atomic_s {
 static inline void
 ocs_atomic_init(ocs_atomic_t *a, int v)
 {
-	ocs_lock_init(NULL, &a->lock, "atomic_lock");
+	ocs_lock_init(NULL, &a->lock, OCS_LOCK_ORDER_IGNORE, "atomic_lock");
 	a->value = v;
 }
 
@@ -1309,7 +1356,7 @@ static inline int32_t
 ocs_mqueue_init(ocs_os_handle_t os, ocs_mqueue_t *q)
 {
 	ocs_memset(q, 0, sizeof(*q));
-	ocs_lock_init(NULL, &q->lock, "mqueue_lock");
+	ocs_lock_init(NULL, &q->lock, OCS_LOCK_ORDER_IGNORE, "mqueue_lock");
 	ocs_sem_init(&q->prod_sem, 0, "mqueue_prod");
 	ocs_list_init(&q->queue, ocs_mqueue_hdr_t, link);
 	q->os = os;
@@ -1440,6 +1487,7 @@ struct ocs_thread_s  {
 	pid_t tid;				/*<< process ID */
 	uint32_t cpu_affinity;			/*<< cpu affinity */
 	void *arg;				/*<< pointer to thread argument */
+	bool created;
 	uint32_t dont_start:1,			/*<< don't start */
 		terminate_req:1;		/*<< terminate request */
 	ocs_sem_t sem;				/*<< start/stop semaphore */
@@ -1623,16 +1671,6 @@ extern void ocs_reg_write16(ocs_os_handle_t os, uint32_t rset, uint32_t off, uin
  */
 extern void ocs_reg_write8(ocs_os_handle_t os, uint32_t rset, uint32_t off, uint8_t val);
 
-
-/**
- * @ingroup os
- * @brief Return model string
- *
- * @param os OS specific handle or driver context
- */
-extern const char *ocs_pci_model(uint16_t vendor, uint16_t device);
-
-
 extern uint32_t ocs_instance(void *os);
 
 /***************************************************************************
@@ -1809,6 +1847,18 @@ ocs_get_os_ticks(void)
 
 /**
  * @ingroup os
+ * @brief Get the OS system ticks max value
+ *
+ * @return Max range of ticks value before overlap
+ */
+static inline uint64_t
+ocs_os_ticks_max(void)
+{
+	return UINT64_MAX;
+}
+
+/**
+ * @ingroup os
  * @brief Convert the OS system ticks to ms.
  *
  * @param number of ticks that have occured since the system booted.
@@ -1860,7 +1910,7 @@ static inline bool ocs_in_interrupt_context(void)
 	return FALSE;
 }
 
-#ifndef OCS_USPACE_SPDK
+#if !defined(OCS_USPACE_SPDK) && !defined(OCS_USPACE_SPDK_UPSTREAM)
 /**
  * @ingroup os
  * @brief Delay execution by the given number of micro-seconds
@@ -1907,6 +1957,8 @@ ocs_safe_snprintf(char *buf, int n, const char *format, ...)
 	return (length);
 
 }
+
+#define ____cacheline_aligned 
 
 #include "ocs_pool.h"
 #include "ocs_cbuf.h"
