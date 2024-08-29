@@ -123,6 +123,7 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 	uint32_t flags;
 	int port = 9000 + ocs->instance_index;
 	uint8_t unload = FALSE;
+	struct sigaction act;
 
 	ocs_log_debug(ocs, " %s started\n", mythread->name);
 
@@ -134,8 +135,16 @@ ocs_ioctl_server(ocs_thread_t *mythread)
 
 	/* Register signal handler for this threads quit request */
 	signal(SIGRTMIN, ioctl_sig_handler);
+
 	/* Make sure that system calls may be interrupted */
-	siginterrupt(SIGRTMIN, 1);
+	if (sigaction(SIGRTMIN, NULL, &act) == -1) {
+		return -1;
+	}
+
+	act.sa_flags &= ~SA_RESTART;
+	if (sigaction(SIGRTMIN, &act, NULL) == -1) {
+		return -1;
+	}
 
 	while (!unload && !ocs_thread_terminate_requested(mythread)) {
 		uint32_t i;
