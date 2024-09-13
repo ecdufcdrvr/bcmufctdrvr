@@ -40,9 +40,9 @@ rmmod uio_pci_generic uio 2>/dev/null
 # Load vfio driver and configure hugepages
 modprobe -v vfio_pci
 
-echo "10df e300" > /sys/bus/pci/drivers/vfio-pci/new_id # G6
-echo "10df f400" > /sys/bus/pci/drivers/vfio-pci/new_id # Prism
-echo "10df f500" > /sys/bus/pci/drivers/vfio-pci/new_id # Prism+
+echo "10df e300" > /sys/bus/pci/drivers/vfio-pci/new_id # LPe31000/LPe32000 Series Adapter
+echo "10df f400" > /sys/bus/pci/drivers/vfio-pci/new_id # LPe35000/LPe36000 Series Adapter
+echo "10df f500" > /sys/bus/pci/drivers/vfio-pci/new_id # LPe37000/LPe38000 Series Adapter
 
 echo 2048 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 echo 2048 > /sys/devices/system/node/node1/hugepages/hugepages-2048kB/nr_hugepages
